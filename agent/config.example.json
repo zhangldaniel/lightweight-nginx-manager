@@ -1,14 +1,14 @@
 {
-  "server_url": "https://nginx-manager.example.com",
-  "node_name": "edge-bj-01",
-  "hostname": "edge-bj-01.internal",
+  "server_url": "http://192.0.2.20:8443",
+  "node_name": "edge-a-01",
+  "hostname": "edge-a-01.example.test",
   "labels": {
-    "region": "beijing",
+    "region": "region-a",
     "environment": "production"
   },
   "ca_file": null,
   "tls_skip_verify": false,
-  "allow_insecure_http": false,
+  "allow_insecure_http": true,
   "poll_interval": 3,
   "heartbeat_interval": 20,
   "api_timeout": 30,

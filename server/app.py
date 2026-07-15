@@ -964,7 +964,7 @@ def create_app(
     settings.validate()
     authenticate_ldap = ldap_authenticator or _authenticate_ldap
     database = Database(settings.db_path)
-    api = FastAPI(title="Nginx Manager", version="0.3.6", docs_url=None, redoc_url=None, openapi_url=None)
+    api = FastAPI(title="Nginx Manager", version="0.3.7", docs_url=None, redoc_url=None, openapi_url=None)
     api.state.settings = settings
     api.state.database = database
     secure_session_cookie = "__Host-nginx_manager_session"

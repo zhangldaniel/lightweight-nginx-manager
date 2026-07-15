@@ -25,6 +25,7 @@ NODE_NAME="$(hostname -s 2>/dev/null || hostname)"
 LABELS=""
 CA_SOURCE=""
 TLS_SKIP_VERIFY="0"
+ALLOW_INSECURE_HTTP="0"
 NGINX_BINARY=""
 NGINX_ROOT="/etc/nginx"
 NGINX_CONFIG="/etc/nginx/nginx.conf"
@@ -69,10 +70,10 @@ trap cleanup EXIT
 usage() {
   cat <<'USAGE'
 用法：
-  sudo ./deploy/install-agent.sh --server <HTTPS地址> [选项]
+  sudo ./deploy/install-agent.sh --server <HTTP(S)地址> [选项]
 
 选项：
-  --server <URL>       控制端地址，例如 https://nginx-manager.example.com（必填）
+  --server <URL>       控制端地址，例如 http://192.0.2.20:8443（必填）
   --node-name <名称>   节点名称，默认当前短主机名
   --labels <键值>      逗号分隔标签，例如 env=prod,region=shanghai
   --ca-file <路径>     自签控制端 CA；公共 CA 证书不需要
@@ -410,14 +411,23 @@ prepare_managed_directories() {
 }
 
 validate_server_url() {
-  "${PYTHON_BIN}" - "${SERVER_URL}" <<'PY' || exit 1
+  local scheme
+  scheme="$("${PYTHON_BIN}" - "${SERVER_URL}" <<'PY'
 import sys
 from urllib.parse import urlparse
 value = urlparse(sys.argv[1])
-if value.scheme != "https" or not value.netloc or value.username or value.password or value.query or value.fragment or value.path not in ("", "/"):
-    print("错误：控制端必须是无用户名、密码、query 和 fragment 的 HTTPS URL", file=sys.stderr)
+if value.scheme not in {"http", "https"} or not value.netloc or value.username or value.password or value.query or value.fragment or value.path not in ("", "/"):
+    print("错误：控制端必须是无用户名、密码、query 和 fragment 的 HTTP(S) URL", file=sys.stderr)
     raise SystemExit(1)
+print(value.scheme)
 PY
+)" || exit 1
+  if [[ "${scheme}" == "http" ]]; then
+    [[ "${TLS_SKIP_VERIFY}" != "1" && -z "${CA_SOURCE}" ]] || \
+      die "HTTP 控制端不能使用 --ca-file 或 --insecure-skip-tls-verify"
+    ALLOW_INSECURE_HTTP="1"
+    log "警告：Agent 将通过未加密 HTTP 连接控制端，仅应在隔离且可信的管理网使用"
+  fi
 }
 
 ensure_identity_user() {
@@ -430,7 +440,9 @@ ensure_identity_user() {
 write_config() {
   local ca_target
   ca_target=""
-  if [[ "${TLS_SKIP_VERIFY}" == "1" ]]; then
+  if [[ "${ALLOW_INSECURE_HTTP}" == "1" ]]; then
+    rm -f -- "${ETC_DIR}/ca.crt"
+  elif [[ "${TLS_SKIP_VERIFY}" == "1" ]]; then
     log "警告：已跳过控制端 TLS 身份校验，仅应在可信内网使用"
   elif [[ -n "${CA_SOURCE}" ]]; then
     [[ -f "${CA_SOURCE}" ]] || die "CA 文件不存在"
@@ -441,7 +453,7 @@ write_config() {
   fi
 
   "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${LABELS}" \
-    "${ca_target}" "${TLS_SKIP_VERIFY}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
+    "${ca_target}" "${TLS_SKIP_VERIFY}" "${ALLOW_INSECURE_HTTP}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
     "${MANAGED_CONFIG_DIR}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" <<'PY'
 import json
 import os
@@ -451,7 +463,7 @@ from urllib.parse import urlparse
 
 (
     config_path, server_url, node_name, raw_labels, ca_file,
-    tls_skip_verify, poll_seconds, nginx_binary, openssl_binary, nginx_config, nginx_root,
+    tls_skip_verify, allow_insecure_http, poll_seconds, nginx_binary, openssl_binary, nginx_config, nginx_root,
     managed_config_dir, managed_cert_dir, state_dir, helper_state_dir, health_url,
 ) = sys.argv[1:]
 
@@ -481,7 +493,7 @@ value = {
     "labels": labels,
     "ca_file": ca_file or None,
     "tls_skip_verify": tls_skip_verify == "1",
-    "allow_insecure_http": False,
+    "allow_insecure_http": allow_insecure_http == "1",
     "poll_interval": float(poll_seconds),
     "heartbeat_interval": 20,
     "api_timeout": 30,

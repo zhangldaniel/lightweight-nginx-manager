@@ -6,7 +6,7 @@
 
 - 本地应急管理员通过账号密码登录。密码使用 PBKDF2-SHA256、独立随机盐和可配置迭代次数保存。
 - LDAP 用户先由查询账号唯一定位 DN，再使用用户自己的密码 bind；密码不会写入 SQLite。直属组映射为 `admin`、`operator`、`auditor`。
-- 登录成功后签发 `Secure`、`HttpOnly`、`SameSite=Strict` Cookie；写请求还必须携带会话内的 CSRF 校验值。
+- HTTPS 登录签发 `Secure`、`HttpOnly`、`SameSite=Strict` Cookie；HTTP 使用独立的非 Secure、HttpOnly、SameSite=Strict Cookie。写请求还必须携带会话内的 CSRF 校验值。
 - Agent 不需要人工注册令牌。首次连接提交待审批申请，管理员从 Web 批准后，Agent 和控制端从 Agent 自持秘密推导每机独立机器凭据。
 - 控制端数据库只保存 Agent 接入秘密和机器凭据的 SHA-256 摘要，不保存可回显明文。
 - 旧版已注册节点的机器身份继续有效；旧管理员令牌和一次性注册入口不再由新服务使用。
@@ -23,6 +23,8 @@ python app.py bootstrap-admin
 ```
 
 命令仅在数据库没有管理员时创建账号，重复运行不会重置现有密码。不要把 bootstrap 密码放入长期 systemd 环境文件。
+
+正式安装器的默认账号是 `admin`，没有固定默认密码；首次安装会生成 48 位十六进制随机密码并写入权限为 `0600` 的 `/root/nginx-manager-credentials.txt`。
 
 ## API
 
@@ -55,4 +57,4 @@ Web 管理 API：
 
 ## 运行环境
 
-参见 `env.example`。推荐由本机 Nginx 终止 HTTPS，Uvicorn 只监听 `127.0.0.1` HTTP；`deploy/install-server.sh --behind-nginx` 会自动生成这种 systemd 配置，控制端自身不生成 CA。外部入口必须是 HTTPS；Cookie 使用 `__Host-` 前缀，因此不会在明文 HTTP 上传输。
+参见 `env.example`。安装器默认让 Uvicorn 监听 `0.0.0.0:8443` HTTP；`deploy/install-server.sh --behind-nginx` 会改为仅监听 `127.0.0.1`，由本机 Nginx 终止 HTTPS。推荐生产环境使用 HTTPS；默认 HTTP 只适合隔离且可信的管理网。

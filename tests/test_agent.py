@@ -834,7 +834,20 @@ class AgentTestCase(unittest.TestCase):
         ):
             self.assertIn(option, installer)
         self.assertIn('"tls_skip_verify": tls_skip_verify == "1"', installer)
+        self.assertIn('"allow_insecure_http": allow_insecure_http == "1"', installer)
+        self.assertIn('value.scheme not in {"http", "https"}', installer)
         self.assertIn('"${NGINX_BINARY}" -t -c "${NGINX_CONFIG}"', installer)
+
+    def test_agent_uninstaller_preserves_managed_nginx_files(self):
+        root = AGENT_DIR.parent
+        bootstrap = (root / "uninstall-agent.sh").read_text(encoding="utf-8")
+        uninstaller = (root / "deploy" / "uninstall-agent.sh").read_text(encoding="utf-8")
+        self.assertIn("deploy/uninstall-agent.sh", bootstrap)
+        self.assertIn('--purge) PURGE="1"', uninstaller)
+        self.assertIn('rm -rf -- "${APP_DIR}"', uninstaller)
+        self.assertIn('rm -rf -- "${ETC_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}"', uninstaller)
+        self.assertNotIn("nginx-manager.d", uninstaller)
+        self.assertNotIn("ssl/nginx-manager", uninstaller)
 
     def test_python36_can_construct_and_run_the_cli_parser(self):
         parsed = agent.build_parser().parse_args(["validate-config"])

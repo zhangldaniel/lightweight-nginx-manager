@@ -488,6 +488,9 @@ class ServerTestCase(unittest.TestCase):
         self.assertNotIn("ExecStart=${CURRENT_LINK}/venv/bin/uvicorn app:app", installer)
         self.assertIn("--behind-nginx", installer)
         self.assertIn("--allow-direct-http", installer)
+        self.assertIn('DIRECT_HTTP="0"', installer)
+        self.assertIn('DIRECT_HTTP="1"', installer)
+        self.assertIn('PUBLIC_URL="http://${MANAGER_HOST}:${LISTEN_PORT}"', installer)
         self.assertIn('local bind_host="127.0.0.1"', installer)
         self.assertIn('bind_host="0.0.0.0"', installer)
         self.assertIn("--host ${bind_host}", installer)
@@ -501,6 +504,17 @@ class ServerTestCase(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("ldap3==2.9.1", requirements)
+
+    def test_server_uninstaller_preserves_data_unless_purge_is_explicit(self):
+        root = Path(__file__).resolve().parents[1]
+        bootstrap = (root / "uninstall-server.sh").read_text(encoding="utf-8")
+        uninstaller = (root / "deploy" / "uninstall-server.sh").read_text(encoding="utf-8")
+        self.assertIn("deploy/uninstall-server.sh", bootstrap)
+        self.assertIn('--purge) PURGE="1"', uninstaller)
+        self.assertIn("nginx-manager-uninstall-", uninstaller)
+        self.assertIn('rm -rf -- "${APP_ROOT}"', uninstaller)
+        self.assertIn('if [[ "${PURGE}" == "1" ]]', uninstaller)
+        self.assertIn('rm -rf -- "${ETC_DIR}" "${DATA_DIR}"', uninstaller)
 
 
 if __name__ == "__main__":

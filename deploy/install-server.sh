@@ -33,6 +33,7 @@ KEY_FILE=""
 SELF_SIGNED="0"
 BEHIND_NGINX="0"
 ALLOW_DIRECT_HTTP="0"
+DIRECT_HTTP="0"
 PUBLIC_URL=""
 OPEN_FIREWALL="0"
 FIREWALL_CIDR=""
@@ -81,7 +82,7 @@ usage() {
 
 选项：
   --host <值>        Agent 和浏览器访问的域名或 IPv4 地址（必填）
-  --port <端口>      直连模式为 HTTPS 端口；反代/HTTP 模式为后端端口，默认 8443
+  --port <端口>      管理端口，默认 8443
   --cert <路径>      使用现有 PEM 服务端证书（应包含完整链）
   --key <路径>       使用现有无口令 PEM 服务端私钥
   --self-signed      明确使用脚本生成的本地 CA 与服务端证书
@@ -106,9 +107,9 @@ usage() {
   --allow-cidr <网段> 与 --open-firewall 配合，仅允许指定 IPv4 CIDR
   -h, --help         显示帮助
 
-直连 TLS 模式必须选择 --cert/--key 或 --self-signed。使用 --behind-nginx 时控制端
-不持有服务端证书，外层 Nginx 提供 HTTPS。只有显式增加 --allow-direct-http 才会
-同时暴露未加密 HTTP；该入口只建议在可信内网使用。
+不指定 TLS 或反代参数时，默认监听 0.0.0.0 并提供 HTTP。直连 TLS 模式选择
+--cert/--key 或 --self-signed。使用 --behind-nginx 时控制端不持有服务端证书，
+外层 Nginx 提供 HTTPS；增加 --allow-direct-http 可同时暴露未加密 HTTP。
 USAGE
 }
 
@@ -486,14 +487,18 @@ PY
 }
 
 validate_public_url() {
-  "${PYTHON_BIN}" - "${PUBLIC_URL}" "${ALLOW_DIRECT_HTTP}" <<'PY' || \
-    die "--public-url 必须是无账号、无查询参数的 HTTPS 地址；直连 HTTP 模式也可使用 HTTP 地址"
+  "${PYTHON_BIN}" - "${PUBLIC_URL}" "${DIRECT_HTTP}" "${ALLOW_DIRECT_HTTP}" <<'PY' || \
+    die "--public-url 的协议必须与部署模式一致，且不能包含账号、查询参数或路径"
 import sys
 from urllib.parse import urlparse
 
 value = urlparse(sys.argv[1])
-allow_direct_http = sys.argv[2] == "1"
-if value.scheme not in ({"http", "https"} if allow_direct_http else {"https"}):
+direct_http = sys.argv[2] == "1"
+allow_direct_http = sys.argv[3] == "1"
+allowed_schemes = {"http"} if direct_http else {"https"}
+if allow_direct_http:
+    allowed_schemes = {"http", "https"}
+if value.scheme not in allowed_schemes:
     raise SystemExit(1)
 if not value.hostname or value.username or value.password:
     raise SystemExit(1)
@@ -723,6 +728,8 @@ EOF
     local bind_host="127.0.0.1"
     [[ "${ALLOW_DIRECT_HTTP}" == "1" ]] && bind_host="0.0.0.0"
     exec_start="${CURRENT_LINK}/venv/bin/python -m uvicorn app:app --host ${bind_host} --port ${LISTEN_PORT} --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header"
+  elif [[ "${DIRECT_HTTP}" == "1" ]]; then
+    exec_start="${CURRENT_LINK}/venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port ${LISTEN_PORT} --no-server-header"
   else
     exec_start="${CURRENT_LINK}/venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port ${LISTEN_PORT} --ssl-keyfile ${TLS_DIR}/server.key --ssl-certfile ${TLS_DIR}/server.crt --no-server-header"
   fi
@@ -775,6 +782,8 @@ EOF
   if [[ "${BEHIND_NGINX}" == "1" ]]; then
     tls_mode="由本机 Nginx 反向代理提供"
     [[ "${ALLOW_DIRECT_HTTP}" == "1" ]] && tls_mode="本机 Nginx HTTPS + 可信内网直连 HTTP（未加密）"
+  elif [[ "${DIRECT_HTTP}" == "1" ]]; then
+    tls_mode="控制端直连 HTTP（未加密）"
   fi
   cat >"${WORK_DIR}/credentials" <<EOF
 管理地址=${PUBLIC_URL}
@@ -784,7 +793,7 @@ LDAP状态=${ldap_status}
 Agent 接入方式=安装后在 Web 页面审批，无需注册令牌
 TLS模式=${tls_mode}
 EOF
-  if [[ "${ALLOW_DIRECT_HTTP}" == "1" ]]; then
+  if [[ "${ALLOW_DIRECT_HTTP}" == "1" || "${DIRECT_HTTP}" == "1" ]]; then
     echo "直连HTTP地址=http://${MANAGER_HOST}:${LISTEN_PORT}" >>"${WORK_DIR}/credentials"
   fi
   chmod 0600 "${WORK_DIR}/credentials"
@@ -854,7 +863,7 @@ begin_transaction() {
 }
 
 install_tls() {
-  if [[ "${BEHIND_NGINX}" == "1" ]]; then
+  if [[ "${BEHIND_NGINX}" == "1" || "${DIRECT_HTTP}" == "1" ]]; then
     rm -rf -- "${TLS_DIR}"
     return
   fi
@@ -941,7 +950,7 @@ install_ldap_config() {
 }
 
 health_check() {
-  if [[ "${BEHIND_NGINX}" == "1" ]]; then
+  if [[ "${BEHIND_NGINX}" == "1" || "${DIRECT_HTTP}" == "1" ]]; then
     "${PYTHON_BIN}" - "${LISTEN_PORT}" <<'PY'
 import socket
 import sys
@@ -1238,9 +1247,12 @@ if [[ "${BEHIND_NGINX}" == "1" ]]; then
   fi
 else
   [[ "${ALLOW_DIRECT_HTTP}" != "1" ]] || die "--allow-direct-http 必须与 --behind-nginx 配合使用"
-  [[ "${SELF_SIGNED}" == "1" || ( -n "${CERT_FILE}" && -n "${KEY_FILE}" ) ]] || \
-    die "直连模式请指定 --self-signed，或同时提供 --cert 与 --key"
-  [[ -n "${PUBLIC_URL}" ]] || PUBLIC_URL="https://${MANAGER_HOST}:${LISTEN_PORT}"
+  if [[ "${SELF_SIGNED}" == "1" || ( -n "${CERT_FILE}" && -n "${KEY_FILE}" ) ]]; then
+    [[ -n "${PUBLIC_URL}" ]] || PUBLIC_URL="https://${MANAGER_HOST}:${LISTEN_PORT}"
+  else
+    DIRECT_HTTP="1"
+    [[ -n "${PUBLIC_URL}" ]] || PUBLIC_URL="http://${MANAGER_HOST}:${LISTEN_PORT}"
+  fi
 fi
 [[ -z "${FIREWALL_CIDR}" || "${OPEN_FIREWALL}" == "1" ]] || \
   die "--allow-cidr 必须与 --open-firewall 一起使用"
@@ -1293,6 +1305,8 @@ if [[ "${BEHIND_NGINX}" == "1" ]]; then
     echo "本机后端：http://127.0.0.1:${LISTEN_PORT}（仅供本机 Nginx 反向代理）"
   fi
   echo "Nginx 示例：${PACKAGE_DIR}/deploy/nginx-manager-proxy.conf.example"
+elif [[ "${DIRECT_HTTP}" == "1" ]]; then
+  echo "直连 HTTP：http://${MANAGER_HOST}:${LISTEN_PORT}（未加密，仅建议可信内网使用）"
 fi
 echo "凭据文件：${CREDENTIALS_FILE}（权限 600）"
 if [[ -f "${TLS_DIR}/ca.crt" ]]; then

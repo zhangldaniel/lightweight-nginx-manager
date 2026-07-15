@@ -13,22 +13,22 @@
 - 手动 PEM 证书与私钥多节点部署
 - 原子替换、并发 Hash 检查、备份和失败自动回滚
 - LDAP / Active Directory 登录、本地应急管理员与三档角色权限
-- 控制端仅监听本机 HTTP、复用现有 Nginx HTTPS 入口
+- 控制端默认提供内网 HTTP，也可切换为本机 Nginx HTTPS 反代或直连 TLS
 - 执行记录及敏感信息脱敏
 
 不提供任意 Shell。前端只能下发八个固定动作：`inspect`、`nginx_test`、`nginx_reload`、`config_read`、`config_hash`、`config_apply`、`config_delete`、`certificate_apply`。
 
-直接双击 `nginx-cluster-console.html` 时是本地演示模式；由 Linux 控制端通过 HTTPS 打开时会自动进入真实 API 模式。
+直接双击 `nginx-cluster-console.html` 时是本地演示模式；由 Linux 控制端通过 HTTP(S) 打开时会自动进入真实 API 模式。
 
 ## 架构
 
 ```text
-浏览器 / Agent ──HTTPS──> 本机 Nginx :443 ──HTTP──> 控制端 127.0.0.1:8443 ──> SQLite
-                              │
-                              └── 复用已有域名证书
+浏览器 / Agent ──HTTP──> 控制端 0.0.0.0:8443 ──> SQLite
+       或
+浏览器 / Agent ──HTTPS──> 本机 Nginx :443 ──HTTP──> 控制端 127.0.0.1:8443
 
 LDAP / AD <──LDAPS 或 StartTLS── 控制端
-各节点普通用户 Agent ──HTTPS 主动轮询──┘
+各节点普通用户 Agent ──HTTP(S) 主动轮询──┘
         │
         └─Unix Socket─> root helper ─> Nginx 配置 / nginx -t / reload
 ```
@@ -36,7 +36,7 @@ LDAP / AD <──LDAPS 或 StartTLS── 控制端
 - 节点不监听端口，也不需要修改节点防火墙。
 - 网络 Agent 使用普通系统用户运行。
 - root helper 不联网接收控制请求，只接受本机 Unix Socket 固定动作，并校验调用者 UID。
-- Web 支持 LDAP / AD 登录，并保留一个本地 `admin` 应急账号；HTTPS 使用 Secure、HttpOnly、SameSite Cookie，显式启用的 HTTP 入口使用独立的 HttpOnly、SameSite Cookie。
+- Web 支持 LDAP / AD 登录，并保留一个本地 `admin` 应急账号；HTTPS 使用 Secure、HttpOnly、SameSite Cookie，HTTP 使用独立的 HttpOnly、SameSite Cookie。
 - `admin`、`operator`、`auditor` 三档权限由服务端强制校验，前端隐藏按钮只是交互提示。
 - Agent 安装不需要人工令牌；首次连接进入待审批列表，批准后自动建立每机独立机器身份，控制端只保存不可逆摘要。
 
@@ -53,14 +53,14 @@ LDAP / AD <──LDAPS 或 StartTLS── 控制端
 
 ## 从 GitHub 一键安装
 
-控制端推荐由现有 Nginx 终止 HTTPS：
+默认 HTTP 安装 Server：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-server.sh | \
   sudo bash -s -- \
-    --host nginx-manager.example.com \
-    --behind-nginx \
-    --port 8443
+    --host 192.0.2.20 \
+    --port 8443 \
+    --open-firewall
 ```
 
 在每台 Nginx 节点安装 Agent：
@@ -68,11 +68,25 @@ curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-mana
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
   sudo bash -s -- \
-    --server https://nginx-manager.example.com \
+    --server http://192.0.2.20:8443 \
     --node-name edge-a-01
 ```
 
 两个入口脚本只负责通过 HTTPS 下载本仓库快照，然后调用 `deploy/` 下的正式安装器。可通过环境变量 `NGINX_MANAGER_REF` 固定到分支、标签或提交；生产环境建议固定版本并在执行前审核脚本。
+
+### 默认登录账号和密码
+
+- 默认账号：`admin`
+- 默认密码：**没有固定值**。首次安装会生成 48 位十六进制随机密码，避免公开仓库里的通用弱密码被直接利用。
+- 凭据文件：`/root/nginx-manager-credentials.txt`，权限为 `0600`。
+
+查看首次登录密码：
+
+```bash
+sudo cat /root/nginx-manager-credentials.txt
+```
+
+升级不会重置已经存在的管理员账号和密码。如果凭据文件遗失，应使用既有密码或通过受控的数据库恢复流程处理，不要反复安装期待密码重置。
 
 ## 仓库结构
 
@@ -80,12 +94,16 @@ curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-mana
 ├── nginx-cluster-console.html
 ├── install-server.sh
 ├── install-agent.sh
+├── uninstall-server.sh
+├── uninstall-agent.sh
 ├── agent/
 ├── server/
 ├── tests/
 └── deploy/
     ├── install-server.sh
     ├── install-agent.sh
+    ├── uninstall-server.sh
+    ├── uninstall-agent.sh
     ├── backup-server.sh
     └── nginx-manager-proxy.conf.example
 ```
@@ -100,6 +118,21 @@ curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-mana
 git clone https://github.com/zhangldaniel/lightweight-nginx-manager.git
 cd lightweight-nginx-manager
 ```
+
+### 默认：内网 HTTP 直连
+
+不指定 `--behind-nginx`、证书或 `--self-signed` 时，控制端默认监听
+`0.0.0.0:8443`，可直接打开 `http://服务器IP:8443`：
+
+```bash
+sudo ./deploy/install-server.sh \
+  --host 192.0.2.20 \
+  --port 8443 \
+  --open-firewall
+```
+
+HTTP 会明文传输登录密码、会话、配置和证书任务，只建议在隔离且可信的管理网使用。
+跨网段时建议增加 `--allow-cidr` 限制防火墙来源。
 
 ### 推荐：复用本机 Nginx，不让控制端管理 CA
 
@@ -129,8 +162,8 @@ sudo /opt/custom-nginx/sbin/nginx -s reload
 
 代理配置必须保留 `Host`、`X-Forwarded-For`、`X-Forwarded-Proto https`。推荐的外部入口使用 HTTPS，登录 Cookie 使用 `Secure` 与 `__Host-` 约束。默认情况下 `8443` 不需要放行防火墙，服务也不会监听所有网卡。
 
-如确实需要从可信内网直接访问 `http://服务器IP:8443`，升级或安装时显式增加
-`--allow-direct-http`。它会让同一个后端监听所有网卡，同时仍可供本机 Nginx 代理：
+如需在本机 Nginx HTTPS 反代之外，同时保留 `http://服务器IP:8443`，显式增加
+`--allow-direct-http`。它会让反代后端同时监听所有网卡：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-server.sh | \
@@ -142,8 +175,7 @@ curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-mana
     --open-firewall
 ```
 
-此时可直接打开 `http://192.0.2.20:8443`。HTTP 会明文传输账号、密码、会话和操作内容，
-只建议在隔离且可信的管理网使用；跨网段时建议配合 `--allow-cidr` 收紧防火墙来源。
+只需要 HTTP 时不要传 `--behind-nginx` 和 `--allow-direct-http`，直接使用上面的默认安装命令。
 
 部署完成后检查：
 
@@ -205,12 +237,13 @@ sudo ./deploy/install-server.sh \
   --self-signed
 ```
 
-默认监听 `8443`。脚本不会自动修改防火墙。如需在已经启用的防火墙中放行指定网段：
+上面的 `--self-signed` 会启用直连 TLS；不传证书或 `--self-signed` 时才是默认 HTTP。
+脚本只有收到 `--open-firewall` 才会修改已启用的 ufw/firewalld。如需为默认 HTTP
+只放行指定网段：
 
 ```bash
 sudo ./deploy/install-server.sh \
   --host 192.0.2.20 \
-  --self-signed \
   --open-firewall \
   --allow-cidr 192.0.2.0/24
 ```
@@ -238,7 +271,7 @@ sudo cat /root/nginx-manager-credentials.txt
 `/opt/nginx-manager/current` 指向当前版本。SQLite、TLS 和服务端环境文件不放在
 release 目录内，分别保存在 `/var/lib/nginx-manager/` 与 `/etc/nginx-manager/`。
 
-反代模式默认打开 `https://--host`，地址不同时才需要指定 `--public-url`；启用 `--allow-direct-http` 后也可打开 `http://控制端地址:8443`；直连 TLS 模式打开 `https://控制端地址:8443`。使用 LDAP / AD 或凭据文件中的本地管理员账号登录。浏览器脚本不能读取会话 Cookie，退出登录或会话到期后需要重新登录。
+默认模式打开 `http://控制端地址:8443`；反代模式默认打开 `https://--host`，地址不同时才需要指定 `--public-url`；直连 TLS 模式打开 `https://控制端地址:8443`。使用 LDAP / AD 或凭据文件中的本地管理员账号登录。浏览器脚本不能读取会话 Cookie，退出登录或会话到期后需要重新登录。
 
 自签模式需要通过可信的运维通道复制 CA，并核对安装脚本输出的 SHA-256 指纹：
 
@@ -404,9 +437,37 @@ sudo ./deploy/backup-server.sh
 
 默认生成到 `/var/backups/nginx-manager/`。归档包含密码摘要、Agent 身份摘要、LDAP 查询密码及可能存在的 TLS 私钥，权限为 `0600`；复制到远端前还应再次加密。
 
+## 一键卸载
+
+卸载 Server 程序和服务，保留数据库、配置及管理员凭据：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-server.sh | sudo bash
+```
+
+彻底卸载 Server 时会先把数据备份到 `/var/backups/nginx-manager/`，再删除数据库、配置、凭据和系统账号：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-server.sh | sudo bash -s -- --purge
+```
+
+卸载 Agent，默认保留连接配置和机器身份，方便重新安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-agent.sh | sudo bash
+```
+
+删除 Agent 配置及机器身份：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-agent.sh | sudo bash -s -- --purge
+```
+
+Agent 卸载器不会自动删除已经发布的 Nginx 配置、证书或 include 文件，避免导致现有站点中断；确认不再使用后应结合实际 Nginx 路径人工清理并执行 `nginx -t`。
+
 ## 升级
 
-先备份，然后用新发布包和首次安装相同的入口模式重新运行安装脚本。反代模式继续传 `--behind-nginx`，外部地址与 `--host` 不同时再传 `--public-url`；需要保留直连 HTTP 时继续传 `--allow-direct-http`。直连 TLS 模式继续传证书参数。LDAP 已启用时可以不重复传 LDAP 参数，安装器会保留已有环境、查询密码和 LDAP CA；需要修改 LDAP 时传入完整的一组 LDAP 参数。控制端会先完成发布包预检，在独立 release 目录创建虚拟环境、安装依赖并执行 Python 导入检查；这些步骤不会改动正在运行的 `current`。
+先备份，然后用新发布包和首次安装相同的入口模式重新运行安装脚本。默认 HTTP 模式只需继续传 `--host` 和端口；反代模式继续传 `--behind-nginx`，外部地址与 `--host` 不同时再传 `--public-url`；需要同时保留直连 HTTP 时继续传 `--allow-direct-http`。直连 TLS 模式继续传证书参数。LDAP 已启用时可以不重复传 LDAP 参数，安装器会保留已有环境、查询密码和 LDAP CA；需要修改 LDAP 时传入完整的一组 LDAP 参数。控制端会先完成发布包预检，在独立 release 目录创建虚拟环境、安装依赖并执行 Python 导入检查；这些步骤不会改动正在运行的 `current`。
 
 预装成功后，脚本会短暂停止旧服务并用 SQLite Backup API 创建一致性快照，再原子切换 `current`、显式 `systemctl restart nginx-manager`，并检查服务状态和 `/healthz`；直连模式还会校验 TLS 证书钉扎。任一步失败时，脚本会自动切回升级前的 release，校验恢复原服务文件、环境文件、TLS、LDAP 密钥材料与 SQLite，并重新启动旧服务。首次安装失败时同样会撤销 `current` 和 systemd 单元，不会留下一个伪成功服务。
 
