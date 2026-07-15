@@ -38,6 +38,7 @@ ActionName = Literal[
     "nginx_test",
     "nginx_reload",
     "config_inventory",
+    "certificate_inventory",
     "config_read",
     "config_hash",
     "config_apply",
@@ -50,6 +51,7 @@ JOB_ACTIONS = {
     "nginx_test",
     "nginx_reload",
     "config_inventory",
+    "certificate_inventory",
     "config_read",
     "config_hash",
     "config_apply",
@@ -227,6 +229,102 @@ def _safe_config_inventory(value: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+def _safe_certificate_inventory(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict) or not isinstance(value.get("certificates"), list):
+        return None
+    safe_certificates: List[Dict[str, Any]] = []
+    rejected = 0
+    truncated = bool(value.get("truncated", False))
+    fingerprint_pattern = re.compile(r"^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$", re.IGNORECASE)
+    timestamp_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+    domain_pattern = re.compile(r"^[A-Za-z0-9*](?:[A-Za-z0-9*._-]{0,251}[A-Za-z0-9])?$")
+
+    for item in value["certificates"]:
+        if len(safe_certificates) >= INVENTORY_MAX_FILES:
+            truncated = True
+            break
+        if not isinstance(item, dict):
+            rejected += 1
+            continue
+        certificate_path = item.get("certificate_path")
+        private_key_path = item.get("private_key_path")
+        certificate_hash = item.get("certificate_sha256")
+        key_hash = item.get("key_material_sha256")
+        fingerprint = item.get("fingerprint")
+        not_after = item.get("not_after")
+        days_remaining = item.get("days_remaining")
+        issuer = item.get("issuer")
+        subject = item.get("subject")
+        domains = item.get("domains")
+        valid_paths = (
+            isinstance(certificate_path, str)
+            and isinstance(private_key_path, str)
+            and os.path.isabs(certificate_path)
+            and os.path.isabs(private_key_path)
+            and certificate_path != private_key_path
+            and len(certificate_path) <= 4096
+            and len(private_key_path) <= 4096
+            and "\0" not in certificate_path
+            and "\0" not in private_key_path
+            and Path(certificate_path).suffix.lower() in (".pem", ".crt")
+            and Path(private_key_path).suffix.lower() in (".pem", ".key")
+        )
+        valid_scalars = (
+            isinstance(certificate_hash, str)
+            and re.fullmatch(r"[0-9a-f]{64}", certificate_hash) is not None
+            and isinstance(key_hash, str)
+            and re.fullmatch(r"[0-9a-f]{64}", key_hash) is not None
+            and isinstance(fingerprint, str)
+            and fingerprint_pattern.fullmatch(fingerprint) is not None
+            and isinstance(not_after, str)
+            and timestamp_pattern.fullmatch(not_after) is not None
+            and isinstance(days_remaining, int)
+            and -36500 <= days_remaining <= 365000
+            and isinstance(issuer, str)
+            and 0 < len(issuer) <= 512
+            and re.search(r"[\x00-\x1f\x7f]", issuer) is None
+            and isinstance(subject, str)
+            and 0 < len(subject) <= 512
+            and re.search(r"[\x00-\x1f\x7f]", subject) is None
+        )
+        if not valid_paths or not valid_scalars or not isinstance(domains, list):
+            rejected += 1
+            continue
+        safe_domains: List[str] = []
+        invalid_domain = False
+        for domain in domains[:100]:
+            if not isinstance(domain, str) or len(domain) > 253 or domain_pattern.fullmatch(domain) is None:
+                invalid_domain = True
+                break
+            if domain not in safe_domains:
+                safe_domains.append(domain)
+        if invalid_domain or not safe_domains:
+            rejected += 1
+            continue
+        safe_certificates.append({
+            "certificate_path": certificate_path,
+            "private_key_path": private_key_path,
+            "certificate_sha256": certificate_hash,
+            "key_material_sha256": key_hash,
+            "fingerprint": fingerprint.upper(),
+            "not_after": not_after,
+            "days_remaining": days_remaining,
+            "issuer": issuer,
+            "subject": subject,
+            "domains": safe_domains,
+        })
+
+    supplied_skipped = value.get("skipped_count", 0)
+    if not isinstance(supplied_skipped, int) or supplied_skipped < 0:
+        supplied_skipped = 0
+    return {
+        "certificates": safe_certificates,
+        "certificate_count": len(safe_certificates),
+        "skipped_count": min(supplied_skipped + rejected, 100000),
+        "truncated": truncated,
+    }
+
+
 def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
     """Keep operational facts, never command output or arbitrary error strings."""
     result: Dict[str, Any] = {}
@@ -263,6 +361,10 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
         inventory = _safe_config_inventory(request.details)
         if inventory is not None:
             result["config_inventory"] = inventory
+    elif request.action == "certificate_inventory":
+        inventory = _safe_certificate_inventory(request.details)
+        if inventory is not None:
+            result["certificate_inventory"] = inventory
 
     nested_scalar_keys = {
         "sha256",
@@ -1033,7 +1135,7 @@ def create_app(
     settings.validate()
     authenticate_ldap = ldap_authenticator or _authenticate_ldap
     database = Database(settings.db_path)
-    api = FastAPI(title="Nginx Manager", version="0.3.8", docs_url=None, redoc_url=None, openapi_url=None)
+    api = FastAPI(title="Nginx Manager", version="0.3.9", docs_url=None, redoc_url=None, openapi_url=None)
     api.state.settings = settings
     api.state.database = database
     secure_session_cookie = "__Host-nginx_manager_session"

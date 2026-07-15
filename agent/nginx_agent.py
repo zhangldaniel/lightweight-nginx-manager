@@ -59,12 +59,13 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
     "nginx_reload",
     "config_inventory",
+    "certificate_inventory",
     "config_read",
     "config_hash",
     "config_apply",
@@ -909,12 +910,9 @@ class JobExecutor:
         reloaded = self._reload_only()
         return {"test": tested, "reload": reloaded}
 
-    def _action_config_inventory(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
-        files: List[Dict[str, Any]] = []
-        skipped = 0
-        total_bytes = 0
-        truncated = False
+    def _configuration_candidates(self) -> Tuple[List[Path], int]:
         candidates: List[Path] = []
+        skipped = 0
         seen = set()
         for root in self._allowed_config_roots:
             if not root.is_dir() or root.is_symlink():
@@ -937,8 +935,14 @@ class JobExecutor:
                     if key not in seen:
                         candidates.append(resolved)
                         seen.add(key)
+        return sorted(candidates, key=lambda item: str(item)), skipped
 
-        for path in sorted(candidates, key=lambda item: str(item)):
+    def _action_config_inventory(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
+        files: List[Dict[str, Any]] = []
+        candidates, skipped = self._configuration_candidates()
+        total_bytes = 0
+        truncated = False
+        for path in candidates:
             if len(files) >= INVENTORY_MAX_FILES:
                 truncated = True
                 break
@@ -973,6 +977,183 @@ class JobExecutor:
             "files": files,
             "file_count": len(files),
             "total_bytes": total_bytes,
+            "skipped_count": skipped,
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _unquote_nginx_value(value: str) -> str:
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            return value[1:-1]
+        return value
+
+    def _referenced_certificate_keys(self) -> Dict[str, Path]:
+        pairs: Dict[str, Path] = {}
+        candidates, _skipped = self._configuration_candidates()
+        for config_path in candidates:
+            try:
+                if config_path.stat().st_size > min(self.settings.max_file_bytes, INVENTORY_MAX_FILE_BYTES):
+                    continue
+                content = config_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            certificate_paths: List[str] = []
+            private_key_paths: List[str] = []
+            statement: List[str] = []
+            for token in NGINX_TOKEN_RE.findall(_strip_nginx_comments(content)):
+                if token == ";":
+                    if len(statement) == 2:
+                        directive = statement[0].lower()
+                        raw_path = self._unquote_nginx_value(statement[1])
+                        if directive == "ssl_certificate":
+                            certificate_paths.append(raw_path)
+                        elif directive == "ssl_certificate_key":
+                            private_key_paths.append(raw_path)
+                    statement = []
+                elif token in ("{", "}"):
+                    statement = []
+                else:
+                    statement.append(token)
+            for raw_certificate, raw_private_key in zip(certificate_paths, private_key_paths):
+                try:
+                    certificate_path = self._certificate_path(raw_certificate)
+                    private_key_path = self._certificate_path(raw_private_key)
+                except ActionError:
+                    continue
+                if certificate_path.is_file() and private_key_path.is_file():
+                    pairs[str(certificate_path)] = private_key_path
+        return pairs
+
+    @staticmethod
+    def _distinguished_name_value(value: Any, preferred: Tuple[str, ...]) -> str:
+        flattened: Dict[str, str] = {}
+        if isinstance(value, (list, tuple)):
+            for group in value:
+                if not isinstance(group, (list, tuple)):
+                    continue
+                for item in group:
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        flattened[str(item[0])] = str(item[1])
+        for name in preferred:
+            if flattened.get(name):
+                return flattened[name]
+        return next(iter(flattened.values()), "Unknown")
+
+    def _certificate_metadata(self, path: Path, data: bytes) -> Dict[str, Any]:
+        decoder = getattr(getattr(ssl, "_ssl", None), "_test_decode_cert", None)
+        if not callable(decoder):
+            raise ActionError("this Python SSL build cannot decode X.509 certificates")
+        try:
+            decoded = decoder(str(path))
+        except (OSError, ValueError, ssl.SSLError) as exc:
+            raise ActionError("cannot decode certificate {}: {}".format(path, exc))
+        domains: List[str] = []
+        for item in decoded.get("subjectAltName", ()):
+            if isinstance(item, (list, tuple)) and len(item) == 2 and str(item[0]).upper() == "DNS":
+                domain = str(item[1]).strip()
+                if domain and domain not in domains:
+                    domains.append(domain)
+        common_name = self._distinguished_name_value(decoded.get("subject"), ("commonName",))
+        if not domains and common_name != "Unknown":
+            domains.append(common_name)
+        not_after_text = decoded.get("notAfter")
+        if not isinstance(not_after_text, str):
+            raise ActionError("certificate does not contain notAfter")
+        try:
+            not_after_epoch = ssl.cert_time_to_seconds(not_after_text)
+            not_after = dt.datetime.utcfromtimestamp(not_after_epoch).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError, OverflowError, OSError) as exc:
+            raise ActionError("invalid certificate notAfter: {}".format(exc))
+        days_remaining = int((not_after_epoch - time.time()) // 86400)
+        matched = re.search(
+            rb"-----BEGIN CERTIFICATE-----\s+.+?-----END CERTIFICATE-----",
+            data,
+            re.DOTALL,
+        )
+        if not matched:
+            raise ActionError("certificate file does not contain a PEM certificate")
+        try:
+            der = ssl.PEM_cert_to_DER_cert(matched.group(0).decode("ascii"))
+        except (UnicodeDecodeError, ValueError, base64.binascii.Error) as exc:
+            raise ActionError("invalid PEM certificate: {}".format(exc))
+        digest = hashlib.sha256(der).hexdigest().upper()
+        fingerprint = ":".join(digest[index:index + 2] for index in range(0, len(digest), 2))
+        return {
+            "domains": domains[:100],
+            "subject": common_name,
+            "issuer": self._distinguished_name_value(
+                decoded.get("issuer"), ("commonName", "organizationName")
+            ),
+            "not_after": not_after,
+            "days_remaining": days_remaining,
+            "fingerprint": fingerprint,
+        }
+
+    def _action_certificate_inventory(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
+        certificates: List[Dict[str, Any]] = []
+        skipped = 0
+        truncated = False
+        referenced_keys = self._referenced_certificate_keys()
+        candidates: List[Path] = []
+        seen = set()
+        for root in self._allowed_certificate_roots:
+            if not root.is_dir() or root.is_symlink():
+                continue
+            for current_root, directory_names, file_names in os.walk(str(root), followlinks=False):
+                directory_names[:] = sorted(
+                    name for name in directory_names
+                    if not (Path(current_root) / name).is_symlink()
+                )
+                for name in sorted(file_names):
+                    if Path(name).suffix.lower() not in (".pem", ".crt"):
+                        continue
+                    try:
+                        candidate = self._certificate_path(str(Path(current_root) / name))
+                    except ActionError:
+                        skipped += 1
+                        continue
+                    if str(candidate) not in seen:
+                        candidates.append(candidate)
+                        seen.add(str(candidate))
+
+        for certificate_path in sorted(candidates, key=lambda item: str(item)):
+            if len(certificates) >= INVENTORY_MAX_FILES:
+                truncated = True
+                break
+            try:
+                certificate_size = certificate_path.stat().st_size
+                if certificate_size > min(self.settings.max_file_bytes, INVENTORY_MAX_FILE_BYTES):
+                    skipped += 1
+                    continue
+                certificate_data = certificate_path.read_bytes()
+                if len(certificate_data) != certificate_size or b"BEGIN CERTIFICATE" not in certificate_data:
+                    skipped += 1
+                    continue
+                private_key_path = referenced_keys.get(str(certificate_path), certificate_path.with_suffix(".key"))
+                private_key_path = self._certificate_path(str(private_key_path))
+                if not private_key_path.is_file() or private_key_path.stat().st_size > INVENTORY_MAX_FILE_BYTES:
+                    skipped += 1
+                    continue
+                certificate_public = self._openssl(["x509", "-in", str(certificate_path), "-pubkey", "-noout"])
+                private_key_public = self._openssl(["pkey", "-in", str(private_key_path), "-pubout"])
+                if not hmac.compare_digest(hashlib.sha256(certificate_public).digest(), hashlib.sha256(private_key_public).digest()):
+                    skipped += 1
+                    continue
+                metadata = self._certificate_metadata(certificate_path, certificate_data)
+                key_material_sha256 = _file_sha256(private_key_path)
+            except (OSError, AgentError):
+                skipped += 1
+                continue
+            certificates.append({
+                "certificate_path": str(certificate_path),
+                "private_key_path": str(private_key_path),
+                "certificate_sha256": hashlib.sha256(certificate_data).hexdigest(),
+                "key_material_sha256": key_material_sha256,
+                **metadata,
+            })
+        return {
+            "certificates": certificates,
+            "certificate_count": len(certificates),
             "skipped_count": skipped,
             "truncated": truncated,
         }
@@ -2055,6 +2236,13 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
             "files": raw.get("files", []),
             "file_count": raw.get("file_count", 0),
             "total_bytes": raw.get("total_bytes", 0),
+            "skipped_count": raw.get("skipped_count", 0),
+            "truncated": bool(raw.get("truncated", False)),
+        }
+    elif action == "certificate_inventory":
+        details = {
+            "certificates": raw.get("certificates", []),
+            "certificate_count": raw.get("certificate_count", 0),
             "skipped_count": raw.get("skipped_count", 0),
             "truncated": bool(raw.get("truncated", False)),
         }

@@ -443,6 +443,65 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(digest, inventory["files"][0]["sha256"])
         self.assertNotIn("tampered.conf", json.dumps(inventory))
 
+    def test_certificate_inventory_exposes_paths_and_hashes_but_no_private_key_content(self):
+        enrolled = self.enroll()
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [enrolled["agent_id"]],
+                "action": "certificate_inventory",
+                "payload": {},
+                "ttl_seconds": 60,
+            },
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        job_id = created.json()["jobs"][0]["id"]
+        polled = self.client.post("/api/v1/agent/poll", headers=agent_headers, json={"limit": 1})
+        self.assertEqual("certificate_inventory", polled.json()["jobs"][0]["action"])
+        valid = {
+            "certificate_path": "/apps/nginx/cert/int.example.pem",
+            "private_key_path": "/apps/nginx/cert/int.example.key",
+            "certificate_sha256": "a" * 64,
+            "key_material_sha256": "b" * 64,
+            "fingerprint": ":".join(["AB"] * 32),
+            "not_after": "2027-01-01T00:00:00Z",
+            "days_remaining": 170,
+            "issuer": "Test CA",
+            "subject": "int.example.test",
+            "domains": ["int.example.test", "*.int.example.test"],
+        }
+        invalid = dict(valid)
+        invalid["certificate_path"] = "/apps/nginx/cert/rejected.pem"
+        invalid["key_material_sha256"] = "not-a-hash"
+        result = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": job_id,
+                "action": "certificate_inventory",
+                "details": {
+                    "certificates": [valid, invalid],
+                    "skipped_count": 1,
+                    "truncated": False,
+                },
+            },
+        )
+        self.assertEqual(200, result.status_code, result.text)
+        jobs = self.client.get(
+            "/api/v1/admin/jobs?action=certificate_inventory",
+            headers=self.admin_headers,
+        ).json()["items"]
+        inventory = jobs[0]["result"]["certificate_inventory"]
+        self.assertEqual(1, inventory["certificate_count"])
+        self.assertEqual(2, inventory["skipped_count"])
+        self.assertEqual(valid["private_key_path"], inventory["certificates"][0]["private_key_path"])
+        self.assertEqual(valid["key_material_sha256"], inventory["certificates"][0]["key_material_sha256"])
+        self.assertNotIn("PRIVATE KEY", json.dumps(inventory))
+        self.assertNotIn("rejected.pem", json.dumps(inventory))
+
     def test_certificate_payload_is_redacted_after_claim(self):
         enrolled = self.enroll()
         agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}

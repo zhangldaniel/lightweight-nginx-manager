@@ -122,6 +122,46 @@ class AgentTestCase(unittest.TestCase):
         self.assertEqual(2, mapped["details"]["file_count"])
         self.assertEqual(2, len(mapped["details"]["files"]))
 
+    def test_certificate_inventory_pairs_referenced_files_without_returning_private_key(self):
+        certificate_path = self.certificate_root / "int.example.pem"
+        private_key_path = self.certificate_root / "different-name.key"
+        certificate_data = b"-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n"
+        private_key_data = b"-----BEGIN PRIVATE KEY-----\nsuper-secret-key-material\n-----END PRIVATE KEY-----\n"
+        certificate_path.write_bytes(certificate_data)
+        private_key_path.write_bytes(private_key_data)
+        (self.certificate_root / "orphan.crt").write_bytes(certificate_data)
+        (self.config_root / "tls.conf").write_text(
+            "server { listen 443 ssl; ssl_certificate %s; ssl_certificate_key %s; }\n" % (
+                certificate_path,
+                private_key_path,
+            ),
+            encoding="utf-8",
+        )
+        self.executor._openssl = mock.Mock(return_value=b"matching-public-key")
+        self.executor._certificate_metadata = mock.Mock(return_value={
+            "domains": ["int.example.test"],
+            "subject": "int.example.test",
+            "issuer": "Test CA",
+            "not_after": "2027-01-01T00:00:00Z",
+            "days_remaining": 170,
+            "fingerprint": ":".join(["AA"] * 32),
+        })
+
+        response = self.executor.execute(self.job("job-certificate-inventory", "certificate_inventory", {}))
+
+        self.assertEqual("succeeded", response["status"])
+        inventory = response["result"]
+        self.assertEqual(1, inventory["certificate_count"])
+        self.assertEqual(1, inventory["skipped_count"])
+        item = inventory["certificates"][0]
+        self.assertTrue(Path(item["certificate_path"]).samefile(certificate_path))
+        self.assertTrue(Path(item["private_key_path"]).samefile(private_key_path))
+        self.assertEqual(self.sha(certificate_data), item["certificate_sha256"])
+        self.assertEqual(self.sha(private_key_data), item["key_material_sha256"])
+        mapped = agent._to_server_result(response)
+        self.assertEqual("certificate_inventory", mapped["action"])
+        self.assertNotIn("super-secret-key-material", json.dumps(mapped))
+
     def test_config_apply_present_replaces_existing_but_never_creates(self):
         target = self.config_root / "migrated-site.conf"
         old = b"server { listen 80; }\n"

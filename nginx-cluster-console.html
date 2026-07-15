@@ -2166,7 +2166,7 @@
         var operatorActions = [
           'add-site', 'add-certificate', 'edit-config', 'validate-site', 'import-drift',
           'deploy-site', 'transfer-config', 'delete-config', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
-          'rollback', 'import-sites'
+          'rollback', 'import-sites', 'import-certificates'
         ];
         if (adminActions.includes(action)) return canAdminister();
         if (operatorActions.includes(action)) return canOperate();
@@ -2179,7 +2179,7 @@
           'add-node', 'approve-enrollment', 'reject-enrollment',
           'add-site', 'add-certificate', 'edit-config', 'validate-site', 'import-drift',
           'deploy-site', 'transfer-config', 'delete-config', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
-          'rollback', 'import-sites'
+          'rollback', 'import-sites', 'import-certificates'
         ];
         document.querySelectorAll('[data-action]').forEach(function (button) {
           var action = button.getAttribute('data-action');
@@ -2356,6 +2356,7 @@
             }
           });
           parsed.importedInventoryJobs = Array.isArray(parsed.importedInventoryJobs) ? parsed.importedInventoryJobs : [];
+          parsed.importedCertificateInventoryJobs = Array.isArray(parsed.importedCertificateInventoryJobs) ? parsed.importedCertificateInventoryJobs : [];
           return parsed;
         } catch (error) {
           return clone(seedState);
@@ -2363,7 +2364,7 @@
       }
 
       var state = remoteMode
-        ? { nodes: [], certificates: [], sites: [], runs: [], importedInventoryJobs: [] }
+        ? { nodes: [], certificates: [], sites: [], runs: [], importedInventoryJobs: [], importedCertificateInventoryJobs: [] }
         : loadState();
 
       function saveState() {
@@ -2375,7 +2376,8 @@
         return {
           sites: state.sites,
           certificates: state.certificates,
-          importedInventoryJobs: state.importedInventoryJobs || []
+          importedInventoryJobs: state.importedInventoryJobs || [],
+          importedCertificateInventoryJobs: state.importedCertificateInventoryJobs || []
         };
       }
 
@@ -2468,6 +2470,7 @@
           nginx_reload: '平滑 reload',
           config_read: '读取配置',
           config_inventory: '扫描现有配置',
+          certificate_inventory: '扫描现有证书',
           config_hash: '配置 Hash',
           config_apply: '配置发布',
           config_delete: '移除节点配置',
@@ -2752,6 +2755,116 @@
         }
       }
 
+      function bindImportedCertificateToSites(certificate, node, item) {
+        var changed = false;
+        state.sites.forEach(function (site) {
+          if (!Array.isArray(site.nodeIds) || !site.nodeIds.includes(node.id)) return;
+          var config = String(site.config || '');
+          if (!config.includes(item.certificate_path)) return;
+          site.certificateId = certificate.id;
+          certificate.siteIds = certificate.siteIds || [];
+          if (!certificate.siteIds.includes(site.id)) certificate.siteIds.push(site.id);
+          changed = true;
+        });
+        return changed;
+      }
+
+      function importCertificateInventoryItem(item, node) {
+        if (!item || !node || !item.certificate_path || !item.private_key_path) return false;
+        var certificate = state.certificates.find(function (candidate) {
+          var paths = candidate.nodePaths && candidate.nodePaths[node.id];
+          return paths && paths.certificatePath === item.certificate_path;
+        });
+        if (!certificate) {
+          certificate = state.certificates.find(function (candidate) {
+            return candidate.fingerprint === item.fingerprint && !(candidate.nodeIds || []).includes(node.id);
+          });
+        }
+        var domains = Array.isArray(item.domains) ? item.domains : [];
+        var domain = domains[0] || item.subject || item.certificate_path.split('/').pop().replace(/\.(?:pem|crt)$/i, '');
+        if (!certificate) {
+          certificate = {
+            id: uid('cert'),
+            name: domain,
+            domain: domain,
+            issuer: item.issuer || '未知签发者',
+            days: Number(item.days_remaining || 0),
+            source: '节点导入',
+            autoRenew: false,
+            siteIds: [],
+            nodeIds: [],
+            nodeHashes: {},
+            nodePaths: {},
+            note: '从节点现有证书导入；只保存证书信息、文件路径和校验值',
+            fingerprint: item.fingerprint,
+            notAfter: item.not_after,
+            deployStatus: 'success'
+          };
+          state.certificates.unshift(certificate);
+        } else {
+          certificate.name = certificate.name || domain;
+          certificate.domain = domain;
+          certificate.issuer = item.issuer || certificate.issuer || '未知签发者';
+          certificate.days = Number(item.days_remaining || 0);
+          certificate.source = certificate.source || '节点导入';
+          certificate.fingerprint = item.fingerprint;
+          certificate.notAfter = item.not_after;
+        }
+        certificate.nodeIds = certificate.nodeIds || [];
+        certificate.nodeHashes = certificate.nodeHashes || {};
+        certificate.nodePaths = certificate.nodePaths || {};
+        certificate.nodeHashes[node.id] = {
+          certificateHash: item.certificate_sha256,
+          keyHash: item.key_material_sha256
+        };
+        certificate.nodePaths[node.id] = {
+          certificatePath: item.certificate_path,
+          keyPath: item.private_key_path
+        };
+        if (!certificate.nodeIds.includes(node.id)) certificate.nodeIds.push(node.id);
+        bindImportedCertificateToSites(certificate, node, item);
+        return true;
+      }
+
+      function processCertificateInventoryJobs(jobs) {
+        state.importedCertificateInventoryJobs = Array.isArray(state.importedCertificateInventoryJobs)
+          ? state.importedCertificateInventoryJobs
+          : [];
+        var processed = new Set(state.importedCertificateInventoryJobs);
+        var importedCount = 0;
+        var failedCount = 0;
+        var skippedCount = 0;
+        var truncated = false;
+        var changed = false;
+        jobs.filter(function (job) {
+          return job.action === 'certificate_inventory' && ['succeeded', 'failed', 'expired'].includes(job.status) && !processed.has(job.id);
+        }).forEach(function (job) {
+          processed.add(job.id);
+          changed = true;
+          if (job.status !== 'succeeded' || !job.result || !job.result.certificate_inventory) {
+            failedCount += 1;
+            return;
+          }
+          var inventory = job.result.certificate_inventory;
+          var node = getNode(job.node_id);
+          (inventory.certificates || []).forEach(function (item) {
+            if (importCertificateInventoryItem(item, node)) importedCount += 1;
+          });
+          skippedCount += Number(inventory.skipped_count || 0);
+          truncated = truncated || Boolean(inventory.truncated);
+        });
+        if (!changed) return;
+        state.importedCertificateInventoryJobs = Array.from(processed).slice(-200);
+        saveState();
+        if (failedCount) {
+          notify('部分节点证书扫描失败，请到“执行记录”查看详情');
+        } else if (importedCount) {
+          notify('已导入 ' + importedCount + ' 个节点证书' + (skippedCount ? '，跳过 ' + skippedCount + ' 个无法安全配对的文件' : '') + (truncated ? '；结果已达到安全上限' : ''));
+        } else {
+          notify('扫描完成，没有发现可安全配对的证书和私钥');
+        }
+      }
+
       async function refreshRemoteData(includeUiState) {
         var requests = [
           apiRequest('/api/v1/admin/nodes'),
@@ -2767,11 +2880,13 @@
           state.sites = Array.isArray(remoteState.sites) ? remoteState.sites : [];
           state.certificates = Array.isArray(remoteState.certificates) ? remoteState.certificates : [];
           state.importedInventoryJobs = Array.isArray(remoteState.importedInventoryJobs) ? remoteState.importedInventoryJobs : [];
+          state.importedCertificateInventoryJobs = Array.isArray(remoteState.importedCertificateInventoryJobs) ? remoteState.importedCertificateInventoryJobs : [];
         }
         pendingEnrollments = (responses[2] && responses[2].items) || [];
         var rawJobs = responses[1].items || [];
         state.nodes = (responses[0].items || []).map(mapRemoteNode);
         processConfigInventoryJobs(rawJobs);
+        processCertificateInventoryJobs(rawJobs);
         applyRemoteJobOutcomes(rawJobs);
         state.runs = rawJobs.map(mapRemoteJob);
         selectedSiteId = getSite(selectedSiteId) ? selectedSiteId : (state.sites[0] ? state.sites[0].id : null);
@@ -3127,7 +3242,7 @@
             var node = getNode(nodeId);
             if (!node) return '';
             var paths = certificateTargetPaths(cert, node);
-            return '<div class="cert-location"><span class="cert-location-node" title="' + escapeHtml(node.name) + '">' + escapeHtml(node.name) + '</span><code class="cert-location-path" title="' + escapeHtml(paths.certificatePath) + '">' + escapeHtml(paths.certificatePath) + '</code></div>';
+            return '<div class="cert-location"><span class="cert-location-node" title="' + escapeHtml(node.name) + '">' + escapeHtml(node.name) + '</span><code class="cert-location-path" title="' + escapeHtml(paths.certificatePath) + '">证书：' + escapeHtml(paths.certificatePath) + '</code><code class="cert-location-path" title="' + escapeHtml(paths.keyPath) + '">私钥：' + escapeHtml(paths.keyPath) + '</code></div>';
           }).filter(Boolean).join('');
           return [
             '<div class="table-row">',
@@ -3141,7 +3256,7 @@
         }).join('');
 
         return [
-          pageHead('证书', '管理域名证书、到期提醒和多节点原路径替换。', '<button class="button primary" type="button" data-action="add-certificate">＋ 添加证书</button>'),
+          pageHead('证书', '管理域名证书、到期提醒和多节点原路径替换。', '<button class="button" type="button" data-action="import-certificates">扫描节点证书</button><button class="button primary" type="button" data-action="add-certificate">＋ 添加证书</button>'),
           '<div class="panel cert-table">',
           '  <div class="table-head"><span>证书 / 域名</span><span>节点与证书文件</span><span>剩余时间</span><span>状态</span><span>操作</span></div>',
           rows,
@@ -3205,7 +3320,7 @@
           pendingSection,
           '<div class="section-head" style="margin-top:18px"><div><h2>已托管节点</h2><p>批准后 Agent 会自动完成机器身份初始化并开始心跳。</p></div></div>',
           '<div class="node-grid">' + cards + '</div>',
-          '<p class="view-note">不提供任意 Shell。Agent 只接受 inspect、nginx_test、nginx_reload、config_inventory、config_read、config_hash、config_apply、config_delete、certificate_apply 九种固定动作。</p>'
+          '<p class="view-note">不提供任意 Shell。Agent 只接受 inspect、nginx_test、nginx_reload、config_inventory、certificate_inventory、config_read、config_hash、config_apply、config_delete、certificate_apply 十种固定动作。</p>'
         ].join('');
       }
 
@@ -4134,6 +4249,26 @@
           var command = document.getElementById('agent-command').textContent;
           if (navigator.clipboard) navigator.clipboard.writeText(command);
           notify('安装命令已复制');
+        }
+        else if (action === 'import-certificates') {
+          if (!remoteConnected) {
+            notify('请先连接控制端');
+            return;
+          }
+          var certificateNodeIds = onlineNodes().map(function (node) { return node.id; });
+          if (!certificateNodeIds.length) {
+            notify('没有在线 Agent 可供扫描');
+            return;
+          }
+          apiRequest('/api/v1/admin/jobs', {
+            method: 'POST',
+            body: { node_ids: certificateNodeIds, action: 'certificate_inventory', payload: {}, ttl_seconds: 120 }
+          }).then(function () {
+            notify('已下发证书扫描任务；只回传元数据和校验值，不回传私钥');
+            return refreshRemoteData(false);
+          }).catch(function (error) {
+            notify('证书扫描失败：' + error.message);
+          });
         }
         else if (action === 'import-sites') {
           if (remoteConnected) {
