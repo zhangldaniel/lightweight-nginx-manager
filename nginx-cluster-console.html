@@ -685,7 +685,19 @@
     .detail-panel {
       position: sticky;
       top: 78px;
-      overflow: hidden;
+      max-height: calc(100vh - 94px);
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    .detail-sticky-top {
+      position: sticky;
+      top: 0;
+      z-index: 4;
+      background: #fbfcfc;
+      box-shadow: 0 7px 16px rgba(24, 47, 40, .07);
     }
 
     .detail-header {
@@ -787,12 +799,26 @@
       word-break: break-word;
     }
 
+    .config-preview-meta {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .config-preview-meta code {
+      overflow-wrap: anywhere;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+
     .detail-actions {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 10px;
-      padding: 16px 21px 21px;
-      border-top: 1px solid var(--line);
+      padding: 14px 21px 16px;
+      border-bottom: 1px solid var(--line);
       background: #fbfcfc;
     }
 
@@ -1456,6 +1482,12 @@
 
       .detail-panel {
         position: static;
+        max-height: none;
+        overflow: visible;
+      }
+
+      .detail-sticky-top {
+        position: static;
       }
 
       .summary-grid {
@@ -1617,8 +1649,7 @@
       }
 
       .detail-actions {
-        position: sticky;
-        bottom: 0;
+        position: static;
       }
     }
 
@@ -2132,6 +2163,7 @@
       var selectedSiteId = null;
       var siteQuery = '';
       var siteFilter = 'all';
+      var siteNodeFilter = 'all';
       var editingSiteId = null;
       var editingCertificateId = null;
       var pendingDeploySiteId = null;
@@ -2509,6 +2541,7 @@
           if (pending.deleteConfig) {
             site.nodeHashes = site.nodeHashes || {};
             site.nodeConfigPaths = site.nodeConfigPaths || {};
+            site.nodeConfigs = site.nodeConfigs || {};
             var removedNodes = [];
             pending.jobs.forEach(function (item) {
               var job = byId[item.id];
@@ -2516,6 +2549,7 @@
               site.nodeIds = site.nodeIds.filter(function (nodeId) { return nodeId !== item.nodeId; });
               delete site.nodeHashes[item.nodeId];
               delete site.nodeConfigPaths[item.nodeId];
+              delete site.nodeConfigs[item.nodeId];
               var removedNode = getNode(item.nodeId);
               if (removedNode) {
                 removedNode.sites = Math.max(0, Number(removedNode.sites || 0) - 1);
@@ -2537,12 +2571,14 @@
           } else if (pending.transfer) {
             site.nodeHashes = site.nodeHashes || {};
             site.nodeConfigPaths = site.nodeConfigPaths || {};
+            site.nodeConfigs = site.nodeConfigs || {};
             var transferredNodes = [];
             pending.jobs.forEach(function (item) {
               var job = byId[item.id];
               if (!job || job.status !== 'succeeded') return;
               if (job.result && job.result.config_hash) site.nodeHashes[item.nodeId] = job.result.config_hash;
               if (item.path) site.nodeConfigPaths[item.nodeId] = item.path;
+              delete site.nodeConfigs[item.nodeId];
               if (!site.nodeIds.includes(item.nodeId)) {
                 site.nodeIds.push(item.nodeId);
                 var addedNode = getNode(item.nodeId);
@@ -2567,10 +2603,12 @@
           } else if (pending.publish) {
             site.nodeHashes = site.nodeHashes || {};
             site.nodeConfigPaths = site.nodeConfigPaths || {};
+            site.nodeConfigs = site.nodeConfigs || {};
             pending.jobs.forEach(function (item) {
               var job = byId[item.id];
               if (job && job.result && job.result.config_hash) site.nodeHashes[item.nodeId] = job.result.config_hash;
               if (job && job.status === 'succeeded' && item.path) site.nodeConfigPaths[item.nodeId] = item.path;
+              if (job && job.status === 'succeeded') delete site.nodeConfigs[item.nodeId];
             });
             site.version += 1;
             site.status = 'published';
@@ -2669,14 +2707,15 @@
       function importInventoryFile(file, node) {
         var path = String(file.path || '');
         if (!path || !node || !file.sha256 || typeof file.content !== 'string') return false;
-        var alreadyImported = state.sites.some(function (site) {
+        var site = state.sites.find(function (site) {
           return site.nodeConfigPaths && site.nodeConfigPaths[node.id] === path;
         });
-        if (alreadyImported) return false;
         var metadata = inventorySiteMetadata(file);
-        var site = state.sites.find(function (candidate) {
-          return candidate.importedFileName === metadata.filename && candidate.domain === metadata.domain;
-        });
+        if (!site) {
+          site = state.sites.find(function (candidate) {
+            return candidate.importedFileName === metadata.filename && candidate.domain === metadata.domain;
+          });
+        }
         if (!site) {
           site = {
             id: uid('site'),
@@ -2696,26 +2735,35 @@
             importedFileName: metadata.filename,
             nodeHashes: {},
             nodeConfigPaths: {},
+            nodeConfigs: {},
             history: [{ version: 1, note: '从节点导入现有配置（未修改节点文件）', time: '刚刚', user: '控制端' }]
           };
           state.sites.unshift(site);
         }
-        var existingHashes = Object.keys(site.nodeHashes || {}).map(function (nodeId) {
-          return site.nodeHashes[nodeId];
-        }).filter(Boolean);
-        if (existingHashes.length && !existingHashes.includes(file.sha256)) {
-          site.status = 'drift';
-          site.changeNote = '导入时发现多节点配置不一致';
-        }
         site.nodeHashes = site.nodeHashes || {};
         site.nodeConfigPaths = site.nodeConfigPaths || {};
+        site.nodeConfigs = site.nodeConfigs || {};
+        var changed = site.nodeHashes[node.id] !== file.sha256
+          || site.nodeConfigPaths[node.id] !== path
+          || (file.content !== site.config && site.nodeConfigs[node.id] !== file.content)
+          || (file.content === site.config && Object.prototype.hasOwnProperty.call(site.nodeConfigs, node.id));
         site.nodeHashes[node.id] = file.sha256;
         site.nodeConfigPaths[node.id] = path;
+        if (file.content === site.config) delete site.nodeConfigs[node.id];
+        else site.nodeConfigs[node.id] = file.content;
         if (!site.nodeIds.includes(node.id)) {
           site.nodeIds.push(node.id);
           node.sites = Number(node.sites || 0) + 1;
+          changed = true;
         }
-        return true;
+        if (Object.keys(site.nodeConfigs).length) {
+          site.status = 'drift';
+          site.changeNote = '扫描发现节点实际配置与平台配置不一致';
+        } else if (site.status === 'drift') {
+          site.status = 'published';
+          site.changeNote = '重新扫描确认各节点配置一致';
+        }
+        return changed;
       }
 
       function processConfigInventoryJobs(jobs) {
@@ -2885,6 +2933,7 @@
         pendingEnrollments = (responses[2] && responses[2].items) || [];
         var rawJobs = responses[1].items || [];
         state.nodes = (responses[0].items || []).map(mapRemoteNode);
+        if (siteNodeFilter !== 'all' && !getNode(siteNodeFilter)) siteNodeFilter = 'all';
         processConfigInventoryJobs(rawJobs);
         processCertificateInventoryJobs(rawJobs);
         applyRemoteJobOutcomes(rawJobs);
@@ -3106,8 +3155,29 @@
           var matchesFilter = siteFilter === 'all' ||
             (siteFilter === 'attention' && (site.status === 'drift' || site.status === 'failed')) ||
             site.status === siteFilter;
-          return matchesQuery && matchesFilter;
+          var matchesNode = siteNodeFilter === 'all' || (site.nodeIds || []).includes(siteNodeFilter);
+          return matchesQuery && matchesFilter && matchesNode;
         });
+      }
+
+      function visibleSiteNodes(site) {
+        var nodes = (site.nodeIds || []).map(function (id) { return getNode(id); }).filter(Boolean);
+        if (siteNodeFilter === 'all') return nodes;
+        return nodes.filter(function (node) { return node.id === siteNodeFilter; });
+      }
+
+      function selectedPreviewNode(site) {
+        if (siteNodeFilter !== 'all' && (site.nodeIds || []).includes(siteNodeFilter)) return getNode(siteNodeFilter);
+        var nodes = visibleSiteNodes(site);
+        var driftNode = nodes.find(function (node) {
+          return site.nodeConfigs && typeof site.nodeConfigs[node.id] === 'string';
+        });
+        return driftNode || nodes[0] || null;
+      }
+
+      function selectedPreviewConfig(site, node) {
+        if (node && site.nodeConfigs && typeof site.nodeConfigs[node.id] === 'string') return site.nodeConfigs[node.id];
+        return String(site.config || '');
       }
 
       function ensureFilteredSiteSelection() {
@@ -3120,13 +3190,13 @@
       function renderSiteTable() {
         var sites = filteredSites();
         if (!sites.length) {
-          return '<div class="list-panel"><div class="empty"><strong>没有匹配的站点</strong>尝试调整搜索或状态筛选。</div></div>';
+          return '<div class="list-panel"><div class="empty"><strong>没有匹配的站点</strong>尝试切换 Agent、搜索条件或状态筛选。</div></div>';
         }
 
         var rows = sites.map(function (site) {
           var cert = getCert(site.certificateId);
           var status = siteStatus(site);
-          var nodes = site.nodeIds.map(function (id) { return getNode(id); }).filter(Boolean);
+          var nodes = visibleSiteNodes(site);
           var nodeChips = nodes.slice(0, 2).map(function (node) {
             return '<span class="chip ' + (node.online ? '' : 'red') + '">' + escapeHtml(node.name) + '</span>';
           }).join('');
@@ -3156,10 +3226,21 @@
         if (!site) return '<aside class="detail-panel" id="site-detail-slot"><div class="empty"><strong>暂无匹配站点</strong>调整搜索条件或创建新站点。</div></aside>';
         var cert = getCert(site.certificateId);
         var status = siteStatus(site);
-        var nodes = site.nodeIds.map(function (id) { return getNode(id); }).filter(Boolean);
+        var nodes = visibleSiteNodes(site);
+        var previewNode = selectedPreviewNode(site);
+        var previewConfig = selectedPreviewConfig(site, previewNode);
+        var previewPath = previewNode ? managedConfigPath(site, previewNode) : (site.configPath || '尚未分配节点路径');
+        var previewHash = previewNode && site.nodeHashes && site.nodeHashes[previewNode.id]
+          ? String(site.nodeHashes[previewNode.id]).slice(0, 16)
+          : '待探测';
+        var previewSource = previewNode && site.nodeConfigs && typeof site.nodeConfigs[previewNode.id] === 'string'
+          ? '节点实际配置'
+          : '平台当前配置';
+        var previewHasDrift = previewSource === '节点实际配置';
         var nodeRows = nodes.map(function (node) {
-          var nodeState = !node.online ? '离线' : (node.drift || site.status === 'drift' ? 'Hash 不一致' : 'v' + site.version + ' 一致');
-          var chipClass = !node.online ? 'danger' : (node.drift || site.status === 'drift' ? 'warn' : '');
+          var nodeHasDrift = Boolean(node.drift || (site.nodeConfigs && typeof site.nodeConfigs[node.id] === 'string'));
+          var nodeState = !node.online ? '离线' : (nodeHasDrift ? 'Hash 不一致' : 'v' + site.version + ' 一致');
+          var chipClass = !node.online ? 'danger' : (nodeHasDrift ? 'warn' : '');
           return [
             '<div class="node-mini">',
             '  <div><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(node.ip) + ' · ' + escapeHtml(node.lastSeen) + '</span></div>',
@@ -3173,31 +3254,35 @@
         }).join('');
 
         var warning = '';
-        if (site.status === 'drift') {
+        if (previewHasDrift) {
           warning = '<div class="notice"><span>!</span><div>节点上的配置 Hash 与平台 v' + site.version + ' 不一致。发布前请选择导入节点配置或覆盖节点。</div></div>';
+        } else if (site.status === 'drift') {
+          warning = '<div class="notice"><span>!</span><div>所选节点与平台配置一致，但该站点的其他节点仍有配置漂移。</div></div>';
         }
 
         return [
           '<aside class="detail-panel" id="site-detail-slot">',
-          '  <div class="detail-header">',
-          '    <div class="detail-title-row"><h2>' + escapeHtml(site.domain) + '</h2><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
-          '    <p>' + escapeHtml(site.environment) + ' · ' + formatSiteType(site.type) + ' · 配置 v' + site.version + '</p>',
+          '  <div class="detail-sticky-top">',
+          '    <div class="detail-header">',
+          '      <div class="detail-title-row"><h2>' + escapeHtml(site.domain) + '</h2><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
+          '      <p>' + escapeHtml(site.environment) + ' · ' + formatSiteType(site.type) + ' · 配置 v' + site.version + '</p>',
+          '    </div>',
+          '    <div class="detail-actions">',
+          '      <button class="button" type="button" data-action="edit-config" data-site-id="' + escapeHtml(site.id) + '">编辑配置</button>',
+          '      <button class="button" type="button" data-action="transfer-config" data-site-id="' + escapeHtml(site.id) + '">复制到其他节点</button>',
+          '      <button class="button" type="button" data-action="validate-site" data-site-id="' + escapeHtml(site.id) + '">逐节点校验</button>',
+          previewHasDrift ? '<button class="button" type="button" data-action="import-drift" data-site-id="' + escapeHtml(site.id) + '">导入节点配置</button>' : '<button class="button" type="button" data-action="view-runs" data-site-id="' + escapeHtml(site.id) + '">查看记录</button>',
+          '      <button class="button subtle-danger" type="button" data-action="delete-config" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length ? '' : ' disabled') + '>从节点移除配置</button>',
+          '      <button class="button primary" type="button" data-action="deploy-site" data-site-id="' + escapeHtml(site.id) + '">发布并 reload</button>',
+          '    </div>',
           '  </div>',
           '  <div class="detail-body">',
           warning,
+          '    <div class="detail-block"><span class="detail-label">配置预览' + (previewNode ? ' · ' + escapeHtml(previewNode.name) : '') + '</span><div class="config-preview-meta"><span>' + previewSource + ' · SHA-256 ' + escapeHtml(previewHash) + '</span><code>' + escapeHtml(previewPath) + '</code></div><pre class="config-preview">' + escapeHtml(previewConfig) + '</pre></div>',
           '    <div class="detail-block"><span class="detail-label">配置备注</span><div class="detail-value">' + escapeHtml(site.note || '暂无备注') + '</div><span class="cell-sub">最近变更：' + escapeHtml(site.changeNote || '暂无') + '</span></div>',
           '    <div class="detail-block"><span class="detail-label">部署节点</span><div class="node-mini-list">' + nodeRows + '</div></div>',
           '    <div class="detail-block"><span class="detail-label">证书</span><div class="detail-value">' + (cert ? escapeHtml(cert.domain) + ' · ' + escapeHtml(cert.issuer) : '未绑定证书') + '</div><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天 · ' + escapeHtml(cert.source) : '当前仅 HTTP') + '</span></div>',
-          '    <div class="detail-block"><span class="detail-label">当前配置</span><pre class="config-preview">' + escapeHtml(site.config) + '</pre></div>',
           '    <div class="detail-block"><span class="detail-label">版本记录</span><div class="node-mini-list">' + history + '</div></div>',
-          '  </div>',
-          '  <div class="detail-actions">',
-          '    <button class="button" type="button" data-action="edit-config" data-site-id="' + escapeHtml(site.id) + '">编辑配置</button>',
-          '    <button class="button" type="button" data-action="transfer-config" data-site-id="' + escapeHtml(site.id) + '">复制到其他节点</button>',
-          '    <button class="button" type="button" data-action="validate-site" data-site-id="' + escapeHtml(site.id) + '">逐节点校验</button>',
-          site.status === 'drift' ? '<button class="button" type="button" data-action="import-drift" data-site-id="' + escapeHtml(site.id) + '">导入节点配置</button>' : '<button class="button" type="button" data-action="view-runs" data-site-id="' + escapeHtml(site.id) + '">查看记录</button>',
-          '    <button class="button subtle-danger full" type="button" data-action="delete-config" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length ? '' : ' disabled') + '>从节点移除配置</button>',
-          '    <button class="button primary full" type="button" data-action="deploy-site" data-site-id="' + escapeHtml(site.id) + '">发布并 reload</button>',
           '  </div>',
           '</aside>'
         ].join('');
@@ -3206,9 +3291,14 @@
       function renderSites() {
         if (!selectedSiteId || !getSite(selectedSiteId)) selectedSiteId = state.sites[0] ? state.sites[0].id : null;
         ensureFilteredSiteSelection();
+        var nodeOptions = ['<option value="all"' + (siteNodeFilter === 'all' ? ' selected' : '') + '>全部 Agent（' + state.sites.length + '）</option>'].concat(state.nodes.map(function (node) {
+          var count = state.sites.filter(function (site) { return (site.nodeIds || []).includes(node.id); }).length;
+          return '<option value="' + escapeHtml(node.id) + '"' + (siteNodeFilter === node.id ? ' selected' : '') + '>' + escapeHtml(node.name) + '（' + count + '）</option>';
+        })).join('');
         var toolbar = [
           '<div class="toolbar">',
           '  <div class="search-wrap"><span>⌕</span><input class="input" id="site-search" placeholder="搜索域名、配置备注或变更说明" value="' + escapeHtml(siteQuery) + '"></div>',
+          '  <select class="select" id="site-node-filter" aria-label="Agent 节点">' + nodeOptions + '</select>',
           '  <select class="select" id="site-status-filter" aria-label="站点状态">',
           '    <option value="all"' + (siteFilter === 'all' ? ' selected' : '') + '>全部状态</option>',
           '    <option value="published"' + (siteFilter === 'published' ? ' selected' : '') + '>已发布</option>',
@@ -3381,6 +3471,14 @@
         if (filter) {
           filter.addEventListener('change', function (event) {
             siteFilter = event.target.value;
+            render();
+          });
+        }
+        var nodeFilter = document.getElementById('site-node-filter');
+        if (nodeFilter) {
+          nodeFilter.addEventListener('change', function (event) {
+            siteNodeFilter = event.target.value;
+            ensureFilteredSiteSelection();
             render();
           });
         }
@@ -3906,6 +4004,7 @@
         var targets = nodeIds.map(getNode).filter(Boolean);
         site.nodeHashes = site.nodeHashes || {};
         site.nodeConfigPaths = site.nodeConfigPaths || {};
+        site.nodeConfigs = site.nodeConfigs || {};
         targets.forEach(function (node) {
           if (!site.nodeIds.includes(node.id)) {
             site.nodeIds.push(node.id);
@@ -3913,6 +4012,7 @@
           }
           site.nodeHashes[node.id] = 'demo-' + uid('hash');
           site.nodeConfigPaths[node.id] = migrationConfigPath(site, node);
+          delete site.nodeConfigs[node.id];
         });
         site.status = 'published';
         site.updatedAt = '刚刚';
@@ -3937,10 +4037,12 @@
         var targets = nodeIds.map(getNode).filter(Boolean);
         site.nodeHashes = site.nodeHashes || {};
         site.nodeConfigPaths = site.nodeConfigPaths || {};
+        site.nodeConfigs = site.nodeConfigs || {};
         targets.forEach(function (node) {
           site.nodeIds = site.nodeIds.filter(function (nodeId) { return nodeId !== node.id; });
           delete site.nodeHashes[node.id];
           delete site.nodeConfigPaths[node.id];
+          delete site.nodeConfigs[node.id];
           node.sites = Math.max(0, Number(node.sites || 0) - 1);
         });
         site.updatedAt = '刚刚';
@@ -4188,8 +4290,14 @@
         else if (action === 'import-drift') {
           var driftSite = getSite(siteId);
           if (driftSite) {
+            var driftNode = selectedPreviewNode(driftSite);
+            var driftConfig = driftNode && driftSite.nodeConfigs && driftSite.nodeConfigs[driftNode.id];
+            if (driftConfig) {
+              driftSite.config = driftConfig;
+              delete driftSite.nodeConfigs[driftNode.id];
+            }
             driftSite.status = 'draft';
-            driftSite.changeNote = '从节点导入漂移配置，待审核';
+            driftSite.changeNote = '从 ' + (driftNode ? driftNode.name : '节点') + ' 导入漂移配置，待审核';
             driftSite.updatedAt = '刚刚';
             saveState();
             notify('节点配置已导入为新草稿，线上文件未改变');
@@ -4338,6 +4446,7 @@
           changeNote: '草稿：创建站点',
           updatedAt: '刚刚',
           config: defaultConfig(domain, type, target, getCert(certId)),
+          nodeConfigs: {},
           history: []
         };
         state.sites.unshift(site);
