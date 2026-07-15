@@ -1,0 +1,32 @@
+[Unit]
+Description=Nginx Manager Agent privileged helper
+Requires=nginx-manager-agent-recover.service
+After=local-fs.target nginx-manager-agent-recover.service
+Before=nginx-manager-agent.service
+
+[Service]
+Type=simple
+User=root
+Group=nginx-manager-agent
+ExecStart=/opt/nginx-manager-agent/nginx_agent.py --config /etc/nginx-manager-agent/config.json helper --allowed-uid nginx-manager-agent --socket-group nginx-manager-agent
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL
+ReadWritePaths=/etc/nginx/nginx-manager.d /etc/nginx/ssl/nginx-manager /var/lib/nginx-manager-agent-helper /run/nginx-manager-agent -/var/log/nginx -/var/cache/nginx
+RuntimeDirectory=nginx-manager-agent
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

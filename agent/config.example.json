@@ -1,0 +1,43 @@
+{
+  "server_url": "https://nginx-manager.example.com",
+  "node_name": "edge-bj-01",
+  "hostname": "edge-bj-01.internal",
+  "labels": {
+    "region": "beijing",
+    "environment": "production"
+  },
+  "ca_file": null,
+  "tls_skip_verify": false,
+  "allow_insecure_http": false,
+  "poll_interval": 3,
+  "heartbeat_interval": 20,
+  "api_timeout": 30,
+  "command_timeout": 20,
+  "nginx_binary": "/usr/sbin/nginx",
+  "openssl_binary": "/usr/bin/openssl",
+  "nginx_config": "/etc/nginx/nginx.conf",
+  "nginx_root": "/etc/nginx",
+  "allowed_config_roots": [
+    "/etc/nginx/nginx-manager.d"
+  ],
+  "allowed_certificate_roots": [
+    "/etc/nginx/ssl/nginx-manager"
+  ],
+  "state_dir": "/var/lib/nginx-manager-agent",
+  "helper_state_dir": "/var/lib/nginx-manager-agent-helper",
+  "helper_socket": "/run/nginx-manager-agent/helper.sock",
+  "helper_timeout": 120,
+  "helper_max_request_bytes": 8388608,
+  "max_file_bytes": 4194304,
+  "max_command_output_bytes": 32768,
+  "backup_retention": 20,
+  "health_url": "http://127.0.0.1/healthz",
+  "health_expected_status": 200,
+  "health_timeout": 5,
+  "health_attempts": 3,
+  "allowed_health_hosts": [
+    "127.0.0.1",
+    "::1",
+    "localhost"
+  ]
+}

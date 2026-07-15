@@ -1,0 +1,23 @@
+[Unit]
+Description=Recover interrupted Nginx Manager publications before Nginx starts
+After=local-fs.target
+Before=nginx.service nginx-manager-agent-helper.service
+
+[Service]
+Type=oneshot
+User=root
+Group=nginx-manager-agent
+ExecStart=/opt/nginx-manager-agent/nginx_agent.py --config /etc/nginx-manager-agent/config.json recover
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL
+ReadWritePaths=/etc/nginx/nginx-manager.d /etc/nginx/ssl/nginx-manager /var/lib/nginx-manager-agent-helper -/var/log/nginx -/var/cache/nginx
+UMask=0077

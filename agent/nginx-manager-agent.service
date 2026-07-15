@@ -1,0 +1,27 @@
+[Unit]
+Description=Nginx Manager Agent (unprivileged network client)
+After=network-online.target nginx-manager-agent-helper.service
+Wants=network-online.target
+Requires=nginx-manager-agent-helper.service
+
+[Service]
+Type=simple
+User=nginx-manager-agent
+Group=nginx-manager-agent
+ExecStart=/opt/nginx-manager-agent/nginx_agent.py --config /etc/nginx-manager-agent/config.json run
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/nginx-manager-agent
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

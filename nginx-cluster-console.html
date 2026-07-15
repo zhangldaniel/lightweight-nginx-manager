@@ -1,0 +1,4339 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="轻量、多节点、Agent 驱动的 Nginx 配置与证书托管控制台">
+  <title>Nginx 托管台</title>
+  <style>
+    :root {
+      --bg: #f4f7f6;
+      --panel: #ffffff;
+      --panel-soft: #f8faf9;
+      --line: #dce5e2;
+      --line-strong: #c9d6d2;
+      --text: #17231f;
+      --muted: #677771;
+      --muted-2: #8b9994;
+      --primary: #1967d2;
+      --primary-soft: #eaf2ff;
+      --green: #12806d;
+      --green-soft: #e9f7f3;
+      --amber: #ae6a0a;
+      --amber-soft: #fff3de;
+      --red: #c44545;
+      --red-soft: #fff0ef;
+      --ink: #11201c;
+      --code-bg: #15231f;
+      --code-text: #dfeae6;
+      --shadow: 0 14px 36px rgba(25, 46, 40, .08);
+      --radius: 14px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      color-scheme: light;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .55;
+    }
+
+    :focus-visible {
+      outline: 3px solid rgba(25, 103, 210, .25);
+      outline-offset: 2px;
+    }
+
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 218px minmax(0, 1fr);
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 22px 14px 16px;
+      background: rgba(251, 253, 252, .96);
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      z-index: 20;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 0 8px 22px;
+    }
+
+    .brand-mark {
+      width: 38px;
+      height: 38px;
+      border-radius: 11px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 800;
+      background: linear-gradient(145deg, #236edd, #16927d);
+      box-shadow: 0 8px 18px rgba(35, 110, 221, .22);
+    }
+
+    .brand-name {
+      font-weight: 750;
+      letter-spacing: -.01em;
+    }
+
+    .brand-sub {
+      display: block;
+      color: var(--muted-2);
+      font-size: 10px;
+      letter-spacing: .08em;
+      margin-top: 1px;
+    }
+
+    .nav-label {
+      padding: 14px 11px 7px;
+      color: var(--muted-2);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .12em;
+    }
+
+    .nav {
+      display: grid;
+      gap: 4px;
+    }
+
+    .nav-button {
+      width: 100%;
+      min-height: 42px;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: #53635d;
+      padding: 0 11px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-align: left;
+    }
+
+    .nav-button:hover {
+      background: #f0f4f2;
+    }
+
+    .nav-button.active {
+      color: #174ea6;
+      background: var(--primary-soft);
+      font-weight: 700;
+    }
+
+    .nav-icon {
+      width: 22px;
+      text-align: center;
+      font-size: 16px;
+    }
+
+    .nav-count {
+      margin-left: auto;
+      min-width: 22px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: #edf2f0;
+      color: #6b7a75;
+      font-size: 10px;
+      text-align: center;
+    }
+
+    .agent-card {
+      margin-top: auto;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+    }
+
+    .agent-card-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 12px;
+    }
+
+    .agent-card p {
+      margin: 6px 0 10px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .agent-card button {
+      border: 0;
+      background: transparent;
+      color: var(--primary);
+      padding: 0;
+      font-weight: 700;
+      font-size: 11px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 4px rgba(18, 128, 109, .1);
+      flex: none;
+    }
+
+    .status-dot.warn {
+      background: var(--amber);
+      box-shadow: 0 0 0 4px rgba(174, 106, 10, .1);
+    }
+
+    .status-dot.offline {
+      background: var(--red);
+      box-shadow: 0 0 0 4px rgba(196, 69, 69, .1);
+    }
+
+    .main {
+      min-width: 0;
+    }
+
+    .topbar {
+      height: 64px;
+      position: sticky;
+      top: 0;
+      z-index: 15;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 28px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, .88);
+      backdrop-filter: blur(12px);
+    }
+
+    .breadcrumb {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .breadcrumb strong {
+      color: var(--text);
+    }
+
+    .topbar-spacer {
+      flex: 1;
+    }
+
+    .connection-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 34px;
+      padding: 0 11px;
+      border: 1px solid #bfe1d9;
+      border-radius: 9px;
+      background: #effaf7;
+      color: #116f60;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .session-role {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel-soft);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .ghost-button,
+    .button,
+    .icon-button {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: #33433e;
+      border-radius: 9px;
+      font-weight: 700;
+    }
+
+    .ghost-button,
+    .button {
+      min-height: 40px;
+      padding: 0 14px;
+    }
+
+    .ghost-button {
+      min-height: 34px;
+      padding: 0 11px;
+      font-size: 11px;
+    }
+
+    .button:hover,
+    .ghost-button:hover,
+    .icon-button:hover {
+      border-color: #b8c7c2;
+      box-shadow: 0 6px 16px rgba(25, 46, 40, .07);
+    }
+
+    .button.primary {
+      color: #fff;
+      border-color: var(--primary);
+      background: var(--primary);
+    }
+
+    .button.success {
+      color: #fff;
+      border-color: var(--green);
+      background: var(--green);
+    }
+
+    .button.danger {
+      color: #fff;
+      border-color: var(--red);
+      background: var(--red);
+    }
+
+    .button.subtle-danger {
+      color: var(--red);
+      border-color: #efc2bf;
+      background: var(--red-soft);
+    }
+
+    .icon-button {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+    }
+
+    .content {
+      max-width: 1720px;
+      margin: 0 auto;
+      padding: clamp(28px, 2.1vw, 38px) clamp(24px, 2.1vw, 38px) 54px;
+    }
+
+    .page-head {
+      display: flex;
+      align-items: flex-end;
+      gap: 22px;
+      margin-bottom: 24px;
+    }
+
+    .page-head h1 {
+      margin: 0 0 5px;
+      font-size: 29px;
+      line-height: 1.2;
+      letter-spacing: -.025em;
+    }
+
+    .page-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .page-actions {
+      margin-left: auto;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 21px;
+    }
+
+    .summary-card {
+      min-height: 108px;
+      padding: 19px 20px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+      display: grid;
+      align-content: center;
+      gap: 3px;
+    }
+
+    .summary-card button {
+      appearance: none;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      display: grid;
+      gap: 3px;
+    }
+
+    .summary-label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .summary-value {
+      font-size: 28px;
+      font-weight: 750;
+      letter-spacing: -.03em;
+    }
+
+    .summary-hint {
+      color: var(--muted-2);
+      font-size: 11px;
+    }
+
+    .summary-hint.warn {
+      color: var(--amber);
+      font-weight: 700;
+    }
+
+    .summary-hint.danger {
+      color: var(--red);
+      font-weight: 700;
+    }
+
+    .toolbar {
+      min-height: 62px;
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 12px 12px 0 0;
+      background: var(--panel);
+    }
+
+    .search-wrap {
+      position: relative;
+      flex: 1;
+      min-width: 190px;
+    }
+
+    .search-wrap span {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--muted-2);
+      pointer-events: none;
+    }
+
+    .input,
+    .select,
+    .textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #fff;
+      color: var(--text);
+      outline: 0;
+    }
+
+    .input,
+    .select {
+      min-height: 44px;
+      padding: 0 13px;
+    }
+
+    .search-wrap .input {
+      padding-left: 38px;
+    }
+
+    .textarea {
+      min-height: 96px;
+      padding: 10px 11px;
+      resize: vertical;
+    }
+
+    .input:focus,
+    .select:focus,
+    .textarea:focus {
+      border-color: #8db2ed;
+      box-shadow: 0 0 0 3px rgba(25, 103, 210, .1);
+    }
+
+    .toolbar .select {
+      width: 166px;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) clamp(365px, 24vw, 430px);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .list-panel,
+    .detail-panel,
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: 0 4px 14px rgba(24, 47, 40, .035);
+    }
+
+    .list-panel {
+      border-top: 0;
+      border-radius: 0 0 var(--radius) var(--radius);
+      overflow: hidden;
+    }
+
+    .table-head,
+    .table-row {
+      display: grid;
+      align-items: center;
+      gap: 16px;
+      padding: 0 18px;
+    }
+
+    .site-table .table-head,
+    .site-table .table-row {
+      grid-template-columns: minmax(180px, 2.1fr) minmax(130px, 1.25fr) minmax(120px, 1.2fr) 88px 96px;
+    }
+
+    .cert-table .table-head,
+    .cert-table .table-row {
+      min-width: 848px;
+      grid-template-columns: minmax(200px, 1.35fr) minmax(270px, 1.85fr) 118px 100px 112px;
+    }
+
+    .cert-table {
+      overflow-x: auto;
+    }
+
+    .cert-table .table-row {
+      min-height: 104px;
+      padding-block: 13px;
+    }
+
+    .run-table .table-head,
+    .run-table .table-row {
+      grid-template-columns: minmax(170px, 1.7fr) minmax(140px, 1.2fr) 100px 120px 76px;
+    }
+
+    .table-head {
+      min-height: 48px;
+      color: var(--muted-2);
+      background: var(--panel-soft);
+      border-bottom: 1px solid var(--line);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+
+    .table-row {
+      min-height: 88px;
+      border-bottom: 1px solid #edf1ef;
+      transition: background .16s;
+    }
+
+    .table-row:last-child {
+      border-bottom: 0;
+    }
+
+    .table-row:hover {
+      background: #fafcfb;
+    }
+
+    .table-row.selected {
+      background: #f2f7ff;
+      box-shadow: inset 3px 0 0 var(--primary);
+    }
+
+    .site-table .table-row {
+      cursor: pointer;
+    }
+
+    .table-cell {
+      min-width: 0;
+    }
+
+    .cell-title {
+      display: block;
+      overflow: hidden;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 750;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cell-sub {
+      display: block;
+      margin-top: 3px;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .site-open,
+    .row-open {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      padding: 0;
+      text-align: left;
+    }
+
+    .chips {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      min-height: 26px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #edf2f0;
+      color: #50615b;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .chip.blue {
+      background: var(--primary-soft);
+      color: #2058b5;
+    }
+
+    .chip.green {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .chip.amber {
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    .chip.red {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 29px;
+      padding: 4px 9px;
+      border-radius: 8px;
+      background: var(--green-soft);
+      color: var(--green);
+      font-size: 11px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .status-pill.draft {
+      background: var(--primary-soft);
+      color: #2058b5;
+    }
+
+    .status-pill.warn {
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    .status-pill.danger {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .detail-panel {
+      position: sticky;
+      top: 78px;
+      overflow: hidden;
+    }
+
+    .detail-header {
+      padding: 21px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #fff, #fbfcfc);
+    }
+
+    .detail-title-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .detail-title-row h2 {
+      min-width: 0;
+      margin: 0;
+      overflow-wrap: anywhere;
+      font-size: 19px;
+      line-height: 1.25;
+    }
+
+    .detail-title-row .status-pill {
+      margin-left: auto;
+      flex: none;
+    }
+
+    .detail-header p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .detail-body {
+      padding: 19px 21px 21px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .detail-block {
+      display: grid;
+      gap: 10px;
+    }
+
+    .detail-block + .detail-block {
+      padding-top: 16px;
+      border-top: 1px solid #edf1ef;
+    }
+
+    .detail-label {
+      color: var(--muted-2);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .detail-value {
+      overflow-wrap: anywhere;
+      font-size: 13px;
+    }
+
+    .node-mini-list {
+      display: grid;
+      gap: 9px;
+    }
+
+    .node-mini {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel-soft);
+    }
+
+    .node-mini b {
+      font-size: 12px;
+    }
+
+    .node-mini span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .config-preview {
+      max-height: 190px;
+      overflow: hidden;
+      margin: 0;
+      padding: 15px;
+      border-radius: 10px;
+      background: var(--code-bg);
+      color: var(--code-text);
+      font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .detail-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 16px 21px 21px;
+      border-top: 1px solid var(--line);
+      background: #fbfcfc;
+    }
+
+    .detail-actions .button {
+      min-width: 0;
+      padding-inline: 8px;
+    }
+
+    .detail-actions .button.full {
+      grid-column: 1 / -1;
+    }
+
+    .notice {
+      display: flex;
+      gap: 9px;
+      align-items: flex-start;
+      padding: 10px 11px;
+      border: 1px solid #f0d29b;
+      border-radius: 9px;
+      background: var(--amber-soft);
+      color: #765019;
+      font-size: 11px;
+    }
+
+    .empty {
+      padding: 48px 20px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .empty strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--text);
+    }
+
+    .node-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .node-card {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--panel);
+      box-shadow: 0 4px 14px rgba(24, 47, 40, .035);
+      display: grid;
+      gap: 16px;
+    }
+
+    .node-card-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .node-avatar {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      background: var(--primary-soft);
+      color: var(--primary);
+      font-weight: 800;
+      flex: none;
+    }
+
+    .node-card h3 {
+      margin: 0;
+      font-size: 13px;
+    }
+
+    .node-card-head p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .node-card-head .status-pill {
+      margin-left: auto;
+    }
+
+    .node-facts {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 9px;
+    }
+
+    .fact {
+      min-width: 0;
+    }
+
+    .fact label {
+      display: block;
+      color: var(--muted-2);
+      font-size: 10px;
+    }
+
+    .fact strong {
+      display: block;
+      margin-top: 2px;
+      overflow: hidden;
+      font-size: 11px;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .node-actions {
+      display: flex;
+      gap: 7px;
+      padding-top: 11px;
+      border-top: 1px solid #edf1ef;
+      flex-wrap: wrap;
+    }
+
+    .node-actions button {
+      min-height: 32px;
+      padding: 0 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      color: #455650;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .cert-progress {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .cert-progress .cell-sub {
+      min-width: 34px;
+      margin-top: 0;
+      white-space: nowrap;
+    }
+
+    .progress-track {
+      width: 78px;
+      height: 5px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e8eeec;
+    }
+
+    .progress-track i {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--green);
+    }
+
+    .progress-track i.warn {
+      background: var(--amber);
+    }
+
+    .progress-track i.danger {
+      background: var(--red);
+    }
+
+    .cert-location-list {
+      display: grid;
+      gap: 5px;
+    }
+
+    .cert-location {
+      display: grid;
+      grid-template-columns: minmax(74px, .45fr) minmax(0, 1fr);
+      gap: 7px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .cert-location-node {
+      overflow: hidden;
+      color: #31524a;
+      font-size: 10px;
+      font-weight: 750;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cert-location-path {
+      display: block;
+      min-width: 0;
+      padding: 3px 6px;
+      overflow: hidden;
+      border-radius: 5px;
+      background: #f1f5f4;
+      color: #52645e;
+      font: 10px/1.35 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cert-location-empty {
+      color: var(--muted-2);
+      font-size: 11px;
+    }
+
+    .cert-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .cert-action {
+      min-height: 29px;
+      padding: 0 9px;
+      border: 1px solid #cbdcf7;
+      border-radius: 7px;
+      background: #f5f8fe;
+      color: var(--primary);
+      font-size: 10px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+
+    .cert-action:hover {
+      border-color: #9ebdea;
+      background: var(--primary-soft);
+    }
+
+    .view-note {
+      margin-top: 14px;
+      color: var(--muted-2);
+      font-size: 10px;
+    }
+
+    dialog {
+      width: min(680px, calc(100vw - 28px));
+      max-height: calc(100vh - 34px);
+      padding: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+      color: var(--text);
+      box-shadow: 0 28px 90px rgba(12, 32, 26, .26);
+    }
+
+    dialog.wide {
+      width: min(920px, calc(100vw - 28px));
+    }
+
+    dialog::backdrop {
+      background: rgba(16, 29, 25, .42);
+      backdrop-filter: blur(3px);
+    }
+
+    .dialog-shell {
+      max-height: calc(100vh - 34px);
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+
+    .dialog-head,
+    .dialog-foot {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 17px;
+      background: #fbfcfc;
+    }
+
+    .dialog-head {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .dialog-head h2 {
+      margin: 0;
+      font-size: 16px;
+    }
+
+    .dialog-head p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .dialog-head .icon-button {
+      margin-left: auto;
+    }
+
+    .dialog-body {
+      overflow: auto;
+      padding: 17px;
+    }
+
+    .dialog-foot {
+      justify-content: flex-end;
+      border-top: 1px solid var(--line);
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 13px;
+    }
+
+    .form-field {
+      min-width: 0;
+      display: grid;
+      gap: 6px;
+    }
+
+    .form-field.full {
+      grid-column: 1 / -1;
+    }
+
+    .form-field label,
+    .fieldset-title {
+      color: #3f504a;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .field-help {
+      color: var(--muted-2);
+      font-size: 10px;
+    }
+
+    .check-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .check-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel-soft);
+    }
+
+    .check-card input {
+      margin-top: 2px;
+    }
+
+    .check-card b {
+      display: block;
+      font-size: 11px;
+    }
+
+    .check-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    #cert-node-checks {
+      grid-template-columns: 1fr;
+    }
+
+    #transfer-node-checks {
+      grid-template-columns: 1fr;
+    }
+
+    #delete-node-checks {
+      grid-template-columns: 1fr;
+    }
+
+    #cert-node-checks .check-card {
+      min-width: 0;
+    }
+
+    .cert-target-copy {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .check-card span.cert-target-path {
+      margin-top: 3px;
+      padding: 3px 6px;
+      overflow: hidden;
+      border-radius: 5px;
+      background: #edf2f0;
+      color: #52645e;
+      font: 10px/1.35 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .check-card span.cert-target-state {
+      margin-top: 4px;
+      color: var(--red);
+      font-weight: 700;
+    }
+
+    .editor-layout {
+      display: grid;
+      grid-template-columns: 245px minmax(0, 1fr);
+      gap: 14px;
+    }
+
+    .editor-side {
+      display: grid;
+      align-content: start;
+      gap: 12px;
+    }
+
+    .code-editor {
+      width: 100%;
+      min-height: 430px;
+      padding: 14px;
+      border: 1px solid #293b35;
+      border-radius: 11px;
+      background: var(--code-bg);
+      color: var(--code-text);
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+      tab-size: 2;
+      resize: vertical;
+      outline: none;
+    }
+
+    .code-editor:focus {
+      border-color: #6fa1ed;
+      box-shadow: 0 0 0 3px rgba(25, 103, 210, .12);
+    }
+
+    .diff-badge {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      min-height: 28px;
+      padding: 3px 8px;
+      border-radius: 8px;
+      background: var(--primary-soft);
+      color: #2058b5;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .command-box,
+    .log-box {
+      margin: 0;
+      padding: 12px;
+      border-radius: 10px;
+      background: var(--code-bg);
+      color: var(--code-text);
+      font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .log-box {
+      max-height: 240px;
+      overflow: auto;
+    }
+
+    .deploy-summary {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-soft);
+      display: grid;
+      gap: 8px;
+    }
+
+    .transfer-source {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .transfer-source strong {
+      font-size: 13px;
+    }
+
+    .transfer-source span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .transfer-path {
+      max-width: 100%;
+      padding: 5px 8px;
+      overflow: hidden;
+      border-radius: 6px;
+      background: #eaf0ee;
+      color: #445650;
+      font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .transfer-source .transfer-path {
+      grid-column: 1 / -1;
+    }
+
+    .deploy-step-list,
+    .run-node-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .deploy-step,
+    .run-node {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      min-height: 38px;
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel-soft);
+    }
+
+    .step-index,
+    .step-mark {
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      border-radius: 7px;
+      background: #e8eeec;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+    }
+
+    .step-mark.running {
+      background: var(--primary-soft);
+      color: var(--primary);
+    }
+
+    .step-mark.success {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .step-mark.failed {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .deploy-step b,
+    .run-node b {
+      font-size: 11px;
+    }
+
+    .deploy-step span,
+    .run-node span {
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .run-progress {
+      height: 7px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e7eeeb;
+    }
+
+    .run-progress i {
+      display: block;
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--primary), #1c9b83);
+      transition: width .3s ease;
+    }
+
+    .inline-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .private-note {
+      padding: 9px 10px;
+      border-radius: 8px;
+      background: var(--red-soft);
+      color: #8d3636;
+      font-size: 10px;
+    }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 100;
+      max-width: min(360px, calc(100vw - 32px));
+      padding: 11px 14px;
+      border-radius: 10px;
+      background: var(--ink);
+      color: #fff;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(10px);
+      pointer-events: none;
+      transition: .2s ease;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 1180px) {
+      .shell {
+        grid-template-columns: 78px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        padding-inline: 10px;
+      }
+
+      .brand {
+        padding-inline: 10px;
+      }
+
+      .brand-copy,
+      .nav-label,
+      .nav-text,
+      .agent-card {
+        display: none;
+      }
+
+      .nav-button {
+        justify-content: center;
+        padding-inline: 8px;
+      }
+
+      .nav-count {
+        display: none;
+      }
+
+      .node-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 980px) {
+      .workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .detail-panel {
+        position: static;
+      }
+
+      .summary-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .shell {
+        display: block;
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 0;
+        width: 100%;
+        height: auto;
+        padding: 9px 12px 8px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand {
+        padding: 0 4px 8px;
+      }
+
+      .brand-mark {
+        width: 32px;
+        height: 32px;
+      }
+
+      .brand-copy {
+        display: block;
+      }
+
+      .brand-sub,
+      .nav-label,
+      .agent-card {
+        display: none;
+      }
+
+      .nav {
+        display: flex;
+        gap: 5px;
+        overflow-x: auto;
+      }
+
+      .nav-button {
+        width: auto;
+        min-width: max-content;
+        min-height: 36px;
+        padding: 0 10px;
+      }
+
+      .nav-text {
+        display: inline;
+      }
+
+      .nav-icon {
+        width: auto;
+        font-size: 14px;
+      }
+
+      .topbar {
+        height: 50px;
+        padding: 0 14px;
+      }
+
+      .breadcrumb {
+        display: none;
+      }
+
+      .content {
+        padding: 19px 14px 34px;
+      }
+
+      .page-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .page-actions {
+        width: 100%;
+        margin: 0;
+      }
+
+      .page-actions .button {
+        flex: 1;
+      }
+
+      .toolbar {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .toolbar .select {
+        width: 100%;
+      }
+
+      .table-head {
+        display: none;
+      }
+
+      .site-table .table-row,
+      .cert-table .table-row,
+      .run-table .table-row {
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        padding-block: 13px;
+      }
+
+      .cert-table .table-row {
+        min-width: 0;
+      }
+
+      .cert-location {
+        grid-template-columns: minmax(80px, .42fr) minmax(0, 1fr);
+      }
+
+      .table-row .table-cell.primary {
+        grid-column: 1 / -1;
+      }
+
+      .table-cell::before {
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 2px;
+        color: var(--muted-2);
+        font-size: 9px;
+        font-weight: 700;
+      }
+
+      .cell-title,
+      .cell-sub {
+        white-space: normal;
+      }
+
+      .node-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .form-grid,
+      .check-grid,
+      .editor-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .code-editor {
+        min-height: 320px;
+      }
+
+      .dialog-foot {
+        align-items: stretch;
+        flex-direction: column-reverse;
+      }
+
+      .dialog-foot .button {
+        width: 100%;
+      }
+
+      .detail-actions {
+        position: sticky;
+        bottom: 0;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .summary-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .summary-card {
+        min-height: 82px;
+        padding: 12px;
+      }
+
+      .summary-value {
+        font-size: 20px;
+      }
+
+      .connection-pill {
+        padding-inline: 8px;
+      }
+
+      .topbar .ghost-button {
+        display: none;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
+      }
+    }
+
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 10px;
+    }
+
+    .section-head h2 {
+      margin: 0 0 4px;
+      font-size: 16px;
+    }
+
+    .section-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .empty-state {
+      display: grid;
+      gap: 5px;
+      padding: 18px;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">N</div>
+        <div class="brand-copy">
+          <div class="brand-name">NGINX MANAGER</div>
+          <span class="brand-sub">CONTROL PLANE</span>
+        </div>
+      </div>
+
+      <div class="nav-label">托管资源</div>
+      <nav class="nav" aria-label="主导航">
+        <button class="nav-button active" type="button" data-nav="sites">
+          <span class="nav-icon">▤</span>
+          <span class="nav-text">站点与配置</span>
+          <span class="nav-count" id="nav-site-count">0</span>
+        </button>
+        <button class="nav-button" type="button" data-nav="certificates">
+          <span class="nav-icon">◇</span>
+          <span class="nav-text">证书</span>
+          <span class="nav-count" id="nav-cert-count">0</span>
+        </button>
+        <button class="nav-button" type="button" data-nav="nodes">
+          <span class="nav-icon">▦</span>
+          <span class="nav-text">节点 Agent</span>
+          <span class="nav-count" id="nav-node-count">0</span>
+        </button>
+        <button class="nav-button" type="button" data-nav="runs">
+          <span class="nav-icon">↻</span>
+          <span class="nav-text">执行记录</span>
+          <span class="nav-count" id="nav-run-count">0</span>
+        </button>
+      </nav>
+
+      <div class="agent-card">
+        <div class="agent-card-head">
+          <span class="status-dot"></span>
+          <span id="sidebar-agent-state">Agent 通道正常</span>
+        </div>
+        <p id="sidebar-agent-copy">所有生产节点均通过出站连接在线。</p>
+        <button type="button" data-action="add-node">＋ 接入新节点</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="breadcrumb">Nginx 托管 / <strong id="breadcrumb-current">站点与配置</strong></div>
+        <div class="topbar-spacer"></div>
+        <button class="connection-pill" type="button" data-action="connect-control" title="查看当前登录状态"><span class="status-dot"></span><span id="agent-online-text">0 / 0 Agent 在线</span></button>
+        <span class="session-role" id="session-role" hidden></span>
+        <button class="ghost-button" id="logout-button" type="button" data-action="logout" hidden>退出登录</button>
+        <button class="ghost-button" type="button" data-nav-jump="runs">查看执行记录</button>
+      </header>
+      <div class="content" id="app-content"></div>
+    </main>
+  </div>
+
+  <dialog id="site-dialog">
+    <form class="dialog-shell" id="site-form">
+      <header class="dialog-head">
+        <div>
+          <h2>新增站点</h2>
+          <p>创建配置并选择要托管的 Agent 节点</p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="site-dialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <div class="form-field">
+            <label for="site-domain">域名</label>
+            <input class="input" id="site-domain" name="domain" placeholder="api.example.com" required>
+          </div>
+          <div class="form-field">
+            <label for="site-type">站点类型</label>
+            <select class="select" id="site-type" name="type">
+              <option value="proxy">反向代理</option>
+              <option value="static">静态站点</option>
+            </select>
+          </div>
+          <div class="form-field full">
+            <label for="site-target">上游地址或站点目录</label>
+            <input class="input" id="site-target" name="target" placeholder="http://192.0.2.21:8080" required>
+            <span class="field-help">反向代理填写 upstream；静态站点填写本地目录。</span>
+          </div>
+          <div class="form-field full">
+            <span class="fieldset-title">部署节点</span>
+            <div class="check-grid" id="site-node-checks"></div>
+          </div>
+          <div class="form-field">
+            <label for="site-cert">绑定证书</label>
+            <select class="select" id="site-cert" name="certificate"></select>
+            <span class="field-help" id="site-cert-help">先选择部署节点，只能绑定这些节点上都已存在的证书。</span>
+          </div>
+          <div class="form-field">
+            <label for="site-environment">环境</label>
+            <select class="select" id="site-environment" name="environment">
+              <option>生产</option>
+              <option>预发布</option>
+              <option>测试</option>
+            </select>
+          </div>
+          <div class="form-field full">
+            <label for="site-note">配置备注</label>
+            <textarea class="textarea" id="site-note" name="note" placeholder="长期说明：这个站点服务什么业务、负责人是谁"></textarea>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button" type="button" data-close-dialog="site-dialog">取消</button>
+        <button class="button primary" type="submit">创建草稿</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="wide" id="config-dialog">
+    <form class="dialog-shell" id="config-form">
+      <header class="dialog-head">
+        <div>
+          <h2 id="config-dialog-title">编辑配置</h2>
+          <p id="config-dialog-subtitle"></p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="config-dialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="editor-layout">
+          <aside class="editor-side">
+            <div class="form-field">
+              <label for="config-note">配置备注</label>
+              <textarea class="textarea" id="config-note" placeholder="长期说明这个配置的用途"></textarea>
+            </div>
+            <div class="form-field">
+              <label for="change-note">本次变更说明</label>
+              <textarea class="textarea" id="change-note" placeholder="例如：将上传限制从 10m 调整为 50m" required></textarea>
+              <span class="field-help">保存草稿可以留空；校验和发布必须填写。</span>
+            </div>
+            <div class="form-field">
+              <span class="fieldset-title">目标节点</span>
+              <div class="chips" id="config-node-chips"></div>
+            </div>
+            <div class="diff-badge" id="config-diff-badge">与当前版本一致</div>
+            <div class="notice">发布时会在每个 Agent 节点执行 nginx -t，通过后才会原子替换并 reload。</div>
+          </aside>
+          <div>
+            <label class="sr-only" for="config-editor">Nginx 配置内容</label>
+            <textarea class="code-editor" id="config-editor" spellcheck="false"></textarea>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button" type="button" data-close-dialog="config-dialog">取消</button>
+        <button class="button" type="submit" value="draft">保存草稿</button>
+        <button class="button" type="submit" value="validate">逐节点校验</button>
+        <button class="button primary" type="submit" value="publish">校验并发布</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="deploy-dialog">
+    <form class="dialog-shell" id="deploy-form">
+      <header class="dialog-head">
+        <div>
+          <h2 id="deploy-title">发布配置</h2>
+          <p id="deploy-subtitle"></p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="deploy-dialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <div class="form-field full">
+            <span class="fieldset-title">目标节点</span>
+            <div class="check-grid" id="deploy-node-checks"></div>
+          </div>
+          <div class="form-field">
+            <label for="deploy-mode">发布方式</label>
+            <select class="select" id="deploy-mode">
+              <option value="parallel">同时下发到所选节点（轻量版）</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="deploy-failure">失败策略</label>
+            <select class="select" id="deploy-failure">
+              <option value="continue">各节点独立回滚，保留已成功节点</option>
+            </select>
+          </div>
+          <div class="form-field full">
+            <span class="fieldset-title">固定发布流程</span>
+            <div class="deploy-step-list">
+              <div class="deploy-step"><span class="step-index">1</span><div><b>暂存候选配置</b><span>不直接覆盖线上文件</span></div><span>Agent</span></div>
+              <div class="deploy-step"><span class="step-index">2</span><div><b>逐节点 nginx -t</b><span>使用节点本地版本和 include 环境校验</span></div><span>校验</span></div>
+              <div class="deploy-step"><span class="step-index">3</span><div><b>原子切换并 reload</b><span>保留旧版本，失败自动回滚</span></div><span>发布</span></div>
+              <div class="deploy-step"><span class="step-index">4</span><div><b>健康检查</b><span>Agent 配置 health_url 后执行，失败自动回滚</span></div><span>验证</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button" type="button" data-close-dialog="deploy-dialog">取消</button>
+        <button class="button primary" type="submit">确认发布</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="wide" id="config-transfer-dialog">
+    <form class="dialog-shell" id="config-transfer-form">
+      <header class="dialog-head">
+        <div>
+          <h2 id="config-transfer-title">复制配置到其他节点</h2>
+          <p id="config-transfer-subtitle"></p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="config-transfer-dialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <div class="form-field full">
+            <span class="fieldset-title">源配置</span>
+            <div class="deploy-summary transfer-source" id="config-transfer-source"></div>
+          </div>
+          <div class="form-field full">
+            <span class="fieldset-title">目标节点与写入目录</span>
+            <div class="check-grid" id="transfer-node-checks"></div>
+          </div>
+          <div class="form-field full">
+            <label for="config-transfer-mode">写入策略</label>
+            <select class="select" id="config-transfer-mode">
+              <option value="create">仅新建：同名配置已存在时停止，不覆盖</option>
+              <option value="replace">仅替换：同名配置不存在时停止，不新建</option>
+            </select>
+            <span class="field-help">替换模式要求目标 Agent 0.3.0 或更高版本，并会记录被替换文件的原始 Hash。</span>
+          </div>
+          <div class="form-field full">
+            <div class="notice"><span>!</span><div>每个目标节点都会先暂存配置并执行 nginx -t，通过后才原子写入和 reload；失败自动恢复。成功节点会加入此站点的托管范围，原节点配置不会删除。若配置引用证书，请先确保目标节点已有对应证书。</div></div>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button" type="button" data-close-dialog="config-transfer-dialog">取消</button>
+        <button class="button primary" type="submit">校验并写入目标节点</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="wide" id="config-delete-dialog">
+    <form class="dialog-shell" id="config-delete-form">
+      <header class="dialog-head">
+        <div>
+          <h2 id="config-delete-title">从节点移除配置</h2>
+          <p id="config-delete-subtitle"></p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="config-delete-dialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <div class="form-field full">
+            <span class="fieldset-title">选择要删除配置文件的节点</span>
+            <div class="check-grid" id="delete-node-checks"></div>
+            <span class="field-help">只允许删除 Agent 托管配置目录中的 .conf 文件；离线、缺少当前 Hash 或 Agent 版本过低的节点不可选择。</span>
+          </div>
+          <div class="form-field full">
+            <label for="config-delete-confirm">输入站点域名确认</label>
+            <input class="input" id="config-delete-confirm" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-field full">
+            <div class="notice"><span>!</span><div>Agent 会校验文件当前 Hash，暂存恢复副本后删除，再执行 nginx -t 和 reload；任一步失败都会恢复原文件。这里只移除所选节点上的配置文件，不删除平台站点记录，也不删除证书。</div></div>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button" type="button" data-close-dialog="config-delete-dialog">取消</button>
+        <button class="button danger" type="submit">确认移除并 reload</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="certificate-dialog">
+    <form class="dialog-shell" id="certificate-form">
+      <header class="dialog-head">
+        <div>
+          <h2>添加证书</h2>
+          <p id="certificate-dialog-subtitle">上传证书与私钥，并写入所选节点的托管证书目录</p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="certificate-dialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <div class="form-field">
+            <label for="cert-name">证书名称</label>
+            <input class="input" id="cert-name" name="name" placeholder="example.com 通配符" required>
+          </div>
+          <div class="form-field">
+            <label for="cert-domain">主域名 / SAN</label>
+            <input class="input" id="cert-domain" name="domain" placeholder="*.example.com" required>
+          </div>
+          <div class="form-field">
+            <label for="cert-source">维护方式</label>
+            <select class="select" id="cert-source" name="source">
+              <option value="手动上传">手动上传并原位替换</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="cert-days">有效期</label>
+            <select class="select" id="cert-days" name="days">
+              <option value="90">90 天</option>
+              <option value="365">1 年</option>
+              <option value="30">30 天</option>
+            </select>
+          </div>
+          <div class="form-field full" id="cert-upload-fields">
+            <label>新证书与私钥</label>
+            <div class="form-grid">
+              <input class="input" id="cert-pem-file" name="certificate_file" type="file" accept=".pem,.crt,.cer">
+              <input class="input" id="cert-key-file" name="private_key_file" type="file" accept=".key,.pem">
+            </div>
+            <div class="private-note">私钥上传后不可查看、不可下载，也不会写入页面状态或执行日志。</div>
+          </div>
+          <div class="form-field full">
+            <span class="fieldset-title">替换目标</span>
+            <div class="check-grid" id="cert-node-checks"></div>
+            <span class="field-help">替换时保持原文件路径不变；Agent 会先校验证书与私钥，再原子覆盖并执行 nginx -t 和 reload，失败自动恢复旧文件。</span>
+          </div>
+          <div class="form-field full">
+            <label for="cert-note">证书备注</label>
+            <textarea class="textarea" id="cert-note" name="note" placeholder="来源、负责人、本次替换说明等"></textarea>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button" type="button" data-close-dialog="certificate-dialog">取消</button>
+        <button class="button primary" id="cert-submit-button" type="submit">保存证书</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="node-dialog">
+    <form class="dialog-shell" id="node-form">
+      <header class="dialog-head">
+        <div>
+          <h2>接入 Agent 节点</h2>
+          <p>Agent 主动出站连接，不需要开放入站管理端口</p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="node-dialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <div class="form-field">
+            <label for="node-name">节点名称</label>
+            <input class="input" id="node-name" name="name" placeholder="edge-a-03" required>
+          </div>
+          <div class="form-field">
+            <label for="node-ip">管理 IP</label>
+            <input class="input" id="node-ip" name="ip" placeholder="可选，仅用于备注展示">
+          </div>
+          <div class="form-field full">
+            <label for="node-label">标签</label>
+            <input class="input" id="node-label" name="label" placeholder="区域 A · 生产">
+          </div>
+          <div class="form-field full">
+            <span class="fieldset-title">Agent 安装命令</span>
+            <pre class="command-box" id="agent-command"></pre>
+            <div class="inline-row">
+              <button class="button" type="button" data-action="copy-agent-command">复制命令</button>
+              <span class="field-help">安装不需要令牌；Agent 发起申请后在节点页批准。</span>
+            </div>
+          </div>
+          <div class="form-field full">
+            <div class="notice">Agent 会上报 Nginx 版本、主配置 Hash 与专用托管目录；已有站点首版需人工确认后纳入。</div>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button" type="button" data-close-dialog="node-dialog">取消</button>
+        <button class="button primary" id="node-submit-button" type="submit">生成接入信息</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="run-dialog">
+    <div class="dialog-shell">
+      <header class="dialog-head">
+        <div>
+          <h2 id="run-dialog-title">执行详情</h2>
+          <p id="run-dialog-subtitle"></p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="run-dialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="run-progress"><i id="run-progress-bar"></i></div>
+        <div class="run-node-list" id="run-node-list" style="margin-top:12px"></div>
+        <div class="form-field" style="margin-top:12px">
+          <span class="fieldset-title">Agent 输出</span>
+          <pre class="log-box" id="run-log"></pre>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button" type="button" data-close-dialog="run-dialog">收起</button>
+        <button class="button primary" type="button" data-nav-jump="runs" data-close-dialog="run-dialog">查看全部记录</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <dialog id="login-dialog">
+    <form class="dialog-shell" id="login-form">
+      <header class="dialog-head">
+        <div>
+          <h2>登录 NGINX MANAGER</h2>
+          <p>使用 LDAP / AD 账号，或本地应急管理员账号</p>
+        </div>
+      </header>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <div class="form-field full">
+            <label for="login-username">管理员账号</label>
+            <input class="input" id="login-username" name="username" autocomplete="username" value="admin" required>
+          </div>
+          <div class="form-field full">
+            <label for="login-password">管理员密码</label>
+            <input class="input" id="login-password" name="password" type="password" autocomplete="current-password" required>
+            <span class="field-help">本地 admin 凭据位于 /root/nginx-manager-credentials.txt；LDAP 密码不会被控制端保存。</span>
+          </div>
+          <div class="form-field full">
+            <div class="notice" id="login-message">登录状态仅保存在安全的 HttpOnly Cookie 中。</div>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button primary" id="login-submit" type="submit">登录</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var storageKey = 'nginx-managed-console-v3';
+      var remoteMode = window.location.protocol === 'https:' || window.location.protocol === 'http:';
+      var remoteConnected = false;
+      var remoteRevision = 0;
+      var remoteSaveTimer = null;
+      var remoteRefreshTimer = null;
+      var csrfToken = '';
+      var currentUsername = '';
+      var currentRole = '';
+      var currentAuthSource = '';
+      var pendingEnrollments = [];
+      var activeView = 'sites';
+      var selectedSiteId = null;
+      var siteQuery = '';
+      var siteFilter = 'all';
+      var editingSiteId = null;
+      var editingCertificateId = null;
+      var pendingDeploySiteId = null;
+      var pendingTransferSiteId = null;
+      var pendingDeleteSiteId = null;
+      var activeRunTimer = null;
+      var toastTimer = null;
+
+      function clone(value) {
+        return JSON.parse(JSON.stringify(value));
+      }
+
+      function roleLabel(role) {
+        return { admin: '管理员', operator: '运维操作员', auditor: '只读审计员' }[role] || '未知角色';
+      }
+
+      function authSourceLabel(source) {
+        return source === 'ldap' ? 'LDAP' : '本地账号';
+      }
+
+      function canOperate() {
+        return !remoteConnected || currentRole === 'admin' || currentRole === 'operator';
+      }
+
+      function canAdminister() {
+        return !remoteConnected || currentRole === 'admin';
+      }
+
+      function actionAllowed(action) {
+        if (!remoteConnected) return true;
+        var adminActions = ['add-node', 'approve-enrollment', 'reject-enrollment'];
+        var operatorActions = [
+          'add-site', 'add-certificate', 'edit-config', 'validate-site', 'import-drift',
+          'deploy-site', 'transfer-config', 'delete-config', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
+          'rollback', 'import-sites'
+        ];
+        if (adminActions.includes(action)) return canAdminister();
+        if (operatorActions.includes(action)) return canOperate();
+        return true;
+      }
+
+      function applyRolePermissions() {
+        if (!remoteConnected) return;
+        var protectedActions = [
+          'add-node', 'approve-enrollment', 'reject-enrollment',
+          'add-site', 'add-certificate', 'edit-config', 'validate-site', 'import-drift',
+          'deploy-site', 'transfer-config', 'delete-config', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
+          'rollback', 'import-sites'
+        ];
+        document.querySelectorAll('[data-action]').forEach(function (button) {
+          var action = button.getAttribute('data-action');
+          if (protectedActions.includes(action)) button.hidden = !actionAllowed(action);
+        });
+      }
+
+      function updateSessionBadge() {
+        var badge = document.getElementById('session-role');
+        if (!remoteConnected || !currentRole) {
+          badge.hidden = true;
+          badge.textContent = '';
+          return;
+        }
+        badge.textContent = authSourceLabel(currentAuthSource) + ' · ' + roleLabel(currentRole);
+        badge.hidden = false;
+      }
+
+      var seedState = {
+        nodes: [
+          { id: 'node-a-01', name: 'edge-a-01', ip: '192.0.2.11', label: '区域 A · 生产', online: true, agent: '0.4.2', nginx: '1.26.2', root: '/etc/nginx', managedConfigRoot: '/etc/nginx/nginx-manager.d', managedCertificateRoot: '/etc/nginx/ssl/nginx-manager', sites: 3, drift: false, lastSeen: '8 秒前', configVersion: 'v18' },
+          { id: 'node-a-02', name: 'edge-a-02', ip: '192.0.2.12', label: '区域 A · 生产', online: true, agent: '0.4.2', nginx: '1.26.2', root: '/etc/nginx', managedConfigRoot: '/etc/nginx/nginx-manager.d', managedCertificateRoot: '/etc/nginx/ssl/nginx-manager', sites: 2, drift: false, lastSeen: '11 秒前', configVersion: 'v18' },
+          { id: 'node-b-01', name: 'edge-b-01', ip: '198.51.100.21', label: '区域 B · 生产', online: true, agent: '0.4.1', nginx: '1.24.0', root: '/usr/local/nginx/conf', managedConfigRoot: '/usr/local/nginx/conf/nginx-manager.d', managedCertificateRoot: '/usr/local/nginx/certs/nginx-manager', sites: 2, drift: true, lastSeen: '19 秒前', configVersion: 'v11*' },
+          { id: 'node-test-01', name: 'edge-test-01', ip: '203.0.113.9', label: '测试', online: false, agent: '0.4.0', nginx: '1.24.0', root: '/opt/nginx/conf', managedConfigRoot: '/opt/nginx/conf/nginx-manager.d', managedCertificateRoot: '/opt/nginx/certs/nginx-manager', sites: 1, drift: false, lastSeen: '12 分钟前', configVersion: 'v7' }
+        ],
+        certificates: [
+          { id: 'cert-wildcard', name: 'example.com 通配符', domain: '*.example.com', issuer: 'Let’s Encrypt R11', days: 73, source: '手动上传', autoRenew: false, siteIds: ['site-api', 'site-static'], nodeIds: ['node-a-01', 'node-a-02', 'node-b-01'], note: '生产通配符，收到新证书后原位替换', fingerprint: 'A9:72:1D:4B:8C:3E' },
+          { id: 'cert-console', name: 'console.example.com', domain: 'console.example.com', issuer: 'DigiCert TLS RSA', days: 18, source: '手动上传', autoRenew: false, siteIds: ['site-console'], nodeIds: ['node-a-01', 'node-a-02'], note: '安全团队签发，负责人：证书管理员', fingerprint: '7C:15:AF:80:3D:E2' },
+          { id: 'cert-internal', name: '内部 API 证书', domain: 'internal.example.net', issuer: 'Internal CA', days: 6, source: '手动上传', autoRenew: false, siteIds: ['site-internal'], nodeIds: ['node-b-01'], note: '需联系基础架构组更新', fingerprint: 'E4:20:92:6F:AA:10' }
+        ],
+        sites: [
+          {
+            id: 'site-api',
+            domain: 'api.example.com',
+            type: 'proxy',
+            target: 'http://192.0.2.21:8080',
+            environment: '生产',
+            nodeIds: ['node-a-01', 'node-a-02'],
+            certificateId: 'cert-wildcard',
+            version: 18,
+            status: 'published',
+            note: '统一 API 网关，转发订单、用户与支付服务',
+            changeNote: '将上传限制调整为 50m，并补充 WebSocket 头',
+            updatedAt: '今天 14:26',
+            config: [
+              'server {',
+              '  listen 443 ssl http2;',
+              '  server_name api.example.com;',
+              '',
+              '  ssl_certificate     /etc/nginx/ssl/nginx-manager/_.example.com.crt;',
+              '  ssl_certificate_key /etc/nginx/ssl/nginx-manager/_.example.com.key;',
+              '',
+              '  client_max_body_size 50m;',
+              '  location / {',
+              '    proxy_pass http://192.0.2.21:8080;',
+              '    proxy_set_header Host $host;',
+              '    proxy_set_header X-Real-IP $remote_addr;',
+              '    proxy_set_header Upgrade $http_upgrade;',
+              '    proxy_set_header Connection \"upgrade\";',
+              '  }',
+              '}'
+            ].join('\n'),
+            history: [
+              { version: 18, note: '上传限制调整为 50m', time: '今天 14:26', user: '运维管理员' },
+              { version: 17, note: '新增 WebSocket 转发', time: '昨天 19:08', user: '运维管理员' },
+              { version: 16, note: '切换订单服务上游', time: '07-11 10:42', user: '平台管理员' }
+            ]
+          },
+          {
+            id: 'site-static',
+            domain: 'static.example.com',
+            type: 'static',
+            target: '/srv/www/static',
+            environment: '生产',
+            nodeIds: ['node-a-02', 'node-b-01'],
+            certificateId: 'cert-wildcard',
+            version: 7,
+            status: 'draft',
+            note: '官网静态资源与 CDN 回源入口',
+            changeNote: '草稿：增加字体文件缓存策略',
+            updatedAt: '今天 11:02',
+            config: [
+              'server {',
+              '  listen 443 ssl;',
+              '  server_name static.example.com;',
+              '  root /srv/www/static;',
+              '',
+              '  location ~* \\.(css|js|png|jpg|woff2)$ {',
+              '    expires 30d;',
+              '    add_header Cache-Control \"public, immutable\";',
+              '  }',
+              '}'
+            ].join('\n'),
+            history: [
+              { version: 7, note: '静态资源缓存延长到 30 天', time: '07-10 16:30', user: '周宁' },
+              { version: 6, note: '增加 woff2 MIME 类型', time: '07-08 09:20', user: '周宁' }
+            ]
+          },
+          {
+            id: 'site-console',
+            domain: 'console.example.com',
+            type: 'proxy',
+            target: 'http://198.51.100.5:3000',
+            environment: '生产',
+            nodeIds: ['node-a-01', 'node-a-02'],
+            certificateId: 'cert-console',
+            version: 12,
+            status: 'published',
+            note: '内部管理控制台，仅办公网访问',
+            changeNote: '增加办公网 allowlist',
+            updatedAt: '昨天 17:41',
+            config: [
+              'server {',
+              '  listen 443 ssl;',
+              '  server_name console.example.com;',
+              '  allow 192.0.2.0/24;',
+              '  deny all;',
+              '',
+              '  location / {',
+              '    proxy_pass http://198.51.100.5:3000;',
+              '    proxy_set_header Host $host;',
+              '  }',
+              '}'
+            ].join('\n'),
+            history: [
+              { version: 12, note: '增加办公网 allowlist', time: '昨天 17:41', user: '安全管理员' },
+              { version: 11, note: '更新安全响应头', time: '07-09 14:18', user: '安全管理员' }
+            ]
+          },
+          {
+            id: 'site-internal',
+            domain: 'internal.example.net',
+            type: 'proxy',
+            target: 'http://203.0.113.18:9000',
+            environment: '生产',
+            nodeIds: ['node-b-01'],
+            certificateId: 'cert-internal',
+            version: 11,
+            status: 'drift',
+            note: '区域 B 内部接口，节点上存在人工修改',
+            changeNote: '平台版本与节点 Hash 不一致',
+            updatedAt: '今天 09:18',
+            config: [
+              'server {',
+              '  listen 443 ssl;',
+              '  server_name internal.example.net;',
+              '  location / {',
+              '    proxy_pass http://203.0.113.18:9000;',
+              '  }',
+              '}'
+            ].join('\n'),
+            history: [
+              { version: 11, note: '切换区域 B 内部 API 地址', time: '07-09 11:36', user: '平台管理员' }
+            ]
+          }
+        ],
+        runs: [
+          { id: 'run-1042', type: '配置发布', target: 'api.example.com', targets: ['edge-a-01', 'edge-a-02'], status: 'success', time: '今天 14:26', duration: '3.8s', user: '运维管理员', note: '发布 v18：上传限制调整为 50m', log: ['edge-a-01 nginx -t: successful', 'edge-a-01 reload: ok', 'edge-a-02 nginx -t: successful', 'edge-a-02 reload: ok'] },
+          { id: 'run-1041', type: '证书替换', target: '*.example.com', targets: ['edge-a-01', 'edge-a-02', 'edge-b-01'], status: 'success', time: '今天 12:10', duration: '5.1s', user: '系统', note: '上传新证书并原位替换', log: ['certificate matched private key', 'nginx -t successful', 'previous files backed up'] },
+          { id: 'run-1040', type: '配置校验', target: 'internal.example.net', targets: ['edge-b-01'], status: 'failed', time: '今天 09:18', duration: '1.2s', user: '平台管理员', note: '检测到节点配置漂移', log: ['expected hash: 82f1c8', 'actual hash: 9ab3d1', 'no changes applied'] },
+          { id: 'run-1039', type: '节点探测', target: 'edge-test-01', targets: ['edge-test-01'], status: 'failed', time: '今天 08:54', duration: '30s', user: '系统', note: 'Agent 心跳超时', log: ['last heartbeat: 12 minutes ago', 'task expired without execution'] }
+        ]
+      };
+
+      function loadState() {
+        try {
+          var saved = localStorage.getItem(storageKey);
+          if (!saved) return clone(seedState);
+          var parsed = JSON.parse(saved);
+          if (!parsed.sites || !parsed.nodes || !parsed.certificates || !parsed.runs) return clone(seedState);
+          parsed.nodes.forEach(function (node) {
+            if (!node.managedConfigRoot) {
+              node.managedConfigRoot = String(node.root || '/etc/nginx').replace(/\/+$/, '') + '/nginx-manager.d';
+            }
+          });
+          return parsed;
+        } catch (error) {
+          return clone(seedState);
+        }
+      }
+
+      var state = remoteMode
+        ? { nodes: [], certificates: [], sites: [], runs: [] }
+        : loadState();
+
+      function saveState() {
+        localStorage.setItem(storageKey, JSON.stringify(state));
+        if (remoteConnected && canOperate()) scheduleRemoteSave();
+      }
+
+      function serializableUiState() {
+        return {
+          sites: state.sites,
+          certificates: state.certificates
+        };
+      }
+
+      async function apiRequest(path, options) {
+        var requestOptions = Object.assign({}, options || {});
+        requestOptions.headers = Object.assign({
+          'Accept': 'application/json'
+        }, requestOptions.headers || {});
+        requestOptions.credentials = 'same-origin';
+        var method = String(requestOptions.method || 'GET').toUpperCase();
+        if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && csrfToken) {
+          requestOptions.headers['X-CSRF-Token'] = csrfToken;
+        }
+        if (requestOptions.body && typeof requestOptions.body !== 'string') {
+          requestOptions.headers['Content-Type'] = 'application/json';
+          requestOptions.body = JSON.stringify(requestOptions.body);
+        }
+        var response = await fetch(path, requestOptions);
+        var body = {};
+        try { body = await response.json(); } catch (error) { body = {}; }
+        if (!response.ok) {
+          var detail = body && body.detail;
+          var message = typeof detail === 'string' ? detail : JSON.stringify(detail || { status: response.status });
+          var apiError = new Error(message);
+          apiError.status = response.status;
+          apiError.body = body;
+          throw apiError;
+        }
+        return body;
+      }
+
+      function scheduleRemoteSave() {
+        clearTimeout(remoteSaveTimer);
+        remoteSaveTimer = setTimeout(saveRemoteState, 350);
+      }
+
+      async function saveRemoteState() {
+        if (!remoteConnected || !canOperate()) return;
+        try {
+          var response = await apiRequest('/api/v1/admin/ui-state', {
+            method: 'PUT',
+            body: { revision: remoteRevision, state: serializableUiState() }
+          });
+          remoteRevision = response.revision;
+        } catch (error) {
+          if (error.status === 409 && error.body) {
+            remoteRevision = Number(error.body.revision || remoteRevision);
+            notify('控制端数据已被其他页面修改，请刷新后继续');
+            return;
+          }
+          notify('保存到控制端失败：' + error.message);
+        }
+      }
+
+      function relativeTime(value) {
+        if (!value) return '尚未心跳';
+        var seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+        if (seconds < 60) return seconds + ' 秒前';
+        if (seconds < 3600) return Math.floor(seconds / 60) + ' 分钟前';
+        return Math.floor(seconds / 3600) + ' 小时前';
+      }
+
+      function mapRemoteNode(node) {
+        var labels = node.labels || {};
+        var facts = node.facts || {};
+        var labelText = Object.keys(labels).map(function (key) { return labels[key]; }).filter(Boolean).join(' · ');
+        var hash = node.config_hash || '';
+        return {
+          id: node.id,
+          name: node.node_name || node.hostname || node.id,
+          ip: node.hostname || '—',
+          label: labelText || 'Linux 节点',
+          online: node.status !== 'offline',
+          agent: node.agent_version || '待上报',
+          nginx: node.nginx_version || '待探测',
+          root: facts.nginx_root || '/etc/nginx',
+          managedConfigRoot: facts.managed_config_root || '/etc/nginx/nginx-manager.d',
+          managedCertificateRoot: facts.managed_certificate_root || '/etc/nginx/ssl/nginx-manager',
+          sites: state.sites.filter(function (site) { return site.nodeIds.includes(node.id); }).length,
+          drift: false,
+          lastSeen: relativeTime(node.last_seen_at),
+          configVersion: hash ? hash.slice(0, 10) : '待探测'
+        };
+      }
+
+      function mapRemoteJob(job) {
+        var labels = {
+          inspect: '节点探测',
+          nginx_test: '节点校验',
+          nginx_reload: '平滑 reload',
+          config_read: '读取配置',
+          config_hash: '配置 Hash',
+          config_apply: '配置发布',
+          config_delete: '移除节点配置',
+          certificate_apply: '证书写入 / 替换'
+        };
+        var result = job.result || {};
+        var log = Object.keys(result).map(function (key) {
+          return key + ': ' + String(result[key]);
+        });
+        return {
+          id: job.id,
+          type: labels[job.action] || job.action,
+          target: job.node_name || job.node_id,
+          targets: [job.node_name || job.node_id],
+          status: job.status === 'succeeded' ? 'success' : (job.status === 'failed' || job.status === 'expired' ? 'failed' : 'running'),
+          time: job.created_at ? new Date(job.created_at).toLocaleString('zh-CN', { hour12: false }) : '刚刚',
+          duration: result.duration_ms != null ? (Number(result.duration_ms) / 1000).toFixed(1) + 's' : '—',
+          user: '控制端',
+          note: '任务 ' + job.id.slice(0, 8) + ' · ' + job.status,
+          log: log.length ? log : ['详细输出仅保留摘要和校验值，避免泄露敏感配置。']
+        };
+      }
+
+      function applyRemoteJobOutcomes(jobs) {
+        var byId = {};
+        jobs.forEach(function (job) { byId[job.id] = job; });
+        var changed = false;
+        state.sites.forEach(function (site) {
+          var pending = site.pendingRemote;
+          if (!pending || !Array.isArray(pending.jobs) || !pending.jobs.length) return;
+          var related = pending.jobs.map(function (item) { return byId[item.id]; }).filter(Boolean);
+          if (related.length !== pending.jobs.length) return;
+          var terminal = related.every(function (job) { return ['succeeded', 'failed', 'expired'].includes(job.status); });
+          if (!terminal) return;
+          var failed = related.some(function (job) { return job.status !== 'succeeded'; });
+          if (pending.deleteConfig) {
+            site.nodeHashes = site.nodeHashes || {};
+            site.nodeConfigPaths = site.nodeConfigPaths || {};
+            var removedNodes = [];
+            pending.jobs.forEach(function (item) {
+              var job = byId[item.id];
+              if (!job || job.status !== 'succeeded') return;
+              site.nodeIds = site.nodeIds.filter(function (nodeId) { return nodeId !== item.nodeId; });
+              delete site.nodeHashes[item.nodeId];
+              delete site.nodeConfigPaths[item.nodeId];
+              var removedNode = getNode(item.nodeId);
+              if (removedNode) {
+                removedNode.sites = Math.max(0, Number(removedNode.sites || 0) - 1);
+                removedNodes.push(removedNode.name);
+              }
+            });
+            if (removedNodes.length) {
+              site.updatedAt = '刚刚';
+              site.changeNote = '从节点移除配置：' + removedNodes.join('、');
+              site.history = site.history || [];
+              site.history.unshift({
+                version: site.version,
+                note: site.changeNote,
+                time: '刚刚',
+                user: '控制端'
+              });
+            }
+            site.status = failed ? 'failed' : (site.nodeIds.length ? 'published' : 'draft');
+          } else if (pending.transfer) {
+            site.nodeHashes = site.nodeHashes || {};
+            site.nodeConfigPaths = site.nodeConfigPaths || {};
+            var transferredNodes = [];
+            pending.jobs.forEach(function (item) {
+              var job = byId[item.id];
+              if (!job || job.status !== 'succeeded') return;
+              if (job.result && job.result.config_hash) site.nodeHashes[item.nodeId] = job.result.config_hash;
+              if (item.path) site.nodeConfigPaths[item.nodeId] = item.path;
+              if (!site.nodeIds.includes(item.nodeId)) {
+                site.nodeIds.push(item.nodeId);
+                var addedNode = getNode(item.nodeId);
+                if (addedNode) addedNode.sites = Number(addedNode.sites || 0) + 1;
+              }
+              var transferredNode = getNode(item.nodeId);
+              if (transferredNode) transferredNodes.push(transferredNode.name);
+            });
+            if (transferredNodes.length) {
+              site.updatedAt = '刚刚';
+              site.history = site.history || [];
+              site.history.unshift({
+                version: site.version,
+                note: '复制配置到 ' + transferredNodes.join('、'),
+                time: '刚刚',
+                user: '控制端'
+              });
+            }
+            site.status = failed ? 'failed' : 'published';
+          } else if (failed) {
+            site.status = 'failed';
+          } else if (pending.publish) {
+            site.nodeHashes = site.nodeHashes || {};
+            site.nodeConfigPaths = site.nodeConfigPaths || {};
+            pending.jobs.forEach(function (item) {
+              var job = byId[item.id];
+              if (job && job.result && job.result.config_hash) site.nodeHashes[item.nodeId] = job.result.config_hash;
+              if (job && job.status === 'succeeded' && item.path) site.nodeConfigPaths[item.nodeId] = item.path;
+            });
+            site.version += 1;
+            site.status = 'published';
+            site.updatedAt = '刚刚';
+            site.history = site.history || [];
+            site.history.unshift({ version: site.version, note: site.changeNote || '发布配置', time: '刚刚', user: '控制端' });
+          } else {
+            site.status = 'draft';
+          }
+          delete site.pendingRemote;
+          changed = true;
+        });
+        state.certificates.forEach(function (certificate) {
+          var pending = certificate.pendingRemote;
+          if (!pending || !Array.isArray(pending.jobs) || !pending.jobs.length) return;
+          var related = pending.jobs.map(function (item) { return byId[item.id]; }).filter(Boolean);
+          if (related.length !== pending.jobs.length) return;
+          if (!related.every(function (job) { return ['succeeded', 'failed', 'expired'].includes(job.status); })) return;
+          certificate.deployStatus = related.every(function (job) { return job.status === 'succeeded'; }) ? 'success' : 'failed';
+          certificate.nodeHashes = certificate.nodeHashes || {};
+          pending.jobs.forEach(function (item) {
+            var job = byId[item.id];
+            if (job && job.result && job.result.certificate_sha256 && job.result.key_material_sha256) {
+              certificate.nodeHashes[item.nodeId] = {
+                certificateHash: job.result.certificate_sha256,
+                keyHash: job.result.key_material_sha256
+              };
+            }
+          });
+          delete certificate.pendingRemote;
+          changed = true;
+        });
+        if (changed) saveState();
+      }
+
+      async function refreshRemoteData(includeUiState) {
+        var requests = [
+          apiRequest('/api/v1/admin/nodes'),
+          apiRequest('/api/v1/admin/jobs?limit=100'),
+          apiRequest('/api/v1/admin/enrollments?status=pending&limit=100')
+        ];
+        if (includeUiState) requests.push(apiRequest('/api/v1/admin/ui-state'));
+        var responses = await Promise.all(requests);
+        if (includeUiState) {
+          var uiDocument = responses[3] || { revision: 0, state: {} };
+          var remoteState = uiDocument.state || {};
+          remoteRevision = Number(uiDocument.revision || 0);
+          state.sites = Array.isArray(remoteState.sites) ? remoteState.sites : [];
+          state.certificates = Array.isArray(remoteState.certificates) ? remoteState.certificates : [];
+        }
+        pendingEnrollments = (responses[2] && responses[2].items) || [];
+        var rawJobs = responses[1].items || [];
+        state.nodes = (responses[0].items || []).map(mapRemoteNode);
+        applyRemoteJobOutcomes(rawJobs);
+        state.runs = rawJobs.map(mapRemoteJob);
+        selectedSiteId = getSite(selectedSiteId) ? selectedSiteId : (state.sites[0] ? state.sites[0].id : null);
+        localStorage.setItem(storageKey, JSON.stringify(state));
+        updateChrome();
+        render();
+      }
+
+      async function connectRemote(forcePrompt) {
+        if (!remoteMode) return;
+        if (forcePrompt && remoteConnected) {
+          notify('当前账号：' + currentUsername + ' · ' + authSourceLabel(currentAuthSource) + ' · ' + roleLabel(currentRole));
+          return;
+        }
+        try {
+          var session = await apiRequest('/api/v1/auth/session');
+          csrfToken = session.csrf_token || '';
+          currentUsername = session.username || '';
+          currentRole = session.role || '';
+          currentAuthSource = session.auth_source || '';
+          remoteConnected = true;
+          await refreshRemoteData(true);
+          document.getElementById('logout-button').hidden = false;
+          updateSessionBadge();
+          var loginDialog = document.getElementById('login-dialog');
+          if (loginDialog.open) loginDialog.close();
+          clearInterval(remoteRefreshTimer);
+          remoteRefreshTimer = setInterval(function () {
+            if (document.visibilityState === 'visible') {
+              refreshRemoteData(false).catch(function (error) {
+                   if (error.status === 401) {
+                     remoteConnected = false;
+                     csrfToken = '';
+                     currentUsername = '';
+                     currentRole = '';
+                     currentAuthSource = '';
+                     updateSessionBadge();
+                     document.getElementById('logout-button').hidden = true;
+                     showLoginDialog('登录已过期，请重新登录。');
+                   }
+              });
+            }
+          }, 8000);
+          notify('已通过' + authSourceLabel(currentAuthSource) + '登录 · ' + roleLabel(currentRole));
+        } catch (error) {
+          remoteConnected = false;
+          csrfToken = '';
+          currentUsername = '';
+          currentRole = '';
+          currentAuthSource = '';
+          updateSessionBadge();
+          document.getElementById('logout-button').hidden = true;
+          showLoginDialog(error.status === 401 ? '' : '控制端连接失败：' + error.message);
+        }
+      }
+
+      function showLoginDialog(message) {
+        var dialog = document.getElementById('login-dialog');
+        document.getElementById('login-message').textContent = message || '请输入 LDAP / AD 账号，或本地应急管理员账号。';
+        if (!dialog.open) dialog.showModal();
+        setTimeout(function () { document.getElementById('login-username').focus(); }, 0);
+      }
+
+      async function logoutRemote() {
+        try {
+          await apiRequest('/api/v1/auth/logout', { method: 'POST' });
+        } catch (error) {}
+        clearInterval(remoteRefreshTimer);
+        remoteConnected = false;
+        csrfToken = '';
+        currentUsername = '';
+        currentRole = '';
+        currentAuthSource = '';
+        pendingEnrollments = [];
+        updateSessionBadge();
+        document.getElementById('logout-button').hidden = true;
+        showLoginDialog('已安全退出，请重新登录。');
+      }
+
+      function escapeHtml(value) {
+        return String(value == null ? '' : value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      }
+
+      function shellQuote(value) {
+        return "'" + String(value == null ? '' : value).replace(/'/g, "'\"'\"'") + "'";
+      }
+
+      function uid(prefix) {
+        return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      }
+
+      function getNode(id) {
+        return state.nodes.find(function (node) { return node.id === id; });
+      }
+
+      function getCert(id) {
+        return state.certificates.find(function (cert) { return cert.id === id; });
+      }
+
+      function certificateAvailableOnNode(cert, nodeId) {
+        if (!cert || !Array.isArray(cert.nodeIds) || !cert.nodeIds.includes(nodeId)) return false;
+        if (!remoteConnected) return true;
+        var hashes = cert.nodeHashes && cert.nodeHashes[nodeId];
+        return Boolean(
+          hashes && typeof hashes === 'object' &&
+          hashes.certificateHash && hashes.keyHash
+        );
+      }
+
+      function certificateMissingNodeIds(cert, nodeIds) {
+        return (nodeIds || []).filter(function (nodeId) {
+          return !certificateAvailableOnNode(cert, nodeId);
+        });
+      }
+
+      function getSite(id) {
+        return state.sites.find(function (site) { return site.id === id; });
+      }
+
+      function formatSiteType(type) {
+        return type === 'static' ? '静态站点' : '反向代理';
+      }
+
+      function siteStatus(site) {
+        if (site.status === 'publishing') return { label: '发布中', className: 'draft' };
+        if (site.status === 'draft') return { label: '有草稿', className: 'draft' };
+        if (site.status === 'drift') return { label: '配置漂移', className: 'warn' };
+        if (site.status === 'failed') return { label: '发布失败', className: 'danger' };
+        return { label: '已发布', className: '' };
+      }
+
+      function runStatus(run) {
+        if (run.status === 'running') return { label: '执行中', className: 'draft' };
+        if (run.status === 'failed') return { label: '失败', className: 'danger' };
+        return { label: '成功', className: '' };
+      }
+
+      function certStatus(cert) {
+        if (cert.pendingRemote) return { label: '部署中', className: 'draft' };
+        if (cert.deployStatus === 'failed') return { label: '部署失败', className: 'danger' };
+        if (cert.days <= 7) return { label: cert.days + ' 天后到期', className: 'danger' };
+        if (cert.days <= 30) return { label: cert.days + ' 天后到期', className: 'warn' };
+        return { label: '正常', className: '' };
+      }
+
+      function onlineNodes() {
+        return state.nodes.filter(function (node) { return node.online; });
+      }
+
+      function updateChrome() {
+        var online = onlineNodes().length;
+        var total = state.nodes.length;
+        document.getElementById('agent-online-text').textContent = online + ' / ' + total + ' Agent 在线';
+        document.getElementById('nav-site-count').textContent = state.sites.length;
+        document.getElementById('nav-cert-count').textContent = state.certificates.length;
+        document.getElementById('nav-node-count').textContent = total + pendingEnrollments.length;
+        document.getElementById('nav-run-count').textContent = Math.min(state.runs.length, 99);
+        document.getElementById('sidebar-agent-state').textContent = pendingEnrollments.length
+          ? pendingEnrollments.length + ' 个接入申请待审批'
+          : (online === total ? 'Agent 通道正常' : (total - online) + ' 个 Agent 离线');
+        document.getElementById('sidebar-agent-copy').textContent = pendingEnrollments.length
+          ? '请核对节点名称和主机名后决定是否批准。'
+          : (online === total ? '所有节点均通过出站连接在线。' : '离线节点不会接收新的高风险任务。');
+      }
+
+      function notify(message) {
+        var toast = document.getElementById('toast');
+        toast.textContent = message;
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () {
+          toast.classList.remove('show');
+        }, 2300);
+      }
+
+      function openDialog(id) {
+        var dialog = document.getElementById(id);
+        if (dialog && !dialog.open) dialog.showModal();
+      }
+
+      function closeDialog(id) {
+        var dialog = document.getElementById(id);
+        if (dialog && dialog.open) dialog.close();
+      }
+
+      function pageHead(title, copy, actions) {
+        return [
+          '<div class="page-head">',
+          '  <div><h1>' + escapeHtml(title) + '</h1><p>' + escapeHtml(copy) + '</p></div>',
+          '  <div class="page-actions">' + (actions || '') + '</div>',
+          '</div>'
+        ].join('');
+      }
+
+      function renderSummary() {
+        var expiring = state.certificates.filter(function (cert) { return cert.days <= 30; }).length;
+        var drift = state.sites.filter(function (site) { return site.status === 'drift' || site.status === 'failed'; }).length;
+        return [
+          '<div class="summary-grid">',
+          '  <div class="summary-card"><span class="summary-label">托管站点</span><strong class="summary-value">' + state.sites.length + '</strong><span class="summary-hint">配置、证书统一管理</span></div>',
+          '  <div class="summary-card"><button type="button" data-nav-jump="nodes"><span class="summary-label">在线 Agent</span><strong class="summary-value">' + onlineNodes().length + ' / ' + state.nodes.length + '</strong><span class="summary-hint">主动出站连接</span></button></div>',
+          '  <div class="summary-card"><button type="button" data-nav-jump="certificates"><span class="summary-label">即将到期证书</span><strong class="summary-value">' + expiring + '</strong><span class="summary-hint ' + (expiring ? 'warn' : '') + '">' + (expiring ? '需要处理' : '暂无风险') + '</span></button></div>',
+          '  <div class="summary-card"><button type="button" data-site-filter="attention"><span class="summary-label">漂移 / 失败</span><strong class="summary-value">' + drift + '</strong><span class="summary-hint ' + (drift ? 'danger' : '') + '">' + (drift ? '点击查看异常站点' : '全部一致') + '</span></button></div>',
+          '</div>'
+        ].join('');
+      }
+
+      function filteredSites() {
+        var query = siteQuery.trim().toLowerCase();
+        return state.sites.filter(function (site) {
+          var matchesQuery = !query || [site.domain, site.note, site.changeNote, site.environment].join(' ').toLowerCase().indexOf(query) >= 0;
+          var matchesFilter = siteFilter === 'all' ||
+            (siteFilter === 'attention' && (site.status === 'drift' || site.status === 'failed')) ||
+            site.status === siteFilter;
+          return matchesQuery && matchesFilter;
+        });
+      }
+
+      function ensureFilteredSiteSelection() {
+        var sites = filteredSites();
+        var selectedStillVisible = sites.some(function (site) { return site.id === selectedSiteId; });
+        if (!selectedStillVisible) selectedSiteId = sites[0] ? sites[0].id : null;
+        return sites;
+      }
+
+      function renderSiteTable() {
+        var sites = filteredSites();
+        if (!sites.length) {
+          return '<div class="list-panel"><div class="empty"><strong>没有匹配的站点</strong>尝试调整搜索或状态筛选。</div></div>';
+        }
+
+        var rows = sites.map(function (site) {
+          var cert = getCert(site.certificateId);
+          var status = siteStatus(site);
+          var nodes = site.nodeIds.map(function (id) { return getNode(id); }).filter(Boolean);
+          var nodeChips = nodes.slice(0, 2).map(function (node) {
+            return '<span class="chip ' + (node.online ? '' : 'red') + '">' + escapeHtml(node.name) + '</span>';
+          }).join('');
+          if (nodes.length > 2) nodeChips += '<span class="chip">+' + (nodes.length - 2) + '</span>';
+          return [
+            '<div class="table-row ' + (site.id === selectedSiteId ? 'selected' : '') + '" data-site-select="' + escapeHtml(site.id) + '">',
+            '  <div class="table-cell primary" data-label="站点"><button class="site-open" type="button" data-site-select="' + escapeHtml(site.id) + '"><span class="cell-title">' + escapeHtml(site.domain) + '</span><span class="cell-sub">' + escapeHtml(site.note || formatSiteType(site.type)) + '</span></button></div>',
+            '  <div class="table-cell" data-label="目标节点"><div class="chips">' + nodeChips + '</div></div>',
+            '  <div class="table-cell" data-label="证书"><span class="cell-title">' + escapeHtml(cert ? cert.domain : '未绑定') + '</span><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天' : '仅 HTTP') + '</span></div>',
+            '  <div class="table-cell" data-label="配置版本"><span class="cell-title">v' + site.version + (site.status === 'draft' ? ' → v' + (site.version + 1) : '') + '</span><span class="cell-sub">' + escapeHtml(site.updatedAt) + '</span></div>',
+            '  <div class="table-cell" data-label="状态"><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
+            '</div>'
+          ].join('');
+        }).join('');
+
+        return [
+          '<div class="list-panel site-table">',
+          '  <div class="table-head"><span>站点 / 配置备注</span><span>目标节点</span><span>证书</span><span>版本</span><span>状态</span></div>',
+          rows,
+          '</div>'
+        ].join('');
+      }
+
+      function renderSiteDetail() {
+        var visibleSites = filteredSites();
+        var site = visibleSites.find(function (item) { return item.id === selectedSiteId; }) || visibleSites[0];
+        if (!site) return '<aside class="detail-panel" id="site-detail-slot"><div class="empty"><strong>暂无匹配站点</strong>调整搜索条件或创建新站点。</div></aside>';
+        var cert = getCert(site.certificateId);
+        var status = siteStatus(site);
+        var nodes = site.nodeIds.map(function (id) { return getNode(id); }).filter(Boolean);
+        var nodeRows = nodes.map(function (node) {
+          var nodeState = !node.online ? '离线' : (node.drift || site.status === 'drift' ? 'Hash 不一致' : 'v' + site.version + ' 一致');
+          var chipClass = !node.online ? 'danger' : (node.drift || site.status === 'drift' ? 'warn' : '');
+          return [
+            '<div class="node-mini">',
+            '  <div><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(node.ip) + ' · ' + escapeHtml(node.lastSeen) + '</span></div>',
+            '  <span class="status-pill ' + chipClass + '">' + escapeHtml(nodeState) + '</span>',
+            '</div>'
+          ].join('');
+        }).join('');
+
+        var history = (site.history || []).slice(0, 3).map(function (item) {
+          return '<div class="node-mini"><div><b>v' + item.version + ' · ' + escapeHtml(item.note) + '</b><span>' + escapeHtml(item.user) + ' · ' + escapeHtml(item.time) + '</span></div><button class="ghost-button" type="button" data-action="rollback" data-site-id="' + escapeHtml(site.id) + '" data-version="' + item.version + '">回滚</button></div>';
+        }).join('');
+
+        var warning = '';
+        if (site.status === 'drift') {
+          warning = '<div class="notice"><span>!</span><div>节点上的配置 Hash 与平台 v' + site.version + ' 不一致。发布前请选择导入节点配置或覆盖节点。</div></div>';
+        }
+
+        return [
+          '<aside class="detail-panel" id="site-detail-slot">',
+          '  <div class="detail-header">',
+          '    <div class="detail-title-row"><h2>' + escapeHtml(site.domain) + '</h2><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
+          '    <p>' + escapeHtml(site.environment) + ' · ' + formatSiteType(site.type) + ' · 配置 v' + site.version + '</p>',
+          '  </div>',
+          '  <div class="detail-body">',
+          warning,
+          '    <div class="detail-block"><span class="detail-label">配置备注</span><div class="detail-value">' + escapeHtml(site.note || '暂无备注') + '</div><span class="cell-sub">最近变更：' + escapeHtml(site.changeNote || '暂无') + '</span></div>',
+          '    <div class="detail-block"><span class="detail-label">部署节点</span><div class="node-mini-list">' + nodeRows + '</div></div>',
+          '    <div class="detail-block"><span class="detail-label">证书</span><div class="detail-value">' + (cert ? escapeHtml(cert.domain) + ' · ' + escapeHtml(cert.issuer) : '未绑定证书') + '</div><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天 · ' + escapeHtml(cert.source) : '当前仅 HTTP') + '</span></div>',
+          '    <div class="detail-block"><span class="detail-label">当前配置</span><pre class="config-preview">' + escapeHtml(site.config) + '</pre></div>',
+          '    <div class="detail-block"><span class="detail-label">版本记录</span><div class="node-mini-list">' + history + '</div></div>',
+          '  </div>',
+          '  <div class="detail-actions">',
+          '    <button class="button" type="button" data-action="edit-config" data-site-id="' + escapeHtml(site.id) + '">编辑配置</button>',
+          '    <button class="button" type="button" data-action="transfer-config" data-site-id="' + escapeHtml(site.id) + '">复制到其他节点</button>',
+          '    <button class="button" type="button" data-action="validate-site" data-site-id="' + escapeHtml(site.id) + '">逐节点校验</button>',
+          site.status === 'drift' ? '<button class="button" type="button" data-action="import-drift" data-site-id="' + escapeHtml(site.id) + '">导入节点配置</button>' : '<button class="button" type="button" data-action="view-runs" data-site-id="' + escapeHtml(site.id) + '">查看记录</button>',
+          '    <button class="button subtle-danger full" type="button" data-action="delete-config" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length ? '' : ' disabled') + '>从节点移除配置</button>',
+          '    <button class="button primary full" type="button" data-action="deploy-site" data-site-id="' + escapeHtml(site.id) + '">发布并 reload</button>',
+          '  </div>',
+          '</aside>'
+        ].join('');
+      }
+
+      function renderSites() {
+        if (!selectedSiteId || !getSite(selectedSiteId)) selectedSiteId = state.sites[0] ? state.sites[0].id : null;
+        ensureFilteredSiteSelection();
+        var toolbar = [
+          '<div class="toolbar">',
+          '  <div class="search-wrap"><span>⌕</span><input class="input" id="site-search" placeholder="搜索域名、配置备注或变更说明" value="' + escapeHtml(siteQuery) + '"></div>',
+          '  <select class="select" id="site-status-filter" aria-label="站点状态">',
+          '    <option value="all"' + (siteFilter === 'all' ? ' selected' : '') + '>全部状态</option>',
+          '    <option value="published"' + (siteFilter === 'published' ? ' selected' : '') + '>已发布</option>',
+          '    <option value="draft"' + (siteFilter === 'draft' ? ' selected' : '') + '>有草稿</option>',
+          '    <option value="attention"' + (siteFilter === 'attention' ? ' selected' : '') + '>漂移 / 失败</option>',
+          '  </select>',
+          '</div>'
+        ].join('');
+
+        return [
+          pageHead('站点与配置', '以站点为中心管理配置、证书和多节点发布。', '<button class="button" type="button" data-action="import-sites">导入节点现有站点</button><button class="button primary" type="button" data-action="add-site">＋ 新增站点</button>'),
+          renderSummary(),
+          '<div class="workspace">',
+          '  <section>',
+          toolbar,
+          '    <div id="site-list-slot">' + renderSiteTable() + '</div>',
+          '  </section>',
+          renderSiteDetail(),
+          '</div>',
+          '<p class="view-note">配置不会未经校验直接覆盖线上文件；新建、替换和常规发布都会执行 nginx -t、原子写入并保留逐节点结果。</p>'
+        ].join('');
+      }
+
+      function renderCertificates() {
+        var rows = state.certificates.map(function (cert) {
+          var status = certStatus(cert);
+          var width = Math.max(5, Math.min(100, Math.round(cert.days / 90 * 100)));
+          var barClass = cert.days <= 7 ? 'danger' : (cert.days <= 30 ? 'warn' : '');
+          var sites = (cert.siteIds || []).map(getSite).filter(Boolean);
+          var locations = (cert.nodeIds || []).map(function (nodeId) {
+            var node = getNode(nodeId);
+            if (!node) return '';
+            var paths = certificateTargetPaths(cert, node);
+            return '<div class="cert-location"><span class="cert-location-node" title="' + escapeHtml(node.name) + '">' + escapeHtml(node.name) + '</span><code class="cert-location-path" title="' + escapeHtml(paths.certificatePath) + '">' + escapeHtml(paths.certificatePath) + '</code></div>';
+          }).filter(Boolean).join('');
+          return [
+            '<div class="table-row">',
+            '  <div class="table-cell primary" data-label="证书"><span class="cell-title">' + escapeHtml(cert.name) + '</span><span class="cell-sub">' + escapeHtml(cert.domain) + '</span><span class="cell-sub">' + escapeHtml(cert.source) + ' · ' + escapeHtml(cert.issuer) + '</span><span class="cell-sub">人工替换 · ' + sites.length + ' 个站点 · ' + (cert.nodeIds || []).length + ' 个节点</span></div>',
+            '  <div class="table-cell" data-label="节点与证书文件">' + (locations ? '<div class="cert-location-list">' + locations + '</div>' : '<span class="cert-location-empty">尚未写入节点</span>') + '</div>',
+            '  <div class="table-cell" data-label="有效期"><div class="cert-progress"><div class="progress-track"><i class="' + barClass + '" style="width:' + width + '%"></i></div><span class="cell-sub">' + cert.days + ' 天</span></div></div>',
+            '  <div class="table-cell" data-label="状态"><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
+            '  <div class="table-cell" data-label="操作"><div class="cert-actions"><button class="cert-action" type="button" data-action="replace-cert" data-cert-id="' + escapeHtml(cert.id) + '">替换证书</button></div></div>',
+            '</div>'
+          ].join('');
+        }).join('');
+
+        return [
+          pageHead('证书', '管理域名证书、到期提醒和多节点原路径替换。', '<button class="button primary" type="button" data-action="add-certificate">＋ 添加证书</button>'),
+          '<div class="panel cert-table">',
+          '  <div class="table-head"><span>证书 / 域名</span><span>节点与证书文件</span><span>剩余时间</span><span>状态</span><span>操作</span></div>',
+          rows,
+          '</div>',
+          '<p class="view-note">替换会写回原证书和私钥路径。私钥不回显；校验或 reload 失败时，Agent 会自动恢复旧文件。</p>'
+        ].join('');
+      }
+
+      function renderNodes() {
+        var pendingCards = pendingEnrollments.map(function (request) {
+          var labels = Object.keys(request.labels || {}).map(function (key) {
+            return key + '=' + request.labels[key];
+          }).join(' · ');
+          return [
+            '<article class="node-card">',
+            '  <div class="node-card-head">',
+            '    <div class="node-avatar">?</div>',
+            '    <div><h3>' + escapeHtml(request.node_name) + '</h3><p>' + escapeHtml(request.hostname) + (labels ? ' · ' + escapeHtml(labels) : '') + '</p></div>',
+            '    <span class="status-pill warn">待审批</span>',
+            '  </div>',
+            '  <div class="notice">申请时间：' + escapeHtml(request.requested_at || '刚刚') + '。请确认节点名称和主机名后再批准。</div>',
+            '  <div class="node-actions">',
+            '    <button type="button" data-action="approve-enrollment" data-enrollment-id="' + escapeHtml(request.id) + '">批准接入</button>',
+            '    <button type="button" data-action="reject-enrollment" data-enrollment-id="' + escapeHtml(request.id) + '">拒绝</button>',
+            '  </div>',
+            '</article>'
+          ].join('');
+        }).join('');
+        var pendingSection = remoteConnected ? [
+          '<div class="section-head" style="margin-top:4px"><div><h2>待审批接入</h2><p>Agent 已主动连接，但尚未获得节点操作权限。</p></div><span class="status-pill ' + (pendingEnrollments.length ? 'warn' : '') + '">' + pendingEnrollments.length + ' 个申请</span></div>',
+          pendingEnrollments.length ? '<div class="node-grid">' + pendingCards + '</div>' : '<div class="panel empty-state"><strong>暂无待审批申请</strong><span>在目标 Linux 节点运行安装命令后，申请会自动出现在这里。</span></div>'
+        ].join('') : '';
+        var cards = state.nodes.map(function (node) {
+          var statusClass = !node.online ? 'danger' : (node.drift ? 'warn' : '');
+          var statusText = !node.online ? '离线' : (node.drift ? '配置漂移' : '在线');
+          return [
+            '<article class="node-card">',
+            '  <div class="node-card-head">',
+            '    <div class="node-avatar">' + escapeHtml(node.name.slice(-2).toUpperCase()) + '</div>',
+            '    <div><h3>' + escapeHtml(node.name) + '</h3><p>' + escapeHtml(node.ip) + ' · ' + escapeHtml(node.label) + '</p></div>',
+            '    <span class="status-pill ' + statusClass + '">' + statusText + '</span>',
+            '  </div>',
+            '  <div class="node-facts">',
+            '    <div class="fact"><label>Agent</label><strong>v' + escapeHtml(node.agent) + ' · ' + escapeHtml(node.lastSeen) + '</strong></div>',
+            '    <div class="fact"><label>Nginx</label><strong>' + escapeHtml(node.nginx) + '</strong></div>',
+            '    <div class="fact"><label>配置根目录</label><strong>' + escapeHtml(node.root) + '</strong></div>',
+            '    <div class="fact"><label>托管站点</label><strong>' + node.sites + ' 个 · ' + escapeHtml(node.configVersion) + '</strong></div>',
+            '  </div>',
+            '  <div class="node-actions">',
+            '    <button type="button" data-action="inspect-node" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>重新探测</button>',
+            '    <button type="button" data-action="test-node" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>nginx -t</button>',
+            '    <button type="button" data-action="reload-node" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>平滑 reload</button>',
+            node.drift ? '<button type="button" data-action="resolve-node-drift" data-node-id="' + escapeHtml(node.id) + '">处理漂移</button>' : '',
+            '  </div>',
+            '</article>'
+          ].join('');
+        }).join('');
+
+        return [
+          pageHead('节点 Agent', '每台机器一个轻量 Agent，主动出站连接并执行类型化任务。', '<button class="button primary" type="button" data-action="add-node">＋ 接入节点</button>'),
+          pendingSection,
+          '<div class="section-head" style="margin-top:18px"><div><h2>已托管节点</h2><p>批准后 Agent 会自动完成机器身份初始化并开始心跳。</p></div></div>',
+          '<div class="node-grid">' + cards + '</div>',
+          '<p class="view-note">不提供任意 Shell。Agent 只接受 inspect、nginx_test、nginx_reload、config_read、config_hash、config_apply、config_delete、certificate_apply 八种固定动作。</p>'
+        ].join('');
+      }
+
+      function renderRuns() {
+        var rows = state.runs.map(function (run) {
+          var status = runStatus(run);
+          return [
+            '<div class="table-row">',
+            '  <div class="table-cell primary" data-label="任务"><button class="row-open" type="button" data-action="open-run" data-run-id="' + escapeHtml(run.id) + '"><span class="cell-title">' + escapeHtml(run.type) + ' · ' + escapeHtml(run.target) + '</span><span class="cell-sub">' + escapeHtml(run.note) + '</span></button></div>',
+            '  <div class="table-cell" data-label="目标"><div class="chips">' + run.targets.slice(0, 2).map(function (target) { return '<span class="chip">' + escapeHtml(target) + '</span>'; }).join('') + (run.targets.length > 2 ? '<span class="chip">+' + (run.targets.length - 2) + '</span>' : '') + '</div></div>',
+            '  <div class="table-cell" data-label="状态"><span class="status-pill ' + status.className + '">' + status.label + '</span><span class="cell-sub">' + escapeHtml(run.duration) + '</span></div>',
+            '  <div class="table-cell" data-label="操作者"><span class="cell-title">' + escapeHtml(run.user) + '</span><span class="cell-sub">' + escapeHtml(run.time) + '</span></div>',
+            '  <div class="table-cell" data-label="任务号"><span class="cell-sub">' + escapeHtml(run.id) + '</span></div>',
+            '</div>'
+          ].join('');
+        }).join('');
+
+        return [
+          pageHead('执行记录', '查看每次配置、证书和节点操作的逐节点结果。', ''),
+          '<div class="panel run-table">',
+          '  <div class="table-head"><span>任务 / 变更说明</span><span>目标节点</span><span>状态</span><span>操作者</span><span>任务号</span></div>',
+          rows,
+          '</div>',
+          '<p class="view-note">记录包含任务、目标节点、状态、耗时和安全摘要；控制端不保存 Agent 原始配置与命令输出。</p>'
+        ].join('');
+      }
+
+      function render() {
+        updateChrome();
+        var content = document.getElementById('app-content');
+        var titleMap = { sites: '站点与配置', certificates: '证书', nodes: '节点 Agent', runs: '执行记录' };
+        document.getElementById('breadcrumb-current').textContent = titleMap[activeView];
+        document.querySelectorAll('[data-nav]').forEach(function (button) {
+          button.classList.toggle('active', button.getAttribute('data-nav') === activeView);
+        });
+        if (activeView === 'certificates') content.innerHTML = renderCertificates();
+        else if (activeView === 'nodes') content.innerHTML = renderNodes();
+        else if (activeView === 'runs') content.innerHTML = renderRuns();
+        else content.innerHTML = renderSites();
+        applyRolePermissions();
+        updateSessionBadge();
+        bindViewControls();
+      }
+
+      function bindViewControls() {
+        var search = document.getElementById('site-search');
+        if (search) {
+          search.addEventListener('input', function (event) {
+            siteQuery = event.target.value;
+            ensureFilteredSiteSelection();
+            var list = document.getElementById('site-list-slot');
+            var detail = document.getElementById('site-detail-slot');
+            if (list) list.innerHTML = renderSiteTable();
+            if (detail) detail.outerHTML = renderSiteDetail();
+          });
+        }
+        var filter = document.getElementById('site-status-filter');
+        if (filter) {
+          filter.addEventListener('change', function (event) {
+            siteFilter = event.target.value;
+            render();
+          });
+        }
+      }
+
+      function switchView(view) {
+        if (!['sites', 'certificates', 'nodes', 'runs'].includes(view)) return;
+        activeView = view;
+        window.location.hash = view;
+        render();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+
+      function prepareSiteDialog() {
+        document.getElementById('site-form').reset();
+        var nodeChecks = document.getElementById('site-node-checks');
+        nodeChecks.innerHTML = state.nodes.map(function (node) {
+          return '<label class="check-card"><input type="checkbox" name="site-node" value="' + escapeHtml(node.id) + '" ' + (!node.online ? 'disabled' : '') + '><span><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(node.ip) + ' · ' + (node.online ? '在线' : '离线') + '</span></span></label>';
+        }).join('');
+        updateSiteCertificateOptions();
+        openDialog('site-dialog');
+      }
+
+      function updateSiteCertificateOptions() {
+        var certSelect = document.getElementById('site-cert');
+        var selectedNodeIds = Array.from(document.querySelectorAll('input[name="site-node"]:checked')).map(function (input) { return input.value; });
+        var previousValue = certSelect.value;
+        certSelect.innerHTML = '<option value="">暂不绑定</option>' + state.certificates.map(function (cert) {
+          var missingNodeIds = selectedNodeIds.length ? certificateMissingNodeIds(cert, selectedNodeIds) : [];
+          var missingNames = missingNodeIds.map(getNode).filter(Boolean).map(function (node) { return node.name; });
+          var available = selectedNodeIds.length > 0 && missingNodeIds.length === 0 && !cert.pendingRemote;
+          var suffix = !selectedNodeIds.length
+            ? ' · 请先选择节点'
+            : (cert.pendingRemote
+              ? ' · 仍在部署中'
+              : (available ? ' · 已覆盖所选节点' : ' · 缺少：' + missingNames.join('、')));
+          return '<option value="' + escapeHtml(cert.id) + '"' + (available ? '' : ' disabled') + '>' + escapeHtml(cert.domain) + ' · 剩余 ' + cert.days + ' 天' + escapeHtml(suffix) + '</option>';
+        }).join('');
+        var previousCert = previousValue ? getCert(previousValue) : null;
+        if (previousCert && selectedNodeIds.length && !certificateMissingNodeIds(previousCert, selectedNodeIds).length && !previousCert.pendingRemote) {
+          certSelect.value = previousValue;
+        } else {
+          certSelect.value = '';
+        }
+        var help = document.getElementById('site-cert-help');
+        if (!selectedNodeIds.length) {
+          help.textContent = '先选择部署节点，只能绑定这些节点上都已存在的证书。';
+        } else {
+          var availableCount = state.certificates.filter(function (cert) {
+            return !cert.pendingRemote && certificateMissingNodeIds(cert, selectedNodeIds).length === 0;
+          }).length;
+          help.textContent = availableCount
+            ? '有 ' + availableCount + ' 张证书已完整覆盖所选节点。'
+            : '没有证书完整覆盖所选节点；请先到“证书”页面部署。';
+        }
+      }
+
+      function defaultConfig(domain, type, target, cert) {
+        var lines = ['server {'];
+        if (cert) {
+          var safeCertificateName = safeResourceName(cert.domain || domain);
+          lines.push('  listen 443 ssl;');
+          lines.push('  server_name ' + domain + ';');
+          lines.push('  ssl_certificate     /etc/nginx/ssl/nginx-manager/' + safeCertificateName + '.crt;');
+          lines.push('  ssl_certificate_key /etc/nginx/ssl/nginx-manager/' + safeCertificateName + '.key;');
+        } else {
+          lines.push('  listen 80;');
+          lines.push('  server_name ' + domain + ';');
+        }
+        lines.push('');
+        if (type === 'static') {
+          lines.push('  root ' + target + ';');
+          lines.push('  location / {');
+          lines.push('    try_files $uri $uri/ =404;');
+          lines.push('  }');
+        } else {
+          lines.push('  location / {');
+          lines.push('    proxy_pass ' + target + ';');
+          lines.push('    proxy_set_header Host $host;');
+          lines.push('    proxy_set_header X-Real-IP $remote_addr;');
+          lines.push('  }');
+        }
+        lines.push('}');
+        return lines.join('\n');
+      }
+
+      function openConfigEditor(siteId) {
+        var site = getSite(siteId);
+        if (!site) return;
+        editingSiteId = site.id;
+        document.getElementById('config-dialog-title').textContent = '编辑 ' + site.domain;
+        document.getElementById('config-dialog-subtitle').textContent = '当前发布版本 v' + site.version + ' · ' + site.nodeIds.length + ' 个目标节点';
+        document.getElementById('config-note').value = site.note || '';
+        document.getElementById('change-note').value = site.status === 'draft' ? site.changeNote.replace(/^草稿：/, '') : '';
+        document.getElementById('config-editor').value = site.config;
+        document.getElementById('config-editor').dataset.original = site.config;
+        document.getElementById('config-node-chips').innerHTML = site.nodeIds.map(function (id) {
+          var node = getNode(id);
+          return node ? '<span class="chip ' + (node.online ? 'green' : 'red') + '">' + escapeHtml(node.name) + '</span>' : '';
+        }).join('');
+        updateDiffBadge();
+        openDialog('config-dialog');
+      }
+
+      function updateDiffBadge() {
+        var editor = document.getElementById('config-editor');
+        var original = editor.dataset.original || '';
+        var current = editor.value;
+        var badge = document.getElementById('config-diff-badge');
+        if (current === original) {
+          badge.textContent = '与当前版本一致';
+          return;
+        }
+        var oldLines = original.split('\n');
+        var newLines = current.split('\n');
+        var changed = Math.abs(oldLines.length - newLines.length);
+        var max = Math.max(oldLines.length, newLines.length);
+        for (var i = 0; i < max; i += 1) {
+          if (oldLines[i] !== newLines[i]) changed += 1;
+        }
+        badge.textContent = '相对当前版本约 ' + Math.max(1, changed) + ' 行变化';
+      }
+
+      function saveConfig(mode) {
+        var site = getSite(editingSiteId);
+        if (!site) return;
+        var changeNote = document.getElementById('change-note').value.trim();
+        if (mode !== 'draft' && !changeNote) {
+          document.getElementById('change-note').focus();
+          notify('校验或发布前，请填写本次变更说明');
+          return;
+        }
+        site.config = document.getElementById('config-editor').value;
+        site.note = document.getElementById('config-note').value.trim();
+        site.changeNote = changeNote ? (mode === 'draft' ? '草稿：' + changeNote : changeNote) : '草稿未填写变更说明';
+        site.status = 'draft';
+        site.updatedAt = '刚刚';
+        saveState();
+        closeDialog('config-dialog');
+        selectedSiteId = site.id;
+        if (mode === 'draft') {
+          notify('草稿已保存，尚未影响任何节点');
+          render();
+        } else if (mode === 'validate') {
+          startRun(site, '配置校验', false);
+        } else {
+          openDeployDialog(site.id);
+        }
+      }
+
+      function openDeployDialog(siteId) {
+        var site = getSite(siteId);
+        if (!site) return;
+        pendingDeploySiteId = site.id;
+        document.getElementById('deploy-title').textContent = '发布 ' + site.domain + ' 配置';
+        document.getElementById('deploy-subtitle').textContent = '候选版本 v' + (site.version + 1) + ' · ' + escapeHtml(site.changeNote || '未填写变更说明');
+        document.getElementById('deploy-node-checks').innerHTML = site.nodeIds.map(function (id) {
+          var node = getNode(id);
+          if (!node) return '';
+          return '<label class="check-card"><input type="checkbox" name="deploy-node" value="' + escapeHtml(node.id) + '" ' + (node.online ? 'checked' : 'disabled') + '><span><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(node.ip) + ' · ' + (node.online ? '当前 v' + site.version : 'Agent 离线') + '</span></span></label>';
+        }).join('');
+        openDialog('deploy-dialog');
+      }
+
+      function openConfigTransferDialog(siteId) {
+        var site = getSite(siteId);
+        if (!site) return;
+        if (site.pendingRemote || site.status === 'publishing') {
+          notify('当前站点已有任务执行中，请等待完成后再复制');
+          return;
+        }
+        if (site.version < 1 || site.status === 'draft') {
+          notify('请先校验并发布当前站点配置，再复制已发布版本');
+          return;
+        }
+        var candidates = state.nodes.filter(function (node) { return !site.nodeIds.includes(node.id); });
+        if (!candidates.length) {
+          notify('该配置已经托管到全部节点');
+          return;
+        }
+        var boundCertificate = getCert(site.certificateId);
+        pendingTransferSiteId = site.id;
+        var sourceNames = site.nodeIds.map(getNode).filter(Boolean).map(function (node) { return node.name; });
+        document.getElementById('config-transfer-title').textContent = '复制 ' + site.domain + ' 到其他节点';
+        document.getElementById('config-transfer-subtitle').textContent = '复制已发布配置 v' + site.version + '，原节点文件保持不变';
+        document.getElementById('config-transfer-source').innerHTML = [
+          '<div><strong>' + escapeHtml(site.domain) + ' · 配置 v' + site.version + '</strong><span>源节点：' + escapeHtml(sourceNames.join('、') || '平台草稿') + '</span></div>',
+          '<span class="status-pill">已发布</span>',
+          '<div class="transfer-path">目标文件名：' + escapeHtml(managedConfigFilename(site)) + '</div>'
+        ].join('');
+        document.getElementById('transfer-node-checks').innerHTML = candidates.map(function (node) {
+          var hasBoundCertificate = !boundCertificate || (!boundCertificate.pendingRemote && certificateAvailableOnNode(boundCertificate, node.id));
+          var selectable = node.online && hasBoundCertificate;
+          var disabled = selectable ? '' : ' disabled';
+          var stateCopy = !node.online
+            ? 'Agent 离线，本次不可写入'
+            : (hasBoundCertificate ? '在线 · Agent ' + node.agent : '缺少绑定证书 ' + boundCertificate.domain);
+          var blockingCopy = !node.online
+            ? '<span class="cert-target-state">节点离线</span>'
+            : (!hasBoundCertificate ? '<span class="cert-target-state">请先在该节点部署绑定证书</span>' : '');
+          return [
+            '<label class="check-card">',
+            '  <input type="checkbox" name="transfer-node" value="' + escapeHtml(node.id) + '"' + disabled + '>',
+            '  <span class="cert-target-copy"><b>' + escapeHtml(node.name) + '</b>',
+            '    <span>' + escapeHtml(node.ip) + ' · ' + escapeHtml(stateCopy) + '</span>',
+            '    <span class="cert-target-path" title="' + escapeHtml(migrationConfigPath(site, node)) + '">写入：' + escapeHtml(migrationConfigPath(site, node)) + '</span>',
+            blockingCopy,
+            '  </span>',
+            '</label>'
+          ].join('');
+        }).join('');
+        document.getElementById('config-transfer-mode').value = 'create';
+        openDialog('config-transfer-dialog');
+      }
+
+      function openConfigDeleteDialog(siteId) {
+        var site = getSite(siteId);
+        if (!site) return;
+        if (site.pendingRemote || site.status === 'publishing') {
+          notify('当前站点已有任务执行中，请等待完成后再移除配置');
+          return;
+        }
+        if (!site.nodeIds.length) {
+          notify('该站点当前没有托管节点配置');
+          return;
+        }
+        pendingDeleteSiteId = site.id;
+        document.getElementById('config-delete-title').textContent = '从节点移除 ' + site.domain;
+        document.getElementById('config-delete-subtitle').textContent = '仅删除所选节点上的配置文件；平台站点记录、草稿和绑定证书都会保留';
+        document.getElementById('config-delete-confirm').value = '';
+        document.getElementById('config-delete-confirm').placeholder = '请输入 ' + site.domain;
+        document.getElementById('delete-node-checks').innerHTML = site.nodeIds.map(function (nodeId) {
+          var node = getNode(nodeId);
+          if (!node) return '';
+          var knownHash = site.nodeHashes && site.nodeHashes[node.id];
+          var agentSupported = versionAtLeast(node.agent, 0, 4, 0);
+          var selectable = node.online && (!remoteConnected || (knownHash && agentSupported));
+          var reason = !node.online
+            ? 'Agent 离线'
+            : (!knownHash && remoteConnected
+              ? '缺少当前配置 Hash，禁止盲删'
+              : (!agentSupported && remoteConnected ? '需要 Agent 0.4.0+' : '可安全移除'));
+          return [
+            '<label class="check-card">',
+            '  <input type="checkbox" name="delete-node" value="' + escapeHtml(node.id) + '"' + (selectable ? '' : ' disabled') + '>',
+            '  <span class="cert-target-copy"><b>' + escapeHtml(node.name) + '</b>',
+            '    <span>' + escapeHtml(node.ip) + ' · ' + escapeHtml(reason) + (knownHash ? ' · Hash ' + escapeHtml(String(knownHash).slice(0, 12)) : '') + '</span>',
+            '    <span class="cert-target-path" title="' + escapeHtml(managedConfigPath(site, node)) + '">删除：' + escapeHtml(managedConfigPath(site, node)) + '</span>',
+            '  </span>',
+            '</label>'
+          ].join('');
+        }).join('');
+        openDialog('config-delete-dialog');
+      }
+
+      function addRun(type, target, nodeNames, status, note, log) {
+        var run = {
+          id: uid('run'),
+          type: type,
+          target: target,
+          targets: nodeNames,
+          status: status,
+          time: '刚刚',
+          duration: status === 'running' ? '执行中' : '1.0s',
+          user: '当前用户',
+          note: note || '',
+          log: log || []
+        };
+        state.runs.unshift(run);
+        saveState();
+        return run;
+      }
+
+      function safeResourceName(value) {
+        return String(value || 'resource').toLowerCase().replace(/[^a-z0-9.-]+/g, '_');
+      }
+
+      function managedConfigFilename(site) {
+        var configuredPath = String(site && site.configPath || '');
+        var basename = configuredPath.split('/').pop();
+        if (basename && /^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.conf$/.test(basename)) return basename;
+        return safeResourceName(site && site.domain || 'site') + '.conf';
+      }
+
+      function migrationConfigPath(site, node) {
+        var root = node && node.managedConfigRoot ? node.managedConfigRoot : '/etc/nginx/nginx-manager.d';
+        return String(root).replace(/\/+$/, '') + '/' + managedConfigFilename(site);
+      }
+
+      function versionAtLeast(value, major, minor, patch) {
+        var matched = String(value || '').match(/^v?(\d+)\.(\d+)\.(\d+)/);
+        if (!matched) return false;
+        var actual = [Number(matched[1]), Number(matched[2]), Number(matched[3])];
+        var required = [major, minor, patch];
+        for (var index = 0; index < actual.length; index += 1) {
+          if (actual[index] > required[index]) return true;
+          if (actual[index] < required[index]) return false;
+        }
+        return true;
+      }
+
+      function managedCertificateRoot(node) {
+        var root = node && node.managedCertificateRoot
+          ? node.managedCertificateRoot
+          : '/etc/nginx/ssl/nginx-manager';
+        return String(root).replace(/\/+$/, '');
+      }
+
+      function certificateTargetPaths(cert, node) {
+        var root = managedCertificateRoot(node);
+        var stored = cert && cert.nodePaths && node ? cert.nodePaths[node.id] : null;
+        var safeCertificateName = safeResourceName(cert && cert.domain ? cert.domain : 'certificate');
+        var defaultCertificatePath = root + '/' + safeCertificateName + '.crt';
+        var defaultKeyPath = root + '/' + safeCertificateName + '.key';
+        var certificatePath = stored && typeof stored.certificatePath === 'string'
+          ? stored.certificatePath
+          : defaultCertificatePath;
+        var keyPath = stored && typeof stored.keyPath === 'string'
+          ? stored.keyPath
+          : defaultKeyPath;
+        if (certificatePath.indexOf(root + '/') !== 0 || keyPath.indexOf(root + '/') !== 0) {
+          certificatePath = defaultCertificatePath;
+          keyPath = defaultKeyPath;
+        }
+        return { certificatePath: certificatePath, keyPath: keyPath };
+      }
+
+      function renderCertificateNodeChoices(cert) {
+        var nodes = cert && Array.isArray(cert.nodeIds) && cert.nodeIds.length
+          ? cert.nodeIds.map(getNode).filter(Boolean)
+          : state.nodes;
+        if (!nodes.length) return '<span class="field-help">请先接入至少一个 Agent 节点。</span>';
+        var pathCert = cert || { domain: document.getElementById('cert-domain').value || '域名' };
+        return nodes.map(function (node) {
+          var paths = certificateTargetPaths(pathCert, node);
+          var checked = node.online ? ' checked' : '';
+          var disabled = node.online ? '' : ' disabled';
+          var offline = node.online ? '' : '<span class="cert-target-state">Agent 离线，本次无法替换</span>';
+          return '<label class="check-card"><input type="checkbox" name="cert-node" value="' + escapeHtml(node.id) + '"' + checked + disabled + '><span class="cert-target-copy"><b>' + escapeHtml(node.name) + '</b><span class="cert-target-path" title="' + escapeHtml(paths.certificatePath) + '">证书：' + escapeHtml(paths.certificatePath) + '</span><span class="cert-target-path" title="' + escapeHtml(paths.keyPath) + '">私钥：' + escapeHtml(paths.keyPath) + '</span>' + offline + '</span></label>';
+        }).join('');
+      }
+
+      function managedConfigPath(site, node) {
+        if (site.nodeConfigPaths && node && site.nodeConfigPaths[node.id]) return site.nodeConfigPaths[node.id];
+        if (site.configPath) return site.configPath;
+        var root = node && node.managedConfigRoot ? node.managedConfigRoot : '/etc/nginx/nginx-manager.d';
+        return root + '/' + safeResourceName(site.domain || 'site') + '.conf';
+      }
+
+      function managedConfigContent(site, node) {
+        var certificateRoot = managedCertificateRoot(node);
+        var content = String(site.config || '');
+        var knownRoots = ['/etc/nginx/ssl/nginx-manager'].concat(state.nodes.map(function (item) {
+          return managedCertificateRoot(item);
+        }));
+        Array.from(new Set(knownRoots)).sort(function (left, right) { return right.length - left.length; }).forEach(function (root) {
+          content = content.split(String(root).replace(/\/+$/, '') + '/').join(certificateRoot + '/');
+        });
+        return content;
+      }
+
+      async function startRemoteConfigRun(site, willPublish, nodeIds) {
+        var targets = (nodeIds || site.nodeIds).map(getNode).filter(Boolean);
+        var queued = [];
+        try {
+          for (var index = 0; index < targets.length; index += 1) {
+            var node = targets[index];
+            var targetPath = managedConfigPath(site, node);
+            var knownHash = site.nodeHashes && site.nodeHashes[node.id];
+            if (!knownHash && site.version > 0) {
+              throw new Error(node.name + ' 缺少当前配置 Hash，请先从节点导入或重新探测');
+            }
+            var response = await apiRequest('/api/v1/admin/jobs', {
+              method: 'POST',
+              body: {
+                node_ids: [node.id],
+                action: 'config_apply',
+                ttl_seconds: 300,
+                payload: {
+                  path: targetPath,
+                  content: managedConfigContent(site, node),
+                  expected_sha256: knownHash || 'missing',
+                  validate_only: !willPublish,
+                  reload: Boolean(willPublish)
+                }
+              }
+            });
+            (response.jobs || []).forEach(function (job) {
+              queued.push({ id: job.id, nodeId: job.node_id, path: targetPath });
+            });
+          }
+          site.pendingRemote = { jobs: queued, publish: Boolean(willPublish) };
+          site.status = willPublish ? 'publishing' : 'draft';
+          saveState();
+          notify(willPublish ? '已提交真实发布任务，Agent 将逐节点执行' : '已提交真实节点校验任务');
+          setTimeout(function () { refreshRemoteData(false).catch(function () {}); }, 500);
+        } catch (error) {
+          if (queued.length) {
+            site.pendingRemote = { jobs: queued, publish: Boolean(willPublish) };
+            site.status = 'failed';
+            saveState();
+          }
+          notify('任务提交失败：' + error.message);
+        }
+      }
+
+      async function startRemoteConfigTransfer(site, nodeIds, mode) {
+        var targets = nodeIds.map(getNode).filter(Boolean);
+        var queued = [];
+        try {
+          for (var index = 0; index < targets.length; index += 1) {
+            var node = targets[index];
+            var targetPath = migrationConfigPath(site, node);
+            var response = await apiRequest('/api/v1/admin/jobs', {
+              method: 'POST',
+              body: {
+                node_ids: [node.id],
+                action: 'config_apply',
+                ttl_seconds: 300,
+                payload: {
+                  path: targetPath,
+                  content: managedConfigContent(site, node),
+                  expected_sha256: mode === 'replace' ? 'present' : 'missing',
+                  validate_only: false,
+                  reload: true
+                }
+              }
+            });
+            (response.jobs || []).forEach(function (job) {
+              queued.push({ id: job.id, nodeId: job.node_id, path: targetPath });
+            });
+          }
+          if (!queued.length) throw new Error('控制端没有创建任何目标任务');
+          site.pendingRemote = {
+            jobs: queued,
+            publish: false,
+            transfer: true,
+            transferMode: mode,
+            targetNodeIds: nodeIds.slice()
+          };
+          site.status = 'publishing';
+          saveState();
+          notify('配置复制任务已提交；Agent 将逐节点校验、写入并 reload');
+          render();
+          setTimeout(function () { refreshRemoteData(false).catch(function () {}); }, 500);
+        } catch (error) {
+          if (queued.length) {
+            site.pendingRemote = {
+              jobs: queued,
+              publish: false,
+              transfer: true,
+              transferMode: mode,
+              targetNodeIds: queued.map(function (item) { return item.nodeId; })
+            };
+            site.status = 'failed';
+            saveState();
+          }
+          notify('配置复制任务提交失败：' + error.message);
+          render();
+        }
+      }
+
+      async function startRemoteConfigDelete(site, nodeIds) {
+        var targets = nodeIds.map(getNode).filter(Boolean);
+        var queued = [];
+        try {
+          for (var index = 0; index < targets.length; index += 1) {
+            var node = targets[index];
+            var knownHash = site.nodeHashes && site.nodeHashes[node.id];
+            if (!knownHash) throw new Error(node.name + ' 缺少当前配置 Hash，已停止删除');
+            if (!versionAtLeast(node.agent, 0, 4, 0)) throw new Error(node.name + ' 需要升级到 Agent 0.4.0+');
+            var targetPath = managedConfigPath(site, node);
+            var response = await apiRequest('/api/v1/admin/jobs', {
+              method: 'POST',
+              body: {
+                node_ids: [node.id],
+                action: 'config_delete',
+                ttl_seconds: 300,
+                payload: {
+                  path: targetPath,
+                  expected_sha256: knownHash,
+                  reload: true
+                }
+              }
+            });
+            (response.jobs || []).forEach(function (job) {
+              queued.push({ id: job.id, nodeId: job.node_id, path: targetPath });
+            });
+          }
+          if (!queued.length) throw new Error('控制端没有创建任何删除任务');
+          site.pendingRemote = {
+            jobs: queued,
+            publish: false,
+            deleteConfig: true,
+            targetNodeIds: nodeIds.slice()
+          };
+          site.status = 'publishing';
+          saveState();
+          notify('配置移除任务已提交；Agent 将校验 Hash、删除、nginx -t 并 reload');
+          render();
+          setTimeout(function () { refreshRemoteData(false).catch(function () {}); }, 500);
+        } catch (error) {
+          if (queued.length) {
+            site.pendingRemote = {
+              jobs: queued,
+              publish: false,
+              deleteConfig: true,
+              targetNodeIds: queued.map(function (item) { return item.nodeId; })
+            };
+            site.status = 'failed';
+            saveState();
+          }
+          notify('配置移除任务提交失败：' + error.message);
+          render();
+        }
+      }
+
+      function startConfigTransfer(site, nodeIds, mode) {
+        if (remoteConnected) {
+          startRemoteConfigTransfer(site, nodeIds, mode);
+          return;
+        }
+        var targets = nodeIds.map(getNode).filter(Boolean);
+        site.nodeHashes = site.nodeHashes || {};
+        site.nodeConfigPaths = site.nodeConfigPaths || {};
+        targets.forEach(function (node) {
+          if (!site.nodeIds.includes(node.id)) {
+            site.nodeIds.push(node.id);
+            node.sites = Number(node.sites || 0) + 1;
+          }
+          site.nodeHashes[node.id] = 'demo-' + uid('hash');
+          site.nodeConfigPaths[node.id] = migrationConfigPath(site, node);
+        });
+        site.status = 'published';
+        site.updatedAt = '刚刚';
+        site.history = site.history || [];
+        site.history.unshift({
+          version: site.version,
+          note: (mode === 'replace' ? '替换' : '新建') + '配置到 ' + targets.map(function (node) { return node.name; }).join('、'),
+          time: '刚刚',
+          user: '当前用户'
+        });
+        addRun('配置复制', site.domain, targets.map(function (node) { return node.name; }), 'success', mode === 'replace' ? '替换目标同名配置' : '在目标节点新建配置', ['nginx -t passed', 'atomic write completed', 'nginx reload completed']);
+        saveState();
+        notify('演示完成：配置已写入目标节点并加入托管范围');
+        render();
+      }
+
+      function startConfigDelete(site, nodeIds) {
+        if (remoteConnected) {
+          startRemoteConfigDelete(site, nodeIds);
+          return;
+        }
+        var targets = nodeIds.map(getNode).filter(Boolean);
+        site.nodeHashes = site.nodeHashes || {};
+        site.nodeConfigPaths = site.nodeConfigPaths || {};
+        targets.forEach(function (node) {
+          site.nodeIds = site.nodeIds.filter(function (nodeId) { return nodeId !== node.id; });
+          delete site.nodeHashes[node.id];
+          delete site.nodeConfigPaths[node.id];
+          node.sites = Math.max(0, Number(node.sites || 0) - 1);
+        });
+        site.updatedAt = '刚刚';
+        site.changeNote = '从节点移除配置：' + targets.map(function (node) { return node.name; }).join('、');
+        site.history = site.history || [];
+        site.history.unshift({ version: site.version, note: site.changeNote, time: '刚刚', user: '当前用户' });
+        site.status = site.nodeIds.length ? 'published' : 'draft';
+        addRun('移除节点配置', site.domain, targets.map(function (node) { return node.name; }), 'success', site.changeNote, [
+          'verified exact current SHA-256',
+          'configuration removed from managed directory',
+          'nginx -t successful',
+          'nginx reload successful'
+        ]);
+        saveState();
+        notify('已从 ' + targets.length + ' 个节点移除配置；站点记录和证书已保留');
+        render();
+      }
+
+      function startRun(site, type, willPublish, nodeIds) {
+        if (remoteConnected) {
+          startRemoteConfigRun(site, willPublish, nodeIds);
+          return;
+        }
+        var targets = (nodeIds || site.nodeIds).map(getNode).filter(Boolean);
+        var targetNames = targets.map(function (node) { return node.name; });
+        var run = addRun(type, site.domain, targetNames, 'running', site.changeNote, []);
+        openRunDialog(run, targets, site, willPublish);
+      }
+
+      function openRunDialog(run, nodes, site, willPublish) {
+        if (activeRunTimer) clearInterval(activeRunTimer);
+        var dialog = document.getElementById('run-dialog');
+        document.getElementById('run-dialog-title').textContent = run.type + ' · ' + run.target;
+        document.getElementById('run-dialog-subtitle').textContent = run.id + ' · ' + nodes.length + ' 个目标节点';
+        document.getElementById('run-progress-bar').style.width = '4%';
+        document.getElementById('run-log').textContent = '[' + new Date().toLocaleTimeString() + '] 任务已签名，等待 Agent 接受';
+        document.getElementById('run-node-list').innerHTML = nodes.map(function (node, index) {
+          return '<div class="run-node" data-run-node="' + escapeHtml(node.id) + '"><span class="step-mark ' + (index === 0 ? 'running' : '') + '">' + (index === 0 ? '…' : '·') + '</span><div><b>' + escapeHtml(node.name) + '</b><span>' + (index === 0 ? '正在暂存候选配置' : '等待执行') + '</span></div><span class="node-stage">等待</span></div>';
+        }).join('');
+        openDialog('run-dialog');
+
+        var steps = willPublish
+          ? ['暂存候选配置', 'nginx -t 校验通过', '原子切换配置', 'nginx reload', '健康检查通过']
+          : ['暂存候选配置', 'nginx -t 校验通过'];
+        var totalTicks = Math.max(1, nodes.length * steps.length);
+        var tick = 0;
+
+        function updateNode(nodeIndex, stepIndex) {
+          var row = document.querySelector('[data-run-node="' + nodes[nodeIndex].id + '"]');
+          if (!row) return;
+          var mark = row.querySelector('.step-mark');
+          var copy = row.querySelector('div span');
+          var stage = row.querySelector('.node-stage');
+          mark.className = 'step-mark running';
+          mark.textContent = '…';
+          copy.textContent = steps[stepIndex];
+          stage.textContent = (stepIndex + 1) + ' / ' + steps.length;
+          document.getElementById('run-log').textContent += '\n[' + new Date().toLocaleTimeString() + '] ' + nodes[nodeIndex].name + ' · ' + steps[stepIndex];
+        }
+
+        updateNode(0, 0);
+        activeRunTimer = setInterval(function () {
+          var nodeIndex = Math.min(nodes.length - 1, Math.floor(tick / steps.length));
+          var stepIndex = tick % steps.length;
+          var row = document.querySelector('[data-run-node="' + nodes[nodeIndex].id + '"]');
+          if (row && stepIndex === steps.length - 1) {
+            var mark = row.querySelector('.step-mark');
+            mark.className = 'step-mark success';
+            mark.textContent = '✓';
+            row.querySelector('div span').textContent = willPublish ? '发布成功，健康检查通过' : '校验成功，未修改线上配置';
+            row.querySelector('.node-stage').textContent = '完成';
+          }
+          tick += 1;
+          document.getElementById('run-progress-bar').style.width = Math.min(100, Math.round(tick / totalTicks * 100)) + '%';
+          if (tick >= totalTicks) {
+            clearInterval(activeRunTimer);
+            activeRunTimer = null;
+            run.status = 'success';
+            run.duration = (1.2 + nodes.length * (willPublish ? 1.3 : .5)).toFixed(1) + 's';
+            run.log = document.getElementById('run-log').textContent.split('\n');
+            if (willPublish) {
+              site.version += 1;
+              site.status = 'published';
+              site.updatedAt = '刚刚';
+              site.history = site.history || [];
+              site.history.unshift({ version: site.version, note: site.changeNote || '发布配置', time: '刚刚', user: '当前用户' });
+              nodes.forEach(function (node) {
+                node.configVersion = 'v' + site.version;
+                node.drift = false;
+              });
+            }
+            saveState();
+            updateChrome();
+            render();
+            notify(willPublish ? '所有目标节点发布成功' : '所有目标节点校验通过');
+          } else {
+            var nextNodeIndex = Math.min(nodes.length - 1, Math.floor(tick / steps.length));
+            var nextStepIndex = tick % steps.length;
+            updateNode(nextNodeIndex, nextStepIndex);
+          }
+        }, 430);
+      }
+
+      function showHistoricalRun(run) {
+        var nodes = run.targets.map(function (name, index) {
+          return state.nodes.find(function (node) { return node.name === name; }) || { id: 'history-' + index, name: name, ip: '历史目标' };
+        });
+        document.getElementById('run-dialog-title').textContent = run.type + ' · ' + run.target;
+        document.getElementById('run-dialog-subtitle').textContent = run.id + ' · ' + run.user + ' · ' + run.time;
+        document.getElementById('run-progress-bar').style.width = '100%';
+        document.getElementById('run-node-list').innerHTML = nodes.map(function (node) {
+          var ok = run.status === 'success';
+          return '<div class="run-node"><span class="step-mark ' + (ok ? 'success' : 'failed') + '">' + (ok ? '✓' : '!') + '</span><div><b>' + escapeHtml(node.name) + '</b><span>' + (ok ? '任务完成' : '任务失败或未执行') + '</span></div><span>' + escapeHtml(run.duration) + '</span></div>';
+        }).join('');
+        document.getElementById('run-log').textContent = (run.log || []).join('\n');
+        openDialog('run-dialog');
+      }
+
+      function openNodeDialog() {
+        document.getElementById('node-form').reset();
+        document.getElementById('node-submit-button').textContent = remoteConnected ? '生成安装命令' : '模拟 Agent 上线';
+        if (remoteConnected) {
+          document.getElementById('agent-command').textContent = '填写节点名称后生成安装命令；执行完成后回到“待审批接入”批准该节点。';
+          openDialog('node-dialog');
+          return;
+        }
+        document.getElementById('agent-command').textContent = 'curl -fsSL https://control.example/install-agent.sh | sudo sh -s -- \\\n  --server https://control.example';
+        openDialog('node-dialog');
+      }
+
+      async function quickNodeRun(nodeId, action) {
+        var node = getNode(nodeId);
+        if (!node || !node.online) return;
+        var labels = {
+          inspect: ['节点探测', '探测 Nginx 版本、配置路径和已有站点'],
+          test: ['节点校验', '执行 nginx -t，不修改配置'],
+          reload: ['平滑 reload', '先执行 nginx -t，再执行 nginx -s reload']
+        };
+        var meta = labels[action];
+        if (remoteConnected) {
+          var remoteActions = { inspect: 'inspect', test: 'nginx_test', reload: 'nginx_reload' };
+          try {
+            await apiRequest('/api/v1/admin/jobs', {
+              method: 'POST',
+              body: { node_ids: [node.id], action: remoteActions[action], payload: {}, ttl_seconds: 120 }
+            });
+            notify(node.name + '：' + meta[0] + '任务已进入队列');
+            await refreshRemoteData(false);
+          } catch (error) {
+            notify('任务提交失败：' + error.message);
+          }
+          return;
+        }
+        var run = addRun(meta[0], node.name, [node.name], 'success', meta[1], ['task accepted by ' + node.name, meta[1], 'exit 0']);
+        saveState();
+        notify(node.name + '：' + meta[0] + '成功');
+        showHistoricalRun(run);
+      }
+
+      document.addEventListener('click', function (event) {
+        var nav = event.target.closest('[data-nav]');
+        if (nav) {
+          switchView(nav.getAttribute('data-nav'));
+          return;
+        }
+
+        var jump = event.target.closest('[data-nav-jump]');
+        if (jump) {
+          var dialogParent = jump.closest('dialog');
+          if (dialogParent && dialogParent.open) dialogParent.close();
+          switchView(jump.getAttribute('data-nav-jump'));
+          return;
+        }
+
+        var close = event.target.closest('[data-close-dialog]');
+        if (close) {
+          closeDialog(close.getAttribute('data-close-dialog'));
+          return;
+        }
+
+        var siteSelect = event.target.closest('[data-site-select]');
+        if (siteSelect) {
+          selectedSiteId = siteSelect.getAttribute('data-site-select');
+          render();
+          return;
+        }
+
+        var filter = event.target.closest('[data-site-filter]');
+        if (filter) {
+          siteFilter = filter.getAttribute('data-site-filter');
+          activeView = 'sites';
+          render();
+          return;
+        }
+
+        var actionTarget = event.target.closest('[data-action]');
+        if (!actionTarget) return;
+        var action = actionTarget.getAttribute('data-action');
+        if (!actionAllowed(action)) {
+          notify(currentRole === 'auditor' ? '当前为只读审计角色，不能执行变更操作' : '当前账号没有管理员权限');
+          return;
+        }
+        var siteId = actionTarget.getAttribute('data-site-id');
+        var nodeId = actionTarget.getAttribute('data-node-id');
+        var certId = actionTarget.getAttribute('data-cert-id');
+
+        if (action === 'connect-control') connectRemote(true);
+        else if (action === 'logout') logoutRemote();
+        else if (action === 'add-site') prepareSiteDialog();
+        else if (action === 'add-node') openNodeDialog();
+        else if (action === 'add-certificate') {
+          editingCertificateId = null;
+          document.getElementById('certificate-form').reset();
+          document.querySelector('#certificate-dialog h2').textContent = '添加证书';
+          document.getElementById('certificate-dialog-subtitle').textContent = '上传证书与私钥，并写入所选节点的托管证书目录';
+          document.getElementById('cert-domain').readOnly = false;
+          document.getElementById('cert-source').value = '手动上传';
+          document.getElementById('cert-upload-fields').hidden = false;
+          document.getElementById('cert-pem-file').required = true;
+          document.getElementById('cert-key-file').required = true;
+          document.getElementById('cert-node-checks').innerHTML = renderCertificateNodeChoices(null);
+          document.getElementById('cert-submit-button').textContent = remoteConnected ? '保存并部署' : '保存证书';
+          openDialog('certificate-dialog');
+        }
+        else if (action === 'edit-config') openConfigEditor(siteId);
+        else if (action === 'deploy-site') openDeployDialog(siteId);
+        else if (action === 'transfer-config') openConfigTransferDialog(siteId);
+        else if (action === 'delete-config') openConfigDeleteDialog(siteId);
+        else if (action === 'validate-site') {
+          var validateSite = getSite(siteId);
+          if (validateSite) startRun(validateSite, '配置校验', false);
+        }
+        else if (action === 'view-runs') switchView('runs');
+        else if (action === 'rollback') {
+          var rollbackSite = getSite(siteId);
+          var version = Number(actionTarget.getAttribute('data-version'));
+          if (rollbackSite) {
+            rollbackSite.changeNote = '基于历史 v' + version + ' 创建回滚发布';
+            rollbackSite.status = 'draft';
+            saveState();
+            notify('已创建回滚草稿，仍需重新校验和发布');
+            openConfigEditor(rollbackSite.id);
+          }
+        }
+        else if (action === 'import-drift') {
+          var driftSite = getSite(siteId);
+          if (driftSite) {
+            driftSite.status = 'draft';
+            driftSite.changeNote = '从节点导入漂移配置，待审核';
+            driftSite.updatedAt = '刚刚';
+            saveState();
+            notify('节点配置已导入为新草稿，线上文件未改变');
+            render();
+          }
+        }
+        else if (action === 'inspect-node') quickNodeRun(nodeId, 'inspect');
+        else if (action === 'test-node') quickNodeRun(nodeId, 'test');
+        else if (action === 'reload-node') quickNodeRun(nodeId, 'reload');
+        else if (action === 'approve-enrollment' || action === 'reject-enrollment') {
+          var enrollmentId = actionTarget.getAttribute('data-enrollment-id');
+          var decision = action === 'approve-enrollment' ? 'approve' : 'reject';
+          apiRequest('/api/v1/admin/enrollments/' + encodeURIComponent(enrollmentId) + '/' + decision, {
+            method: 'POST'
+          }).then(function () {
+            notify(decision === 'approve' ? '已批准，Agent 将自动上线' : '已拒绝该接入申请');
+            return refreshRemoteData(false);
+          }).catch(function (error) {
+            notify('处理接入申请失败：' + error.message);
+          });
+        }
+        else if (action === 'resolve-node-drift') {
+          var driftNode = getNode(nodeId);
+          if (driftNode) {
+            driftNode.drift = false;
+            driftNode.configVersion = '待审核';
+            saveState();
+            notify('已创建漂移处理草稿');
+            render();
+          }
+        }
+        else if (action === 'replace-cert') {
+          var cert = getCert(certId);
+          if (!cert) return;
+          editingCertificateId = cert.id;
+          document.getElementById('certificate-form').reset();
+          document.querySelector('#certificate-dialog h2').textContent = '替换证书';
+          document.getElementById('certificate-dialog-subtitle').textContent = '新文件将原位覆盖下列节点的现有证书和私钥，文件路径保持不变';
+          document.getElementById('cert-name').value = cert.name;
+          document.getElementById('cert-domain').value = cert.domain;
+          document.getElementById('cert-domain').readOnly = true;
+          document.getElementById('cert-source').value = '手动上传';
+          document.getElementById('cert-days').value = ['30', '90', '365'].includes(String(cert.days)) ? String(cert.days) : '90';
+          document.getElementById('cert-note').value = cert.note || '';
+          document.getElementById('cert-upload-fields').hidden = false;
+          document.getElementById('cert-pem-file').required = true;
+          document.getElementById('cert-key-file').required = true;
+          document.getElementById('cert-node-checks').innerHTML = renderCertificateNodeChoices(cert);
+          document.getElementById('cert-submit-button').textContent = '确认原位替换';
+          openDialog('certificate-dialog');
+        }
+        else if (action === 'open-run') {
+          var run = state.runs.find(function (item) { return item.id === actionTarget.getAttribute('data-run-id'); });
+          if (run) showHistoricalRun(run);
+        }
+        else if (action === 'copy-agent-command') {
+          var command = document.getElementById('agent-command').textContent;
+          if (navigator.clipboard) navigator.clipboard.writeText(command);
+          notify('安装命令已复制');
+        }
+        else if (action === 'import-sites') {
+          if (remoteConnected) {
+            var importNodeIds = onlineNodes().map(function (node) { return node.id; });
+            if (!importNodeIds.length) {
+              notify('没有在线 Agent 可供探测');
+              return;
+            }
+            apiRequest('/api/v1/admin/jobs', {
+              method: 'POST',
+              body: { node_ids: importNodeIds, action: 'inspect', payload: {}, ttl_seconds: 120 }
+            }).then(function () {
+              notify('已下发节点探测；首版请确认路径与 Hash 后手工新增托管站点');
+              return refreshRemoteData(false);
+            }).catch(function (error) {
+              notify('节点探测失败：' + error.message);
+            });
+            return;
+          }
+          notify('已向在线 Agent 发起站点探测，结果会作为待导入草稿');
+          var probe = addRun('站点探测', '全部在线节点', onlineNodes().map(function (node) { return node.name; }), 'success', '扫描 include 配置与证书目录', ['discovered 4 managed server blocks', '1 unmanaged server block pending review']);
+          saveState();
+          updateChrome();
+          setTimeout(function () { showHistoricalRun(probe); }, 150);
+        }
+      });
+
+      document.getElementById('site-form').addEventListener('submit', function (event) {
+        event.preventDefault();
+        var form = new FormData(event.currentTarget);
+        var nodeIds = Array.from(document.querySelectorAll('input[name="site-node"]:checked')).map(function (input) { return input.value; });
+        if (!nodeIds.length) {
+          notify('至少选择一个在线 Agent 节点');
+          return;
+        }
+        var domain = String(form.get('domain')).trim();
+        if (state.sites.some(function (site) { return site.domain === domain; })) {
+          notify('该域名已经存在');
+          return;
+        }
+        var type = String(form.get('type'));
+        var target = String(form.get('target')).trim();
+        var certId = String(form.get('certificate') || '');
+        if (certId) {
+          var selectedCertificate = getCert(certId);
+          var missingCertificateNodeIds = selectedCertificate ? certificateMissingNodeIds(selectedCertificate, nodeIds) : nodeIds.slice();
+          if (!selectedCertificate || selectedCertificate.pendingRemote || missingCertificateNodeIds.length) {
+            var missingCertificateNodes = missingCertificateNodeIds.map(getNode).filter(Boolean).map(function (node) { return node.name; });
+            notify(selectedCertificate && selectedCertificate.pendingRemote
+              ? '该证书仍在部署中，请等待完成后再绑定'
+              : '证书未覆盖全部部署节点：' + missingCertificateNodes.join('、'));
+            document.getElementById('site-cert').focus();
+            return;
+          }
+        }
+        var site = {
+          id: uid('site'),
+          domain: domain,
+          type: type,
+          target: target,
+          environment: String(form.get('environment')),
+          nodeIds: nodeIds,
+          certificateId: certId,
+          version: 0,
+          status: 'draft',
+          note: String(form.get('note') || '').trim(),
+          changeNote: '草稿：创建站点',
+          updatedAt: '刚刚',
+          config: defaultConfig(domain, type, target, getCert(certId)),
+          history: []
+        };
+        state.sites.unshift(site);
+        nodeIds.map(getNode).filter(Boolean).forEach(function (node) {
+          node.sites += 1;
+        });
+        selectedSiteId = site.id;
+        closeDialog('site-dialog');
+        saveState();
+        notify('站点草稿已创建，尚未发布到节点');
+        render();
+      });
+
+      document.getElementById('config-editor').addEventListener('input', updateDiffBadge);
+
+      document.getElementById('site-node-checks').addEventListener('change', function (event) {
+        if (event.target && event.target.name === 'site-node') updateSiteCertificateOptions();
+      });
+
+      document.getElementById('config-form').addEventListener('submit', function (event) {
+        event.preventDefault();
+        var mode = event.submitter ? event.submitter.value : 'draft';
+        saveConfig(mode);
+      });
+
+      document.getElementById('deploy-form').addEventListener('submit', function (event) {
+        event.preventDefault();
+        var site = getSite(pendingDeploySiteId);
+        if (!site) return;
+        var nodeIds = Array.from(document.querySelectorAll('input[name="deploy-node"]:checked')).map(function (input) { return input.value; });
+        if (!nodeIds.length) {
+          notify('至少选择一个在线节点');
+          return;
+        }
+        closeDialog('deploy-dialog');
+        startRun(site, '配置发布', true, nodeIds);
+      });
+
+      document.getElementById('config-transfer-form').addEventListener('submit', function (event) {
+        event.preventDefault();
+        var site = getSite(pendingTransferSiteId);
+        if (!site) return;
+        var nodeIds = Array.from(document.querySelectorAll('input[name="transfer-node"]:checked')).map(function (input) { return input.value; });
+        if (!nodeIds.length) {
+          notify('至少选择一个在线目标节点');
+          return;
+        }
+        var mode = document.getElementById('config-transfer-mode').value;
+        if (mode === 'replace') {
+          var unsupported = nodeIds.map(getNode).filter(function (node) {
+            return !node || !versionAtLeast(node.agent, 0, 3, 0);
+          });
+          if (unsupported.length) {
+            notify('替换模式要求目标 Agent 0.3.0+；请先升级：' + unsupported.map(function (node) { return node ? node.name : '未知节点'; }).join('、'));
+            return;
+          }
+        }
+        closeDialog('config-transfer-dialog');
+        startConfigTransfer(site, nodeIds, mode);
+      });
+
+      document.getElementById('config-delete-form').addEventListener('submit', function (event) {
+        event.preventDefault();
+        var site = getSite(pendingDeleteSiteId);
+        if (!site) return;
+        var nodeIds = Array.from(document.querySelectorAll('input[name="delete-node"]:checked')).map(function (input) { return input.value; });
+        if (!nodeIds.length) {
+          notify('至少选择一个可安全移除的在线节点');
+          return;
+        }
+        var confirmation = document.getElementById('config-delete-confirm');
+        if (confirmation.value.trim() !== site.domain) {
+          confirmation.focus();
+          notify('请输入完整站点域名 ' + site.domain + ' 以确认删除');
+          return;
+        }
+        closeDialog('config-delete-dialog');
+        startConfigDelete(site, nodeIds);
+      });
+
+      document.getElementById('cert-source').addEventListener('change', function (event) {
+        var manual = event.target.value === '手动上传';
+        document.getElementById('cert-upload-fields').hidden = !manual;
+        document.getElementById('cert-pem-file').required = manual;
+        document.getElementById('cert-key-file').required = manual;
+      });
+
+      document.getElementById('certificate-form').addEventListener('submit', async function (event) {
+        event.preventDefault();
+        var form = new FormData(event.currentTarget);
+        var selectedNodeIds = Array.from(document.querySelectorAll('input[name="cert-node"]:checked')).map(function (input) { return input.value; });
+        var existingCertificate = editingCertificateId ? getCert(editingCertificateId) : null;
+        var replacingCertificate = Boolean(existingCertificate);
+        var cert = existingCertificate || {
+          id: uid('cert'),
+          siteIds: [],
+          nodeHashes: {},
+          nodePaths: {}
+        };
+        Object.assign(cert, {
+          name: String(form.get('name')).trim(),
+          domain: String(form.get('domain')).trim(),
+          issuer: replacingCertificate ? (cert.issuer || '待重新识别') : '待识别',
+          days: Number(form.get('days')),
+          source: '手动上传',
+          autoRenew: false,
+          nodeIds: replacingCertificate ? (cert.nodeIds || []).slice() : selectedNodeIds.slice(),
+          note: String(form.get('note') || '').trim(),
+          fingerprint: '待首次部署验证'
+        });
+        if (!selectedNodeIds.length) {
+          notify(replacingCertificate ? '没有可执行替换的在线节点' : '至少选择一个在线节点');
+          return;
+        }
+        cert.nodePaths = cert.nodePaths || {};
+        selectedNodeIds.forEach(function (selectedNodeId) {
+          var selectedNode = getNode(selectedNodeId);
+          if (selectedNode) cert.nodePaths[selectedNodeId] = certificateTargetPaths(cert, selectedNode);
+        });
+        if (remoteConnected) {
+          var certificateFile = document.getElementById('cert-pem-file').files[0];
+          var privateKeyFile = document.getElementById('cert-key-file').files[0];
+          if (!certificateFile || !privateKeyFile) {
+            notify('请选择证书 PEM 和私钥文件');
+            return;
+          }
+          var certificatePem = await certificateFile.text();
+          var privateKeyPem = await privateKeyFile.text();
+          if (!certificatePem.includes('BEGIN CERTIFICATE') || !privateKeyPem.includes('PRIVATE KEY')) {
+            notify('证书或私钥不是有效的 PEM 文本');
+            return;
+          }
+          var queuedCertificates = [];
+          try {
+            for (var certNodeIndex = 0; certNodeIndex < selectedNodeIds.length; certNodeIndex += 1) {
+              var certNode = getNode(selectedNodeIds[certNodeIndex]);
+              var targetPaths = certificateTargetPaths(cert, certNode);
+              var certificatePath = targetPaths.certificatePath;
+              var privateKeyPath = targetPaths.keyPath;
+              var knownCertificateHashes = cert.nodeHashes && cert.nodeHashes[selectedNodeIds[certNodeIndex]];
+              if (knownCertificateHashes && typeof knownCertificateHashes === 'string') {
+                knownCertificateHashes = { certificateHash: knownCertificateHashes };
+              }
+              var expectedCertificateHash = knownCertificateHashes && knownCertificateHashes.certificateHash;
+              var expectedKeyHash = knownCertificateHashes && knownCertificateHashes.keyHash;
+              if (replacingCertificate && (!expectedCertificateHash || !expectedKeyHash)) {
+                throw new Error((certNode ? certNode.name : selectedNodeIds[certNodeIndex]) + ' 缺少旧证书校验值，请先确认该节点的上次部署结果');
+              }
+              var certResponse = await apiRequest('/api/v1/admin/jobs', {
+                method: 'POST',
+                body: {
+                  node_ids: [selectedNodeIds[certNodeIndex]],
+                  action: 'certificate_apply',
+                  ttl_seconds: 300,
+                  payload: {
+                    certificate: { path: certificatePath, pem: certificatePem, expected_sha256: expectedCertificateHash || 'missing' },
+                    private_key: { path: privateKeyPath, pem: privateKeyPem, expected_sha256: expectedKeyHash || 'missing' },
+                    reload: true
+                  }
+                }
+              });
+              (certResponse.jobs || []).forEach(function (job) {
+                queuedCertificates.push({ id: job.id, nodeId: job.node_id });
+              });
+            }
+            cert.pendingRemote = { jobs: queuedCertificates };
+          } catch (error) {
+            if (queuedCertificates.length) {
+              cert.pendingRemote = { jobs: queuedCertificates };
+              cert.deployStatus = 'failed';
+              if (!existingCertificate) state.certificates.unshift(cert);
+              editingCertificateId = null;
+              closeDialog('certificate-dialog');
+              saveState();
+              render();
+              notify('证书仅提交到部分节点：' + error.message);
+            } else {
+              notify('证书任务提交失败：' + error.message);
+            }
+            return;
+          } finally {
+            certificatePem = '';
+            privateKeyPem = '';
+          }
+        }
+        if (!existingCertificate) state.certificates.unshift(cert);
+        editingCertificateId = null;
+        closeDialog('certificate-dialog');
+        saveState();
+        notify(remoteConnected
+          ? (replacingCertificate ? '证书原位替换任务已提交；失败会自动恢复旧文件' : '证书写入任务已提交；私钥不会写入页面状态')
+          : (replacingCertificate ? '已完成证书原位替换演示' : '证书已保存，私钥不会回显'));
+        render();
+      });
+
+      document.getElementById('login-form').addEventListener('submit', async function (event) {
+        event.preventDefault();
+        var form = new FormData(event.currentTarget);
+        var button = document.getElementById('login-submit');
+        button.disabled = true;
+        button.textContent = '登录中…';
+        try {
+          var authenticated = await apiRequest('/api/v1/auth/login', {
+            method: 'POST',
+            body: {
+              username: String(form.get('username') || '').trim(),
+              password: String(form.get('password') || '')
+            }
+          });
+          csrfToken = authenticated.csrf_token || '';
+          currentUsername = authenticated.username || '';
+          currentRole = authenticated.role || '';
+          currentAuthSource = authenticated.auth_source || '';
+          document.getElementById('login-password').value = '';
+          await connectRemote(false);
+        } catch (error) {
+          document.getElementById('login-message').textContent = error.status === 401
+            ? '账号或密码错误，或者账号未加入允许登录的 LDAP 角色组。'
+            : (error.status === 503 ? 'LDAP / AD 服务暂时不可用，请使用本地 admin 应急账号或稍后重试。' : '登录失败：' + error.message);
+          document.getElementById('login-password').select();
+        } finally {
+          button.disabled = false;
+          button.textContent = '登录';
+        }
+      });
+
+      document.getElementById('node-form').addEventListener('submit', async function (event) {
+        event.preventDefault();
+        var form = new FormData(event.currentTarget);
+        if (remoteConnected) {
+          var nodeName = String(form.get('name')).trim();
+          var nodeLabel = String(form.get('label') || '').trim();
+          var command = 'sudo ./deploy/install-agent.sh --server ' + shellQuote(window.location.origin) +
+            ' --node-name ' + shellQuote(nodeName);
+          if (nodeLabel) command += ' --labels ' + shellQuote('label=' + nodeLabel);
+          command += '\n# 外层 Nginx 使用系统可信证书时无需追加参数';
+          command += '\n# 外层 Nginx 使用私有 CA 时追加 --ca-file ./ca.crt';
+          command += '\n# 可信内网临时跳过证书校验时追加 --insecure-skip-tls-verify';
+          document.getElementById('agent-command').textContent = command;
+          document.getElementById('node-submit-button').textContent = '更新安装命令';
+          notify('安装命令已生成；执行后在节点页批准接入');
+          return;
+        }
+        var node = {
+          id: uid('node'),
+          name: String(form.get('name')).trim(),
+          ip: String(form.get('ip')).trim(),
+          label: String(form.get('label') || '未分类').trim(),
+          online: true,
+          agent: '0.4.2',
+          nginx: '探测中',
+          root: '探测中',
+          sites: 0,
+          drift: false,
+          lastSeen: '刚刚',
+          configVersion: '未托管'
+        };
+        state.nodes.push(node);
+        closeDialog('node-dialog');
+        saveState();
+        notify(node.name + ' Agent 已上线，正在探测 Nginx');
+        render();
+        setTimeout(function () {
+          node.nginx = '1.26.2';
+          node.root = '/etc/nginx';
+          saveState();
+          if (activeView === 'nodes') render();
+        }, 1200);
+      });
+
+      document.querySelectorAll('dialog').forEach(function (dialog) {
+        if (dialog.id === 'login-dialog') {
+          dialog.addEventListener('cancel', function (event) { event.preventDefault(); });
+        }
+        dialog.addEventListener('click', function (event) {
+          if (event.target === dialog && dialog.id !== 'login-dialog') dialog.close();
+        });
+      });
+
+      var initialHash = window.location.hash.replace('#', '');
+      if (['sites', 'certificates', 'nodes', 'runs'].includes(initialHash)) activeView = initialHash;
+      selectedSiteId = state.sites[0] ? state.sites[0].id : null;
+      render();
+      if (remoteMode) setTimeout(function () { connectRemote(false); }, 0);
+    })();
+  </script>
+</body>
+</html>
