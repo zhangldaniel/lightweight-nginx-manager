@@ -1,12 +1,12 @@
 # Lightweight Nginx Manager
 
-轻量、自托管的多节点 Nginx 管理台：FastAPI + SQLite + 单 HTML 页面，节点通过 Linux Agent 主动连接控制端。
+轻量、自托管的多节点 Nginx 管理台。Server 使用 FastAPI、SQLite 和单 HTML 页面；每个 Linux 节点运行主动出站连接的 Agent。
 
-主要能力：节点审批接入、配置发布/复制/删除、`nginx -t`、reload、证书替换、LDAP/AD、RBAC、审计记录和失败回滚。不提供任意 Shell。
+支持节点审批、现有配置导入、配置复制/替换/删除、证书替换、`nginx -t`、reload、LDAP/AD、RBAC、审计和失败回滚。Agent 不开放端口，也不提供任意 Shell。
 
-## 一键安装
+## 快速安装
 
-### 1. 安装 Server（默认 HTTP）
+### 1. Server（默认 HTTP）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-server.sh | \
@@ -16,17 +16,13 @@ sudo bash -s -- \
   --open-firewall
 ```
 
-访问：`http://192.0.2.20:8443`
-
-默认登录信息：
+将示例 IP 换成实际 Server IP，然后访问 `http://192.0.2.20:8443`。`--public-url` 可以不写。
 
 - 账号：`admin`
-- 密码：没有固定值，首次安装自动生成 48 位随机密码
+- 密码：首次安装随机生成，没有固定默认密码
 - 查看密码：`sudo cat /root/nginx-manager-credentials.txt`
 
-升级不会重置已有账号和密码。
-
-### 2. 安装 Agent（系统 Nginx）
+### 2. Agent（系统默认 Nginx）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
@@ -35,9 +31,9 @@ sudo bash -s -- \
   --node-name edge-a-01
 ```
 
-### 3. 安装 Agent（Nginx 位于 `/apps/nginx`）
+### 3. Agent（已有 `/apps/nginx`）
 
-适用于二进制在 `/apps/nginx/sbin/nginx`、主配置在 `/apps/nginx/conf/nginx.conf` 的环境：
+下面的例子直接托管已经被 `nginx.conf` 加载的 `/apps/nginx/conf/conf.d`：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
@@ -47,30 +43,41 @@ sudo bash -s -- \
   --nginx-binary /apps/nginx/sbin/nginx \
   --nginx-root /apps/nginx \
   --nginx-config /apps/nginx/conf/nginx.conf \
-  --managed-config-dir /apps/nginx/conf/nginx-manager.d \
-  --managed-cert-dir /apps/nginx/certs/nginx-manager \
-  --managed-include-file /apps/nginx/conf/conf.d/00-nginx-manager.conf \
+  --managed-config-dir /apps/nginx/conf/conf.d \
+  --managed-config-already-included \
+  --managed-cert-dir /apps/nginx/certs \
   --nginx-service nginx.service
 ```
 
-安装器会执行 `nginx -t`，并确认主配置已经加载 `conf.d/*.conf`。如果实际 systemd 单元不是 `nginx.service`，请修改 `--nginx-service`。
+安装完成后进入 Web 的“节点 Agent”批准申请，不需要注册令牌。然后在“站点与配置”点击“导入节点现有站点”。平台只读扫描正式 `.conf` 文件，忽略 `.bak`、`.bak2`，不会写文件或 reload Nginx。
 
-安装完成后登录 Web，在“节点 Agent”中批准待审批节点。Agent 不监听端口，也不需要注册令牌。
+## 最容易踩的坑
 
-如果要直接托管已经由 `nginx.conf` 加载的现有目录（例如 `/apps/nginx/conf/conf.d`），不要在该目录内再创建 include 文件，否则会递归加载。改用：
+| 现象 | 原因与处理 |
+| --- | --- |
+| `/apps/nginx` 存在，但提示未发现 Nginx | 自动探测不覆盖自定义目录；使用上面的完整 `/apps/nginx` 参数。 |
+| `00-nginx-manager.conf has unexpected content` | 旧 include 文件和新托管目录冲突；先检查其内容。直接托管 `conf.d` 时不要再传 `--managed-include-file`。 |
+| 托管 `conf.d` 后出现递归 include | 不要在 `conf.d` 中创建一个再次 include `conf.d/*.conf` 的文件；必须使用 `--managed-config-already-included`。 |
+| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应显示 `0.5.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
+| `find /apps/nginx/conf/nginx-manager.d` 为空 | 如果托管目录已经改为 `conf.d`，这是正常的；应检查 `/apps/nginx/conf/conf.d`。 |
+| Agent 接入 `timed out` | 先从 Agent 执行 `curl --connect-timeout 5 http://192.0.2.20:8443/healthz`。能访问仍超时就重新执行最新 Agent 安装命令。 |
+| 安装后没有默认密码 | 密码是随机生成的，查看 `/root/nginx-manager-credentials.txt`。升级不会重置账号密码。 |
+| CentOS 7 只有 Python 3.6 / systemd 219 | 最新 Agent 已兼容，不需要手工升级 Python；重新执行安装命令即可。 |
+
+如果以前创建过旧 include 文件，只在确认它确实是旧的 Manager 引用后再迁移：
 
 ```bash
---managed-config-dir /apps/nginx/conf/conf.d \
---managed-config-already-included
+sudo cat /apps/nginx/conf/conf.d/00-nginx-manager.conf
+sudo cp -a /apps/nginx/conf/conf.d/00-nginx-manager.conf /root/00-nginx-manager.conf.backup
+sudo rm -f /apps/nginx/conf/conf.d/00-nginx-manager.conf
+sudo /apps/nginx/sbin/nginx -t -c /apps/nginx/conf/nginx.conf && sudo systemctl reload nginx
 ```
 
-该模式会临时放置一个无副作用的探针配置，通过 `nginx -T` 确认目录确实被加载，验证后立即删除探针。它不能与 `--managed-include-file` 同时使用；安装器会保留现有配置及证书目录的属主和权限。
-
-接入后点击“导入节点现有站点”，平台会只读扫描托管目录中的 `.conf` 文件，忽略 `.bak` 等备份文件，并按文件路径、`server_name` 和 SHA-256 生成站点记录。导入不会写文件，也不会 reload Nginx。
+不要直接删除内容不明的生产配置。
 
 ## HTTPS 与 LDAP
 
-默认 HTTP 仅建议用于隔离且可信的管理网。生产环境推荐复用本机 Nginx HTTPS：
+HTTP 只适合隔离且可信的管理网。使用本机 Nginx 终止 HTTPS：
 
 ```bash
 sudo ./deploy/install-server.sh \
@@ -79,71 +86,22 @@ sudo ./deploy/install-server.sh \
   --port 8443
 ```
 
-代理示例：`deploy/nginx-manager-proxy.conf.example`。如果 HTTPS 反代同时还要保留 HTTP 直连，增加 `--allow-direct-http`。
+代理示例见 `deploy/nginx-manager-proxy.conf.example`。如果同时保留 `http://服务器IP:8443`，增加 `--allow-direct-http`。
 
-LDAP/AD 示例：
-
-```bash
-sudo ./deploy/install-server.sh \
-  --host nginx-manager.example.com \
-  --behind-nginx \
-  --ldap-url ldaps://ad.example.com:636 \
-  --ldap-base-dn 'DC=example,DC=com' \
-  --ldap-bind-dn 'CN=nginx-manager,OU=Service Accounts,DC=example,DC=com' \
-  --ldap-bind-password-file /root/nginx-manager-ldap-password
-```
-
-默认 LDAP 组：`nginx-admin`、`nginx-operator`、`nginx-auditor`。本地 `admin` 始终作为应急账号保留。
-
-## 自定义 Nginx 目录说明
-
-Agent 只管理专用目录，不会任意修改其他 Nginx 文件：
+LDAP/AD 参数见 `sudo ./deploy/install-server.sh --help`。至少需要：
 
 ```text
-/apps/nginx/conf/nginx-manager.d/                 托管配置
-/apps/nginx/certs/nginx-manager/                  托管证书
-/apps/nginx/conf/conf.d/00-nginx-manager.conf     托管目录 include
+--ldap-url
+--ldap-base-dn
+--ldap-bind-dn
+--ldap-bind-password-file
 ```
 
-配置发布采用原子替换、Hash 并发检查、`nginx -t`、reload 和失败恢复。证书任务只允许写入配置好的托管证书目录。
+默认角色组为 `nginx-admin`、`nginx-operator`、`nginx-auditor`；本地 `admin` 始终作为应急账号保留。
 
-## 备份与升级
+## 升级与检查
 
-```bash
-sudo ./deploy/backup-server.sh
-```
-
-备份默认保存在 `/var/backups/nginx-manager/`。升级时重新执行相同安装命令即可；Server 保留数据库和账号，Agent 保留机器身份。
-
-## 一键卸载
-
-卸载 Server，保留数据和凭据：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-server.sh | sudo bash
-```
-
-彻底卸载 Server（删除前自动备份）：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-server.sh | sudo bash -s -- --purge
-```
-
-卸载 Agent，保留身份和连接配置：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-agent.sh | sudo bash
-```
-
-彻底删除 Agent 身份和配置：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-agent.sh | sudo bash -s -- --purge
-```
-
-Agent 卸载器不会自动删除已发布的 Nginx 配置和证书，避免造成站点中断。
-
-## 常用检查
+升级 Server 或 Agent：重新执行原安装命令。Server 保留数据库和账号，Agent 保留已批准的机器身份。
 
 ```bash
 # Server
@@ -154,13 +112,33 @@ curl -fsS http://127.0.0.1:8443/healthz
 # Agent
 systemctl status nginx-manager-agent nginx-manager-agent-helper
 journalctl -u nginx-manager-agent -f
-curl --connect-timeout 5 http://192.0.2.20:8443/healthz
 
 # 自定义 Nginx
 /apps/nginx/sbin/nginx -t -c /apps/nginx/conf/nginx.conf
 ```
 
-HTTP 会明文传输账号、会话、Agent 身份和任务内容；跨不可信网络请使用 HTTPS。
+Server 备份：
 
-Agent 接入出现 `timed out` 时，先在 Agent 节点执行上面的 `curl`。如果超时，请在 Server
-检查 `ss -lntp | grep 8443`；默认 HTTP 应显示监听 `0.0.0.0:8443`，同时确认主机防火墙和网络 ACL 已放行。
+```bash
+sudo ./deploy/backup-server.sh
+```
+
+## 一键卸载
+
+默认卸载会保留数据或 Agent 身份；添加 `--purge` 才彻底删除。Agent 卸载器不会删除已经发布的 Nginx 配置和证书。
+
+```bash
+# Server
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-server.sh | sudo bash
+
+# Agent
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-agent.sh | sudo bash
+```
+
+彻底卸载示例：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-server.sh | sudo bash -s -- --purge
+```
+
+> HTTP 会明文传输登录会话、Agent 身份和任务内容；跨不可信网络必须使用 HTTPS。
