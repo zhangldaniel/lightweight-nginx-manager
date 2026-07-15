@@ -143,9 +143,13 @@ curl -fsS http://127.0.0.1:8443/healthz
 # Agent
 systemctl status nginx-manager-agent nginx-manager-agent-helper
 journalctl -u nginx-manager-agent -f
+curl --connect-timeout 5 http://192.0.2.20:8443/healthz
 
 # 自定义 Nginx
 /apps/nginx/sbin/nginx -t -c /apps/nginx/conf/nginx.conf
 ```
 
 HTTP 会明文传输账号、会话、Agent 身份和任务内容；跨不可信网络请使用 HTTPS。
+
+Agent 接入出现 `timed out` 时，先在 Agent 节点执行上面的 `curl`。如果超时，请在 Server
+检查 `ss -lntp | grep 8443`；默认 HTTP 应显示监听 `0.0.0.0:8443`，同时确认主机防火墙和网络 ACL 已放行。

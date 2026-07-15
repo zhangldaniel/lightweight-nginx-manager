@@ -58,7 +58,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -2047,8 +2047,10 @@ def _warn_config_permissions(path: str) -> None:
         return
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
-        if mode & 0o077:
-            LOG.warning("config %s is group/world accessible; use chmod 600", path)
+        if mode & 0o022:
+            LOG.warning("config %s is writable by group/world; remove group/world write access", path)
+        elif mode & 0o004:
+            LOG.warning("config %s is world readable; remove world read access", path)
     except OSError:
         pass
 

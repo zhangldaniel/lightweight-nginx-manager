@@ -236,7 +236,6 @@ begin_install_transaction() {
 
 rollback_install() {
   local failed="0" identity_state=""
-  log "安装失败，正在恢复上一版本"
   systemctl stop "${APP_NAME}.service" "${APP_NAME}-helper.service" >/dev/null 2>&1 || true
   systemctl is-active --quiet "${APP_NAME}.service" && failed="1"
   systemctl is-active --quiet "${APP_NAME}-helper.service" && failed="1"
@@ -244,10 +243,12 @@ rollback_install() {
     PRESERVE_NEW_CONNECTION="1"
     if [[ "${identity_state}" == "pending" ]]; then
       PRESERVE_NEW_BINARY="1"
+      log "控制端暂不可达或申请待审批；保留新 Agent 并转为后台重试"
       preserve_pending_install
       return
     fi
   fi
+  log "安装失败，正在恢复上一版本"
   if [[ "${PRESERVE_NEW_BINARY}" != "1" ]]; then
     restore_install_file "${APP_DIR}/nginx_agent.py" agent.py || failed="1"
   fi

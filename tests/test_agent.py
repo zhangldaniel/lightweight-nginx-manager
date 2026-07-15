@@ -771,6 +771,9 @@ class AgentTestCase(unittest.TestCase):
         self.assertNotIn('add_subparsers(dest="command", required=True)', source)
         self.assertIn("sys.version_info >= (3, 6)", installer)
         self.assertNotIn("sys.version_info >= (3, 8)", installer)
+        self.assertNotIn("mode & 0o077", source)
+        self.assertIn("mode & 0o022", source)
+        self.assertIn("控制端暂不可达或申请待审批", installer)
 
     def test_settings_mutable_defaults_are_isolated(self):
         first = agent.Settings("https://manager.example.test", "first")
