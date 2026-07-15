@@ -23,7 +23,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
@@ -964,13 +964,18 @@ def create_app(
     settings.validate()
     authenticate_ldap = ldap_authenticator or _authenticate_ldap
     database = Database(settings.db_path)
-    api = FastAPI(title="Nginx Manager", version="0.3.5", docs_url=None, redoc_url=None, openapi_url=None)
+    api = FastAPI(title="Nginx Manager", version="0.3.6", docs_url=None, redoc_url=None, openapi_url=None)
     api.state.settings = settings
     api.state.database = database
-    session_cookie = "__Host-nginx_manager_session"
+    secure_session_cookie = "__Host-nginx_manager_session"
+    http_session_cookie = "nginx_manager_session"
     login_attempts: Dict[str, List[int]] = {}
     login_attempts_lock = threading.Lock()
     dummy_password_digest = _password_hash("dummy-password-never-valid", settings.password_iterations, b"\0" * 16)
+
+    def session_cookie_for(request: Request) -> Tuple[str, bool]:
+        secure = request.url.scheme == "https"
+        return (secure_session_cookie if secure else http_session_cookie, secure)
 
     @api.middleware("http")
     async def security_headers(request: Request, call_next: Any) -> Any:
@@ -985,7 +990,8 @@ def create_app(
             "form-action 'self'; connect-src 'self'; img-src 'self' data:; "
             "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
         )
-        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
         if request.url.path.startswith("/api/") or request.url.path == "/":
             response.headers["Cache-Control"] = "no-store"
         return response
@@ -1003,6 +1009,7 @@ def create_app(
         return JSONResponse(status_code=422, content={"detail": "request validation failed"})
 
     def require_session(request: Request, x_csrf_token: Optional[str] = Header(None)) -> Dict[str, Any]:
+        session_cookie, _secure = session_cookie_for(request)
         candidate = request.cookies.get(session_cookie)
         if not candidate:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
@@ -1180,12 +1187,13 @@ def create_app(
                 "expires_at": _utc_iso(expires_at),
             }
         )
+        session_cookie, secure_cookie = session_cookie_for(http_request)
         response.set_cookie(
             session_cookie,
             session_value,
             max_age=settings.session_ttl_seconds,
             path="/",
-            secure=True,
+            secure=secure_cookie,
             httponly=True,
             samesite="strict",
         )
@@ -1196,6 +1204,7 @@ def create_app(
         http_request: Request,
         admin: Dict[str, Any] = Depends(require_session),
     ) -> Dict[str, Any]:
+        session_cookie, _secure = session_cookie_for(http_request)
         candidate = http_request.cookies.get(session_cookie, "")
         return {
             "authenticated": True,
@@ -1208,6 +1217,7 @@ def create_app(
 
     @api.post("/api/v1/auth/logout")
     def logout(http_request: Request, admin: Dict[str, Any] = Depends(require_session)) -> JSONResponse:
+        session_cookie, secure_cookie = session_cookie_for(http_request)
         candidate = http_request.cookies.get(session_cookie, "")
         with database.transaction() as connection:
             connection.execute("DELETE FROM web_sessions WHERE session_hash = ?", (_token_hash(candidate),))
@@ -1221,7 +1231,13 @@ def create_app(
                 {"role": admin["role"]},
             )
         response = JSONResponse(content={"ok": True})
-        response.delete_cookie(session_cookie, path="/", secure=True, httponly=True, samesite="strict")
+        response.delete_cookie(
+            session_cookie,
+            path="/",
+            secure=secure_cookie,
+            httponly=True,
+            samesite="strict",
+        )
         return response
 
     @api.post("/api/v1/agent/enroll")

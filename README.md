@@ -36,7 +36,7 @@ LDAP / AD <──LDAPS 或 StartTLS── 控制端
 - 节点不监听端口，也不需要修改节点防火墙。
 - 网络 Agent 使用普通系统用户运行。
 - root helper 不联网接收控制请求，只接受本机 Unix Socket 固定动作，并校验调用者 UID。
-- Web 支持 LDAP / AD 登录，并保留一个本地 `admin` 应急账号；登录态保存在 Secure、HttpOnly、SameSite Cookie 中。
+- Web 支持 LDAP / AD 登录，并保留一个本地 `admin` 应急账号；HTTPS 使用 Secure、HttpOnly、SameSite Cookie，显式启用的 HTTP 入口使用独立的 HttpOnly、SameSite Cookie。
 - `admin`、`operator`、`auditor` 三档权限由服务端强制校验，前端隐藏按钮只是交互提示。
 - Agent 安装不需要人工令牌；首次连接进入待审批列表，批准后自动建立每机独立机器身份，控制端只保存不可逆摘要。
 
@@ -60,8 +60,7 @@ curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-mana
   sudo bash -s -- \
     --host nginx-manager.example.com \
     --behind-nginx \
-    --port 8443 \
-    --public-url https://nginx-manager.example.com
+    --port 8443
 ```
 
 在每台 Nginx 节点安装 Agent：
@@ -110,8 +109,7 @@ cd lightweight-nginx-manager
 sudo ./deploy/install-server.sh \
   --host nginx-manager.example.com \
   --behind-nginx \
-  --port 8443 \
-  --public-url https://nginx-manager.example.com
+  --port 8443
 ```
 
 复制并修改发布包中的代理示例：
@@ -129,7 +127,23 @@ sudo /opt/custom-nginx/sbin/nginx -t -c /opt/custom-nginx/conf/nginx.conf
 sudo /opt/custom-nginx/sbin/nginx -s reload
 ```
 
-代理配置必须保留 `Host`、`X-Forwarded-For`、`X-Forwarded-Proto https`。外部入口必须是 HTTPS，因为登录 Cookie 固定使用 `Secure` 与 `__Host-` 约束。`8443` 不需要放行防火墙，也不要代理到 `0.0.0.0`。
+代理配置必须保留 `Host`、`X-Forwarded-For`、`X-Forwarded-Proto https`。推荐的外部入口使用 HTTPS，登录 Cookie 使用 `Secure` 与 `__Host-` 约束。默认情况下 `8443` 不需要放行防火墙，服务也不会监听所有网卡。
+
+如确实需要从可信内网直接访问 `http://服务器IP:8443`，升级或安装时显式增加
+`--allow-direct-http`。它会让同一个后端监听所有网卡，同时仍可供本机 Nginx 代理：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-server.sh | \
+  sudo bash -s -- \
+    --host 192.0.2.20 \
+    --behind-nginx \
+    --allow-direct-http \
+    --port 8443 \
+    --open-firewall
+```
+
+此时可直接打开 `http://192.0.2.20:8443`。HTTP 会明文传输账号、密码、会话和操作内容，
+只建议在隔离且可信的管理网使用；跨网段时建议配合 `--allow-cidr` 收紧防火墙来源。
 
 部署完成后检查：
 
@@ -155,7 +169,6 @@ Active Directory 示例：
 sudo ./deploy/install-server.sh \
   --host nginx-manager.example.com \
   --behind-nginx \
-  --public-url https://nginx-manager.example.com \
   --ldap-url ldaps://ad.example.com:636 \
   --ldap-base-dn 'DC=example,DC=com' \
   --ldap-bind-dn 'CN=nginx-manager,OU=Service Accounts,DC=example,DC=com' \
@@ -225,7 +238,7 @@ sudo cat /root/nginx-manager-credentials.txt
 `/opt/nginx-manager/current` 指向当前版本。SQLite、TLS 和服务端环境文件不放在
 release 目录内，分别保存在 `/var/lib/nginx-manager/` 与 `/etc/nginx-manager/`。
 
-反代模式打开 `--public-url` 指定的地址；直连模式打开 `https://控制端地址:8443`。使用 LDAP / AD 或凭据文件中的本地管理员账号登录。浏览器脚本不能读取会话 Cookie，退出登录或会话到期后需要重新登录。
+反代模式默认打开 `https://--host`，地址不同时才需要指定 `--public-url`；启用 `--allow-direct-http` 后也可打开 `http://控制端地址:8443`；直连 TLS 模式打开 `https://控制端地址:8443`。使用 LDAP / AD 或凭据文件中的本地管理员账号登录。浏览器脚本不能读取会话 Cookie，退出登录或会话到期后需要重新登录。
 
 自签模式需要通过可信的运维通道复制 CA，并核对安装脚本输出的 SHA-256 指纹：
 
@@ -393,7 +406,7 @@ sudo ./deploy/backup-server.sh
 
 ## 升级
 
-先备份，然后用新发布包和首次安装相同的入口模式重新运行安装脚本。反代模式继续传 `--behind-nginx --public-url ...`，直连模式继续传证书参数。LDAP 已启用时可以不重复传 LDAP 参数，安装器会保留已有环境、查询密码和 LDAP CA；需要修改 LDAP 时传入完整的一组 LDAP 参数。控制端会先完成发布包预检，在独立 release 目录创建虚拟环境、安装依赖并执行 Python 导入检查；这些步骤不会改动正在运行的 `current`。
+先备份，然后用新发布包和首次安装相同的入口模式重新运行安装脚本。反代模式继续传 `--behind-nginx`，外部地址与 `--host` 不同时再传 `--public-url`；需要保留直连 HTTP 时继续传 `--allow-direct-http`。直连 TLS 模式继续传证书参数。LDAP 已启用时可以不重复传 LDAP 参数，安装器会保留已有环境、查询密码和 LDAP CA；需要修改 LDAP 时传入完整的一组 LDAP 参数。控制端会先完成发布包预检，在独立 release 目录创建虚拟环境、安装依赖并执行 Python 导入检查；这些步骤不会改动正在运行的 `current`。
 
 预装成功后，脚本会短暂停止旧服务并用 SQLite Backup API 创建一致性快照，再原子切换 `current`、显式 `systemctl restart nginx-manager`，并检查服务状态和 `/healthz`；直连模式还会校验 TLS 证书钉扎。任一步失败时，脚本会自动切回升级前的 release，校验恢复原服务文件、环境文件、TLS、LDAP 密钥材料与 SQLite，并重新启动旧服务。首次安装失败时同样会撤销 `current` 和 systemd 单元，不会留下一个伪成功服务。
 

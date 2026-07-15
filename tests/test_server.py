@@ -114,6 +114,7 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(session.json()["auth_source"], "local")
         self.assertTrue(session.json()["csrf_token"])
         cookie = self.login().headers["set-cookie"]
+        self.assertIn("__Host-nginx_manager_session=", cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertIn("Secure", cookie)
         self.assertIn("SameSite=strict", cookie)
@@ -123,6 +124,24 @@ class ServerTestCase(unittest.TestCase):
             json={"revision": 0, "state": {}},
         )
         self.assertEqual(rejected.status_code, 403)
+
+    def test_http_login_uses_separate_non_secure_cookie(self):
+        with TestClient(self.client.app, base_url="http://testserver") as http_client:
+            login = http_client.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "correct-horse-battery-staple"},
+            )
+            self.assertEqual(login.status_code, 200, login.text)
+            cookie = login.headers["set-cookie"]
+            self.assertIn("nginx_manager_session=", cookie)
+            self.assertNotIn("__Host-nginx_manager_session=", cookie)
+            self.assertNotIn("Secure", cookie)
+            self.assertIn("HttpOnly", cookie)
+            self.assertIn("SameSite=strict", cookie)
+            self.assertNotIn("Strict-Transport-Security", login.headers)
+            session = http_client.get("/api/v1/auth/session")
+            self.assertEqual(session.status_code, 200, session.text)
+            self.assertEqual(session.json()["username"], "admin")
 
     def test_ldap_roles_are_enforced_server_side_and_local_admin_has_priority(self):
         ldap_settings = replace(
@@ -468,7 +487,10 @@ class ServerTestCase(unittest.TestCase):
         self.assertIn("ExecStart=${exec_start}", installer)
         self.assertNotIn("ExecStart=${CURRENT_LINK}/venv/bin/uvicorn app:app", installer)
         self.assertIn("--behind-nginx", installer)
-        self.assertIn("--host 127.0.0.1", installer)
+        self.assertIn("--allow-direct-http", installer)
+        self.assertIn('local bind_host="127.0.0.1"', installer)
+        self.assertIn('bind_host="0.0.0.0"', installer)
+        self.assertIn("--host ${bind_host}", installer)
         self.assertIn("NGINX_MANAGER_LDAP_ENABLED", installer)
         self.assertIn("NGINX_MANAGER_LDAP_BIND_PASSWORD_FILE", installer)
         self.assertIn('sed "s|${CURRENT_LINK}|${NEW_RELEASE}|g"', installer)
