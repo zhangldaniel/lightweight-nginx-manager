@@ -1710,6 +1710,961 @@
       padding: 18px;
       color: var(--muted);
     }
+
+    /* Theme A · professional operations console */
+    :root {
+      --bg: #f3f6fa;
+      --panel: #ffffff;
+      --panel-soft: #f7f9fc;
+      --line: #dce3ec;
+      --line-strong: #c8d2df;
+      --text: #172033;
+      --muted: #637086;
+      --muted-2: #8b97aa;
+      --primary: #1463df;
+      --primary-soft: #eaf2ff;
+      --green: #0d8b68;
+      --green-soft: #e8f7f1;
+      --amber: #b66b00;
+      --amber-soft: #fff4df;
+      --red: #d33f49;
+      --red-soft: #fff0f1;
+      --ink: #0b1728;
+      --code-bg: #0d1a2b;
+      --code-text: #dce7f5;
+      --sidebar: #081b33;
+      --sidebar-soft: #102b4d;
+      --shadow: 0 12px 32px rgba(18, 36, 64, .12);
+      --radius: 10px;
+    }
+
+    html {
+      scrollbar-color: #b9c4d3 transparent;
+      scrollbar-width: thin;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-feature-settings: "tnum" 1, "cv02" 1, "cv03" 1;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      letter-spacing: 0;
+    }
+
+    :focus-visible {
+      outline: 2px solid rgba(20, 99, 223, .42);
+      outline-offset: 2px;
+    }
+
+    .shell {
+      grid-template-columns: 224px minmax(0, 1fr);
+    }
+
+    .sidebar {
+      padding: 20px 12px 16px;
+      border-right: 0;
+      background: var(--sidebar);
+      color: #fff;
+      box-shadow: 6px 0 24px rgba(8, 27, 51, .08);
+    }
+
+    .brand {
+      gap: 12px;
+      padding: 0 8px 24px;
+    }
+
+    .brand-mark {
+      width: 40px;
+      height: 40px;
+      border: 1px solid rgba(255, 255, 255, .28);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, .09);
+      box-shadow: inset 0 0 0 3px rgba(255, 255, 255, .05);
+      font-size: 15px;
+      letter-spacing: .02em;
+    }
+
+    .brand-name {
+      color: #f8fbff;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: .01em;
+    }
+
+    .brand-sub,
+    .nav-label {
+      color: #70839d;
+    }
+
+    .brand-sub {
+      margin-top: 2px;
+      font-size: 9px;
+      letter-spacing: .14em;
+    }
+
+    .nav-label {
+      padding: 13px 12px 8px;
+      font-size: 9px;
+      letter-spacing: .15em;
+    }
+
+    .nav {
+      gap: 6px;
+    }
+
+    .nav-button {
+      position: relative;
+      min-height: 44px;
+      padding: 0 12px;
+      border-radius: 8px;
+      color: #aebbc9;
+      font-weight: 550;
+      transition: color .16s ease, background .16s ease, transform .16s ease;
+    }
+
+    .nav-button::before {
+      position: absolute;
+      inset: 9px auto 9px -12px;
+      width: 3px;
+      border-radius: 0 3px 3px 0;
+      background: #4b91ff;
+      content: "";
+      opacity: 0;
+      transform: scaleY(.5);
+      transition: .16s ease;
+    }
+
+    .nav-button:hover {
+      background: rgba(255, 255, 255, .07);
+      color: #eef5ff;
+      transform: translateX(1px);
+    }
+
+    .nav-button.active {
+      background: #123d73;
+      color: #ffffff;
+      font-weight: 650;
+      box-shadow: inset 0 0 0 1px rgba(103, 159, 241, .12);
+    }
+
+    .nav-button.active::before {
+      opacity: 1;
+      transform: scaleY(1);
+    }
+
+    .nav-icon {
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      color: #8194aa;
+    }
+
+    .nav-button:hover .nav-icon,
+    .nav-button.active .nav-icon {
+      color: #69a5ff;
+    }
+
+    .nav-icon svg {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 1.7;
+    }
+
+    .nav-count {
+      min-width: 24px;
+      padding: 1px 7px;
+      background: rgba(255, 255, 255, .08);
+      color: #8fa1b6;
+      font-size: 10px;
+    }
+
+    .nav-button.active .nav-count {
+      background: rgba(255, 255, 255, .12);
+      color: #dceaff;
+    }
+
+    .agent-card {
+      padding: 14px;
+      border-color: rgba(255, 255, 255, .11);
+      border-radius: 9px;
+      background: rgba(255, 255, 255, .055);
+      box-shadow: none;
+    }
+
+    .agent-card-head {
+      color: #eef5ff;
+      font-size: 12px;
+    }
+
+    .agent-card p {
+      color: #91a2b6;
+      line-height: 1.55;
+    }
+
+    .agent-card button {
+      color: #72aaff;
+    }
+
+    .main {
+      min-height: 100vh;
+      background: var(--bg);
+    }
+
+    .topbar {
+      height: 64px;
+      padding: 0 28px;
+      border-color: var(--line);
+      background: rgba(255, 255, 255, .96);
+      backdrop-filter: none;
+      box-shadow: 0 1px 0 rgba(18, 36, 64, .02);
+    }
+
+    .breadcrumb {
+      color: #7b879a;
+      font-size: 12px;
+    }
+
+    .breadcrumb strong {
+      color: #253147;
+      font-weight: 650;
+    }
+
+    .connection-pill {
+      min-height: 34px;
+      border-color: #b9dfd1;
+      border-radius: 7px;
+      background: #f0faf6;
+      color: #08775a;
+      font-size: 11px;
+    }
+
+    .session-role {
+      min-height: 30px;
+      border-radius: 7px;
+      background: #f7f9fc;
+      font-size: 10px;
+    }
+
+    .content {
+      max-width: 1800px;
+      padding: 28px clamp(24px, 2vw, 36px) 50px;
+    }
+
+    .page-head {
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .page-head h1 {
+      margin-bottom: 4px;
+      color: #111a2c;
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: -.02em;
+    }
+
+    .page-head p {
+      color: #748095;
+      font-size: 12px;
+    }
+
+    .page-actions {
+      gap: 10px;
+    }
+
+    .ghost-button,
+    .button,
+    .icon-button {
+      border-color: #d6dee9;
+      border-radius: 7px;
+      background: #fff;
+      color: #354158;
+      font-weight: 600;
+      box-shadow: 0 1px 1px rgba(18, 36, 64, .03);
+      transition: border-color .15s ease, box-shadow .15s ease, color .15s ease, background .15s ease, transform .15s ease;
+    }
+
+    .ghost-button,
+    .button {
+      min-height: 38px;
+      padding: 0 14px;
+    }
+
+    .ghost-button {
+      min-height: 34px;
+      font-size: 11px;
+    }
+
+    .button:hover,
+    .ghost-button:hover,
+    .icon-button:hover {
+      border-color: #aebbd0;
+      color: #1d2c45;
+      box-shadow: 0 5px 14px rgba(18, 36, 64, .09);
+      transform: translateY(-1px);
+    }
+
+    .button:active,
+    .ghost-button:active,
+    .icon-button:active {
+      box-shadow: none;
+      transform: translateY(0);
+    }
+
+    .button.primary {
+      border-color: #1463df;
+      background: #1463df;
+      box-shadow: 0 4px 10px rgba(20, 99, 223, .2);
+    }
+
+    .button.primary:hover {
+      border-color: #0e54c5;
+      background: #0e5ad1;
+      color: #fff;
+    }
+
+    .button.subtle-danger {
+      border-color: #f0c6ca;
+      background: #fff6f6;
+    }
+
+    .summary-grid {
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    .summary-card {
+      min-height: 104px;
+      padding: 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      border-color: var(--line);
+      border-radius: 10px;
+      box-shadow: 0 1px 2px rgba(18, 36, 64, .035);
+      transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
+    }
+
+    .summary-card:hover {
+      border-color: #c5d0df;
+      box-shadow: 0 8px 22px rgba(18, 36, 64, .075);
+      transform: translateY(-1px);
+    }
+
+    .summary-card button {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .summary-icon {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 9px;
+      font-size: 17px;
+      font-weight: 800;
+      flex: none;
+    }
+
+    .summary-icon.blue {
+      background: #e8f1ff;
+      color: #1463df;
+    }
+
+    .summary-icon.green {
+      background: #e8f7f1;
+      color: #0d8b68;
+    }
+
+    .summary-icon.amber {
+      background: #fff3dc;
+      color: #b66b00;
+    }
+
+    .summary-icon.red {
+      background: #fff0f1;
+      color: #d33f49;
+    }
+
+    .summary-copy {
+      min-width: 0;
+      display: grid;
+      gap: 1px;
+      text-align: left;
+    }
+
+    .summary-label {
+      color: #6c788d;
+      font-size: 11px;
+    }
+
+    .summary-value {
+      color: #10192a;
+      font-size: 25px;
+      font-weight: 700;
+      letter-spacing: -.025em;
+    }
+
+    .summary-hint {
+      color: #909bad;
+      font-size: 10px;
+    }
+
+    .workspace {
+      grid-template-columns: minmax(0, 1fr) clamp(390px, 25vw, 440px);
+      gap: 18px;
+    }
+
+    .toolbar {
+      min-height: 58px;
+      gap: 10px;
+      padding: 9px;
+      border-color: var(--line);
+      border-radius: 10px 10px 0 0;
+      box-shadow: 0 1px 2px rgba(18, 36, 64, .02);
+    }
+
+    .search-wrap span {
+      color: #8793a7;
+      font-size: 16px;
+    }
+
+    .input,
+    .select,
+    .textarea {
+      border-color: #d7dfe9;
+      border-radius: 7px;
+      color: #253147;
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+
+    .input,
+    .select {
+      min-height: 40px;
+    }
+
+    .input::placeholder,
+    .textarea::placeholder {
+      color: #9aa5b5;
+    }
+
+    .input:focus,
+    .select:focus,
+    .textarea:focus {
+      border-color: #7ca7eb;
+      box-shadow: 0 0 0 3px rgba(20, 99, 223, .1);
+    }
+
+    .list-panel,
+    .detail-panel,
+    .panel,
+    .node-card {
+      border-color: var(--line);
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(18, 36, 64, .045);
+    }
+
+    .list-panel {
+      border-radius: 0 0 10px 10px;
+    }
+
+    .table-head,
+    .table-row {
+      gap: 14px;
+      padding-inline: 16px;
+    }
+
+    .table-head {
+      min-height: 44px;
+      background: #f7f9fc;
+      color: #7c8799;
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: .03em;
+    }
+
+    .table-row {
+      min-height: 80px;
+      border-color: #e8edf3;
+      transition: background .14s ease, box-shadow .14s ease;
+    }
+
+    .table-row:hover {
+      background: #f8faff;
+    }
+
+    .table-row.selected {
+      background: #edf4ff;
+      box-shadow: inset 3px 0 0 #1463df, inset 0 1px 0 #dce8fb, inset 0 -1px 0 #dce8fb;
+    }
+
+    .cell-title {
+      color: #1b263a;
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .cell-sub {
+      color: #6d798d;
+      font-size: 11px;
+    }
+
+    .chip {
+      min-height: 23px;
+      padding: 2px 7px;
+      border-radius: 6px;
+      background: #eef2f7;
+      color: #516076;
+      font-size: 10px;
+    }
+
+    .status-pill {
+      min-height: 25px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .detail-panel {
+      top: 76px;
+      max-height: calc(100vh - 90px);
+      scrollbar-gutter: auto;
+    }
+
+    .detail-panel::-webkit-scrollbar,
+    .dialog-body::-webkit-scrollbar,
+    .code-editor::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    .detail-panel::-webkit-scrollbar-thumb,
+    .dialog-body::-webkit-scrollbar-thumb,
+    .code-editor::-webkit-scrollbar-thumb {
+      border: 2px solid transparent;
+      border-radius: 999px;
+      background: #b8c3d2;
+      background-clip: padding-box;
+    }
+
+    .detail-sticky-top {
+      background: #fff;
+      box-shadow: 0 1px 0 var(--line), 0 8px 18px rgba(18, 36, 64, .045);
+    }
+
+    .detail-header {
+      padding: 18px;
+      background: #fff;
+    }
+
+    .detail-title-row h2 {
+      color: #131d30;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .detail-header p {
+      color: #778398;
+      font-size: 11px;
+    }
+
+    .detail-actions {
+      gap: 8px;
+      padding: 12px 18px 14px;
+      background: #fff;
+    }
+
+    .detail-actions .button {
+      min-height: 36px;
+      font-size: 11px;
+    }
+
+    .detail-body {
+      gap: 17px;
+      padding: 17px 18px 20px;
+    }
+
+    .detail-block {
+      gap: 8px;
+    }
+
+    .detail-block + .detail-block {
+      padding-top: 15px;
+      border-color: #e8edf3;
+    }
+
+    .detail-label {
+      color: #768297;
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: .04em;
+    }
+
+    .detail-value {
+      color: #2a3549;
+      font-size: 12px;
+    }
+
+    .config-preview {
+      max-height: 230px;
+      padding: 14px;
+      border: 1px solid #1b2c43;
+      border-radius: 7px;
+      background: #0d1a2b;
+      color: #dce7f5;
+      font-size: 11px;
+      line-height: 1.65;
+    }
+
+    .config-preview-meta,
+    .config-preview-meta code {
+      color: #718096;
+      font-size: 10px;
+    }
+
+    .node-mini {
+      padding: 9px 10px;
+      border-color: #dce3ec;
+      border-radius: 7px;
+      background: #f8fafc;
+    }
+
+    .notice {
+      border-color: #efd5a5;
+      border-radius: 7px;
+      background: #fff8e9;
+      color: #76521d;
+    }
+
+    .node-grid {
+      gap: 14px;
+    }
+
+    .node-card {
+      padding: 18px;
+      gap: 14px;
+    }
+
+    .node-avatar {
+      border-radius: 8px;
+    }
+
+    .node-actions button,
+    .cert-action {
+      border-color: #d6dee9;
+      border-radius: 6px;
+      background: #fff;
+      color: #3e4c63;
+    }
+
+    dialog {
+      border-color: #d5deea;
+      border-radius: 12px;
+      box-shadow: 0 28px 80px rgba(7, 24, 47, .3);
+    }
+
+    dialog.wide {
+      width: min(1040px, calc(100vw - 32px));
+    }
+
+    dialog::backdrop {
+      background: rgba(7, 20, 39, .5);
+      backdrop-filter: blur(2px);
+    }
+
+    .dialog-head,
+    .dialog-foot {
+      padding: 15px 18px;
+      background: #f8fafc;
+    }
+
+    .dialog-head h2 {
+      color: #182338;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .dialog-head p {
+      color: #748095;
+      font-size: 10px;
+    }
+
+    .dialog-body {
+      padding: 18px;
+    }
+
+    .form-field label,
+    .fieldset-title {
+      color: #3c4960;
+      font-size: 11px;
+      font-weight: 650;
+    }
+
+    .field-help {
+      color: #8995a8;
+    }
+
+    .check-card,
+    .deploy-summary,
+    .deploy-step,
+    .run-node {
+      border-color: #dae2ec;
+      border-radius: 7px;
+      background: #f8fafc;
+    }
+
+    .editor-layout {
+      grid-template-columns: 270px minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .code-editor {
+      min-height: 470px;
+      border-color: #1d3048;
+      border-radius: 8px;
+      background: #0d1a2b;
+      color: #dce7f5;
+      font-size: 12px;
+      line-height: 1.65;
+    }
+
+    .diff-badge {
+      border-radius: 6px;
+      font-weight: 650;
+    }
+
+    .command-box,
+    .log-box {
+      border-radius: 7px;
+      background: #0d1a2b;
+    }
+
+    .toast {
+      right: 22px;
+      bottom: 22px;
+      border: 1px solid rgba(255, 255, 255, .1);
+      border-radius: 8px;
+      background: #0b1728;
+      font-size: 12px;
+      box-shadow: 0 16px 40px rgba(7, 24, 47, .28);
+    }
+
+    .view-note {
+      color: #8a96a9;
+      font-size: 10px;
+    }
+
+    @media (max-width: 1180px) {
+      .shell {
+        grid-template-columns: 78px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        padding-inline: 10px;
+      }
+
+      .brand {
+        padding-inline: 9px;
+      }
+
+      .brand-copy,
+      .nav-label,
+      .nav-text,
+      .agent-card {
+        display: none;
+      }
+
+      .nav-button {
+        justify-content: center;
+        padding-inline: 8px;
+      }
+
+      .nav-button::before {
+        left: -10px;
+      }
+
+      .nav-count {
+        display: none;
+      }
+    }
+
+    @media (max-width: 980px) {
+      .workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .detail-panel {
+        position: static;
+        max-height: none;
+        overflow: visible;
+      }
+
+      .detail-sticky-top {
+        position: static;
+      }
+
+      .summary-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .shell {
+        display: block;
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 0;
+        width: 100%;
+        height: auto;
+        padding: 9px 12px 8px;
+        border-bottom: 1px solid #173352;
+        box-shadow: 0 5px 18px rgba(7, 24, 47, .16);
+      }
+
+      .brand {
+        padding: 0 4px 8px;
+      }
+
+      .brand-mark {
+        width: 32px;
+        height: 32px;
+      }
+
+      .brand-copy {
+        display: block;
+      }
+
+      .brand-sub,
+      .nav-label,
+      .agent-card {
+        display: none;
+      }
+
+      .nav {
+        display: flex;
+        gap: 5px;
+        overflow-x: auto;
+      }
+
+      .nav-button {
+        width: auto;
+        min-width: max-content;
+        min-height: 36px;
+        padding: 0 10px;
+      }
+
+      .nav-button::before {
+        display: none;
+      }
+
+      .nav-text {
+        display: inline;
+      }
+
+      .nav-icon {
+        width: 18px;
+      }
+
+      .topbar {
+        height: 52px;
+        padding: 0 14px;
+      }
+
+      .content {
+        padding: 20px 14px 34px;
+      }
+
+      .page-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .page-actions {
+        width: 100%;
+        margin: 0;
+      }
+
+      .page-actions .button {
+        flex: 1;
+      }
+
+      .toolbar {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .toolbar .select {
+        width: 100%;
+      }
+
+      .table-head {
+        display: none;
+      }
+
+      .site-table .table-row,
+      .cert-table .table-row,
+      .run-table .table-row {
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        padding-block: 13px;
+      }
+
+      .editor-layout,
+      .form-grid,
+      .check-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .dialog-foot {
+        align-items: stretch;
+        flex-direction: column-reverse;
+      }
+
+      .dialog-foot .button {
+        width: 100%;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .summary-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+
+      .summary-card {
+        min-height: 92px;
+        padding: 12px;
+        gap: 10px;
+      }
+
+      .summary-icon {
+        width: 34px;
+        height: 34px;
+      }
+
+      .summary-value {
+        font-size: 20px;
+      }
+    }
   </style>
 </head>
 <body>
@@ -1726,22 +2681,22 @@
       <div class="nav-label">托管资源</div>
       <nav class="nav" aria-label="主导航">
         <button class="nav-button active" type="button" data-nav="sites">
-          <span class="nav-icon">▤</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"></rect><rect x="4" y="14" width="16" height="6" rx="1.5"></rect><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"></path></svg></span>
           <span class="nav-text">站点与配置</span>
           <span class="nav-count" id="nav-site-count">0</span>
         </button>
         <button class="nav-button" type="button" data-nav="certificates">
-          <span class="nav-icon">◇</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 19 7v5c0 4.6-2.9 7.3-7 9-4.1-1.7-7-4.4-7-9V7l7-4Z"></path><path d="m9.5 12 1.6 1.6 3.7-4"></path></svg></span>
           <span class="nav-text">证书</span>
           <span class="nav-count" id="nav-cert-count">0</span>
         </button>
         <button class="nav-button" type="button" data-nav="nodes">
-          <span class="nav-icon">▦</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"></rect><rect x="3.5" y="14" width="17" height="6" rx="1.5"></rect><path d="M7.5 7h.01M7.5 17h.01M11 7h6M11 17h6"></path></svg></span>
           <span class="nav-text">节点 Agent</span>
           <span class="nav-count" id="nav-node-count">0</span>
         </button>
         <button class="nav-button" type="button" data-nav="runs">
-          <span class="nav-icon">↻</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7v5l3.3 2"></path></svg></span>
           <span class="nav-text">执行记录</span>
           <span class="nav-count" id="nav-run-count">0</span>
         </button>
@@ -3140,10 +4095,10 @@
         var drift = state.sites.filter(function (site) { return site.status === 'drift' || site.status === 'failed'; }).length;
         return [
           '<div class="summary-grid">',
-          '  <div class="summary-card"><span class="summary-label">托管站点</span><strong class="summary-value">' + state.sites.length + '</strong><span class="summary-hint">配置、证书统一管理</span></div>',
-          '  <div class="summary-card"><button type="button" data-nav-jump="nodes"><span class="summary-label">在线 Agent</span><strong class="summary-value">' + onlineNodes().length + ' / ' + state.nodes.length + '</strong><span class="summary-hint">主动出站连接</span></button></div>',
-          '  <div class="summary-card"><button type="button" data-nav-jump="certificates"><span class="summary-label">即将到期证书</span><strong class="summary-value">' + expiring + '</strong><span class="summary-hint ' + (expiring ? 'warn' : '') + '">' + (expiring ? '需要处理' : '暂无风险') + '</span></button></div>',
-          '  <div class="summary-card"><button type="button" data-site-filter="attention"><span class="summary-label">漂移 / 失败</span><strong class="summary-value">' + drift + '</strong><span class="summary-hint ' + (drift ? 'danger' : '') + '">' + (drift ? '点击查看异常站点' : '全部一致') + '</span></button></div>',
+          '  <div class="summary-card"><span class="summary-icon blue" aria-hidden="true">▤</span><span class="summary-copy"><span class="summary-label">托管站点</span><strong class="summary-value">' + state.sites.length + '</strong><span class="summary-hint">配置、证书统一管理</span></span></div>',
+          '  <div class="summary-card"><button type="button" data-nav-jump="nodes"><span class="summary-icon green" aria-hidden="true">◉</span><span class="summary-copy"><span class="summary-label">在线 Agent</span><strong class="summary-value">' + onlineNodes().length + ' / ' + state.nodes.length + '</strong><span class="summary-hint">主动出站连接</span></span></button></div>',
+          '  <div class="summary-card"><button type="button" data-nav-jump="certificates"><span class="summary-icon amber" aria-hidden="true">◇</span><span class="summary-copy"><span class="summary-label">即将到期证书</span><strong class="summary-value">' + expiring + '</strong><span class="summary-hint ' + (expiring ? 'warn' : '') + '">' + (expiring ? '需要处理' : '暂无风险') + '</span></span></button></div>',
+          '  <div class="summary-card"><button type="button" data-site-filter="attention"><span class="summary-icon red" aria-hidden="true">!</span><span class="summary-copy"><span class="summary-label">漂移 / 失败</span><strong class="summary-value">' + drift + '</strong><span class="summary-hint ' + (drift ? 'danger' : '') + '">' + (drift ? '点击查看异常站点' : '全部一致') + '</span></span></button></div>',
           '</div>'
         ].join('');
       }
