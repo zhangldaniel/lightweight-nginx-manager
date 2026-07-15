@@ -37,6 +37,7 @@ ActionName = Literal[
     "inspect",
     "nginx_test",
     "nginx_reload",
+    "config_inventory",
     "config_read",
     "config_hash",
     "config_apply",
@@ -48,6 +49,7 @@ JOB_ACTIONS = {
     "inspect",
     "nginx_test",
     "nginx_reload",
+    "config_inventory",
     "config_read",
     "config_hash",
     "config_apply",
@@ -73,6 +75,9 @@ PRIVATE_KEY_MARKERS = (
     "-----BEGIN OPENSSH PRIVATE KEY-----",
     "-----BEGIN ENCRYPTED PRIVATE KEY-----",
 )
+INVENTORY_MAX_FILES = 200
+INVENTORY_MAX_FILE_BYTES = 256 * 1024
+INVENTORY_MAX_TOTAL_BYTES = 1024 * 1024
 
 
 class LDAPAuthenticationError(Exception):
@@ -163,6 +168,65 @@ def _contains_sensitive_material(value: Any, key_hint: str = "") -> bool:
     return False
 
 
+def _safe_config_inventory(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict) or not isinstance(value.get("files"), list):
+        return None
+    safe_files: List[Dict[str, Any]] = []
+    total_bytes = 0
+    rejected = 0
+    truncated = bool(value.get("truncated", False))
+    for item in value["files"]:
+        if len(safe_files) >= INVENTORY_MAX_FILES:
+            truncated = True
+            break
+        if not isinstance(item, dict):
+            rejected += 1
+            continue
+        path = item.get("path")
+        content = item.get("content")
+        digest = item.get("sha256")
+        if (
+            not isinstance(path, str)
+            or not os.path.isabs(path)
+            or len(path) > 4096
+            or "\0" in path
+            or not path.lower().endswith(".conf")
+            or not isinstance(content, str)
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            rejected += 1
+            continue
+        encoded = content.encode("utf-8")
+        if (
+            len(encoded) > INVENTORY_MAX_FILE_BYTES
+            or total_bytes + len(encoded) > INVENTORY_MAX_TOTAL_BYTES
+            or hashlib.sha256(encoded).hexdigest() != digest
+            or any(marker in content.upper() for marker in PRIVATE_KEY_MARKERS)
+        ):
+            rejected += 1
+            if total_bytes + len(encoded) > INVENTORY_MAX_TOTAL_BYTES:
+                truncated = True
+            continue
+        safe_files.append({
+            "path": path,
+            "content": content,
+            "sha256": digest,
+            "size": len(encoded),
+        })
+        total_bytes += len(encoded)
+    supplied_skipped = value.get("skipped_count", 0)
+    if not isinstance(supplied_skipped, int) or supplied_skipped < 0:
+        supplied_skipped = 0
+    return {
+        "files": safe_files,
+        "file_count": len(safe_files),
+        "total_bytes": total_bytes,
+        "skipped_count": min(supplied_skipped + rejected, 100000),
+        "truncated": truncated,
+    }
+
+
 def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
     """Keep operational facts, never command output or arbitrary error strings."""
     result: Dict[str, Any] = {}
@@ -194,6 +258,11 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
         if isinstance(value, str):
             value = value[:256]
         result[key] = value
+
+    if request.action == "config_inventory":
+        inventory = _safe_config_inventory(request.details)
+        if inventory is not None:
+            result["config_inventory"] = inventory
 
     nested_scalar_keys = {
         "sha256",
@@ -964,7 +1033,7 @@ def create_app(
     settings.validate()
     authenticate_ldap = ldap_authenticator or _authenticate_ldap
     database = Database(settings.db_path)
-    api = FastAPI(title="Nginx Manager", version="0.3.7", docs_url=None, redoc_url=None, openapi_url=None)
+    api = FastAPI(title="Nginx Manager", version="0.3.8", docs_url=None, redoc_url=None, openapi_url=None)
     api.state.settings = settings
     api.state.database = database
     secure_session_cookie = "__Host-nginx_manager_session"

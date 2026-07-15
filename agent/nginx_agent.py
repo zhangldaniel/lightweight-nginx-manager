@@ -59,17 +59,21 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
     "nginx_reload",
+    "config_inventory",
     "config_read",
     "config_hash",
     "config_apply",
     "config_delete",
     "certificate_apply",
 )
+INVENTORY_MAX_FILES = 200
+INVENTORY_MAX_FILE_BYTES = 256 * 1024
+INVENTORY_MAX_TOTAL_BYTES = 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 TRANSACTION_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 TRANSACTION_PHASES = {
@@ -904,6 +908,74 @@ class JobExecutor:
         tested = self._nginx_test()
         reloaded = self._reload_only()
         return {"test": tested, "reload": reloaded}
+
+    def _action_config_inventory(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
+        files: List[Dict[str, Any]] = []
+        skipped = 0
+        total_bytes = 0
+        truncated = False
+        candidates: List[Path] = []
+        seen = set()
+        for root in self._allowed_config_roots:
+            if not root.is_dir() or root.is_symlink():
+                continue
+            for current_root, directory_names, file_names in os.walk(str(root), followlinks=False):
+                directory_names[:] = sorted(
+                    name for name in directory_names
+                    if not (Path(current_root) / name).is_symlink()
+                )
+                for name in sorted(file_names):
+                    if not name.lower().endswith(".conf"):
+                        continue
+                    candidate = Path(current_root) / name
+                    try:
+                        resolved = self._configuration_path(str(candidate))
+                    except ActionError:
+                        skipped += 1
+                        continue
+                    key = str(resolved)
+                    if key not in seen:
+                        candidates.append(resolved)
+                        seen.add(key)
+
+        for path in sorted(candidates, key=lambda item: str(item)):
+            if len(files) >= INVENTORY_MAX_FILES:
+                truncated = True
+                break
+            try:
+                size = path.stat().st_size
+                if size > min(self.settings.max_file_bytes, INVENTORY_MAX_FILE_BYTES):
+                    skipped += 1
+                    continue
+                data = path.read_bytes()
+            except OSError:
+                skipped += 1
+                continue
+            if len(data) != size or b"PRIVATE KEY-----" in data:
+                skipped += 1
+                continue
+            try:
+                content = data.decode("utf-8")
+            except UnicodeDecodeError:
+                skipped += 1
+                continue
+            if total_bytes + len(data) > INVENTORY_MAX_TOTAL_BYTES:
+                truncated = True
+                break
+            files.append({
+                "path": str(path),
+                "content": content,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+            })
+            total_bytes += len(data)
+        return {
+            "files": files,
+            "file_count": len(files),
+            "total_bytes": total_bytes,
+            "skipped_count": skipped,
+            "truncated": truncated,
+        }
 
     def _action_config_read(self, payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
         path = self._configuration_path(payload.get("path"))
@@ -1978,6 +2050,14 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
         tested = raw.get("test") if isinstance(raw.get("test"), dict) else {}
         reloaded = raw.get("reload") if isinstance(raw.get("reload"), dict) else {}
         output = "\n".join(str(value) for value in (tested.get("stderr") or tested.get("stdout"), reloaded.get("stderr") or reloaded.get("stdout")) if value)
+    elif action == "config_inventory":
+        details = {
+            "files": raw.get("files", []),
+            "file_count": raw.get("file_count", 0),
+            "total_bytes": raw.get("total_bytes", 0),
+            "skipped_count": raw.get("skipped_count", 0),
+            "truncated": bool(raw.get("truncated", False)),
+        }
     elif action == "config_hash":
         details = {"path": raw.get("path"), "config_hash": raw.get("sha256"), "size": raw.get("size")}
     elif action == "config_read":
@@ -2026,6 +2106,8 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
 
     response: Dict[str, Any] = {
         "status": "succeeded" if succeeded else "failed",
+        "job_id": str(local.get("job_id", ""))[:200],
+        "action": action[:64],
         "details": {key: value for key, value in details.items() if value is not None},
         "duration_ms": _duration_ms(local.get("started_at"), local.get("finished_at")),
     }

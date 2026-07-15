@@ -25,7 +25,9 @@ python3 nginx_agent.py --config config.json enroll --force
 
 ## 固定动作
 
-`inspect`、`nginx_test`、`nginx_reload`、`config_read`、`config_hash`、`config_apply`、`config_delete`、`certificate_apply`。
+`inspect`、`nginx_test`、`nginx_reload`、`config_inventory`、`config_read`、`config_hash`、`config_apply`、`config_delete`、`certificate_apply`。
+
+`config_inventory` 只读取允许目录内扩展名严格为 `.conf` 的普通文件，忽略 `.bak`、符号链接、私钥内容和超限文件；不会修改配置或 reload Nginx。
 
 配置和证书只能写入安装时指定的专用托管目录。每次发布使用期望 Hash、防符号链接/路径越界、原子替换、`nginx -t`、reload、可选健康检查和失败恢复。
 

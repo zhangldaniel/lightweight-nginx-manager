@@ -2355,6 +2355,7 @@
               node.managedConfigRoot = String(node.root || '/etc/nginx').replace(/\/+$/, '') + '/nginx-manager.d';
             }
           });
+          parsed.importedInventoryJobs = Array.isArray(parsed.importedInventoryJobs) ? parsed.importedInventoryJobs : [];
           return parsed;
         } catch (error) {
           return clone(seedState);
@@ -2362,7 +2363,7 @@
       }
 
       var state = remoteMode
-        ? { nodes: [], certificates: [], sites: [], runs: [] }
+        ? { nodes: [], certificates: [], sites: [], runs: [], importedInventoryJobs: [] }
         : loadState();
 
       function saveState() {
@@ -2373,7 +2374,8 @@
       function serializableUiState() {
         return {
           sites: state.sites,
-          certificates: state.certificates
+          certificates: state.certificates,
+          importedInventoryJobs: state.importedInventoryJobs || []
         };
       }
 
@@ -2465,6 +2467,7 @@
           nginx_test: '节点校验',
           nginx_reload: '平滑 reload',
           config_read: '读取配置',
+          config_inventory: '扫描现有配置',
           config_hash: '配置 Hash',
           config_apply: '配置发布',
           config_delete: '移除节点配置',
@@ -2600,6 +2603,155 @@
         if (changed) saveState();
       }
 
+      function stripNginxComments(content) {
+        return String(content || '').split('\n').map(function (line) {
+          var quote = '';
+          var escaped = false;
+          for (var index = 0; index < line.length; index += 1) {
+            var character = line.charAt(index);
+            if (escaped) {
+              escaped = false;
+              continue;
+            }
+            if (character === '\\') {
+              escaped = true;
+              continue;
+            }
+            if (quote) {
+              if (character === quote) quote = '';
+              continue;
+            }
+            if (character === '"' || character === "'") {
+              quote = character;
+              continue;
+            }
+            if (character === '#') return line.slice(0, index);
+          }
+          return line;
+        }).join('\n');
+      }
+
+      function nginxDirectiveValues(content, directive) {
+        var cleaned = stripNginxComments(content);
+        var expression = new RegExp('^\\s*' + directive + '\\s+([^;]+);', 'gmi');
+        var values = [];
+        var matched;
+        while ((matched = expression.exec(cleaned)) !== null) values.push(matched[1].trim());
+        return values;
+      }
+
+      function inventorySiteMetadata(file) {
+        var path = String(file.path || '');
+        var filename = path.split('/').pop() || 'imported.conf';
+        var content = String(file.content || '');
+        var serverNames = nginxDirectiveValues(content, 'server_name').join(' ').split(/\s+/).filter(function (name) {
+          return name && name !== '_' && name.charAt(0) !== '~' && name.charAt(0) !== '$';
+        });
+        var domain = serverNames[0] || filename.replace(/\.conf$/i, '');
+        var proxyTargets = [];
+        ['proxy_pass', 'grpc_pass', 'fastcgi_pass', 'uwsgi_pass'].some(function (directive) {
+          proxyTargets = nginxDirectiveValues(content, directive);
+          return proxyTargets.length > 0;
+        });
+        var roots = nginxDirectiveValues(content, 'root');
+        return {
+          domain: domain,
+          aliases: serverNames.slice(1),
+          type: proxyTargets.length ? 'proxy' : (roots.length ? 'static' : 'proxy'),
+          target: proxyTargets[0] || roots[0] || '现有 Nginx 配置',
+          filename: filename
+        };
+      }
+
+      function importInventoryFile(file, node) {
+        var path = String(file.path || '');
+        if (!path || !node || !file.sha256 || typeof file.content !== 'string') return false;
+        var alreadyImported = state.sites.some(function (site) {
+          return site.nodeConfigPaths && site.nodeConfigPaths[node.id] === path;
+        });
+        if (alreadyImported) return false;
+        var metadata = inventorySiteMetadata(file);
+        var site = state.sites.find(function (candidate) {
+          return candidate.importedFileName === metadata.filename && candidate.domain === metadata.domain;
+        });
+        if (!site) {
+          site = {
+            id: uid('site'),
+            domain: metadata.domain,
+            type: metadata.type,
+            target: metadata.target,
+            environment: '生产',
+            nodeIds: [],
+            certificateId: '',
+            version: 1,
+            status: 'published',
+            note: '从节点现有配置导入：' + path + (metadata.aliases.length ? '；其他域名：' + metadata.aliases.join('、') : ''),
+            changeNote: '从节点导入现有配置',
+            updatedAt: '刚刚',
+            config: file.content,
+            configPath: path,
+            importedFileName: metadata.filename,
+            nodeHashes: {},
+            nodeConfigPaths: {},
+            history: [{ version: 1, note: '从节点导入现有配置（未修改节点文件）', time: '刚刚', user: '控制端' }]
+          };
+          state.sites.unshift(site);
+        }
+        var existingHashes = Object.keys(site.nodeHashes || {}).map(function (nodeId) {
+          return site.nodeHashes[nodeId];
+        }).filter(Boolean);
+        if (existingHashes.length && !existingHashes.includes(file.sha256)) {
+          site.status = 'drift';
+          site.changeNote = '导入时发现多节点配置不一致';
+        }
+        site.nodeHashes = site.nodeHashes || {};
+        site.nodeConfigPaths = site.nodeConfigPaths || {};
+        site.nodeHashes[node.id] = file.sha256;
+        site.nodeConfigPaths[node.id] = path;
+        if (!site.nodeIds.includes(node.id)) {
+          site.nodeIds.push(node.id);
+          node.sites = Number(node.sites || 0) + 1;
+        }
+        return true;
+      }
+
+      function processConfigInventoryJobs(jobs) {
+        state.importedInventoryJobs = Array.isArray(state.importedInventoryJobs) ? state.importedInventoryJobs : [];
+        var processed = new Set(state.importedInventoryJobs);
+        var importedCount = 0;
+        var failedCount = 0;
+        var skippedCount = 0;
+        var truncated = false;
+        var changed = false;
+        jobs.filter(function (job) {
+          return job.action === 'config_inventory' && ['succeeded', 'failed', 'expired'].includes(job.status) && !processed.has(job.id);
+        }).forEach(function (job) {
+          processed.add(job.id);
+          changed = true;
+          if (job.status !== 'succeeded' || !job.result || !job.result.config_inventory) {
+            failedCount += 1;
+            return;
+          }
+          var inventory = job.result.config_inventory;
+          var node = getNode(job.node_id);
+          (inventory.files || []).forEach(function (file) {
+            if (importInventoryFile(file, node)) importedCount += 1;
+          });
+          skippedCount += Number(inventory.skipped_count || 0);
+          truncated = truncated || Boolean(inventory.truncated);
+        });
+        if (!changed) return;
+        state.importedInventoryJobs = Array.from(processed).slice(-200);
+        saveState();
+        if (failedCount) {
+          notify('部分节点配置扫描失败，请到“执行记录”查看详情');
+        } else if (importedCount) {
+          notify('已导入 ' + importedCount + ' 个现有配置' + (skippedCount ? '，跳过 ' + skippedCount + ' 个文件' : '') + (truncated ? '；结果已达到安全上限' : ''));
+        } else {
+          notify('扫描完成，没有新的 .conf 配置需要导入');
+        }
+      }
+
       async function refreshRemoteData(includeUiState) {
         var requests = [
           apiRequest('/api/v1/admin/nodes'),
@@ -2614,10 +2766,12 @@
           remoteRevision = Number(uiDocument.revision || 0);
           state.sites = Array.isArray(remoteState.sites) ? remoteState.sites : [];
           state.certificates = Array.isArray(remoteState.certificates) ? remoteState.certificates : [];
+          state.importedInventoryJobs = Array.isArray(remoteState.importedInventoryJobs) ? remoteState.importedInventoryJobs : [];
         }
         pendingEnrollments = (responses[2] && responses[2].items) || [];
         var rawJobs = responses[1].items || [];
         state.nodes = (responses[0].items || []).map(mapRemoteNode);
+        processConfigInventoryJobs(rawJobs);
         applyRemoteJobOutcomes(rawJobs);
         state.runs = rawJobs.map(mapRemoteJob);
         selectedSiteId = getSite(selectedSiteId) ? selectedSiteId : (state.sites[0] ? state.sites[0].id : null);
@@ -3051,7 +3205,7 @@
           pendingSection,
           '<div class="section-head" style="margin-top:18px"><div><h2>已托管节点</h2><p>批准后 Agent 会自动完成机器身份初始化并开始心跳。</p></div></div>',
           '<div class="node-grid">' + cards + '</div>',
-          '<p class="view-note">不提供任意 Shell。Agent 只接受 inspect、nginx_test、nginx_reload、config_read、config_hash、config_apply、config_delete、certificate_apply 八种固定动作。</p>'
+          '<p class="view-note">不提供任意 Shell。Agent 只接受 inspect、nginx_test、nginx_reload、config_inventory、config_read、config_hash、config_apply、config_delete、certificate_apply 九种固定动作。</p>'
         ].join('');
       }
 
@@ -3990,12 +4144,12 @@
             }
             apiRequest('/api/v1/admin/jobs', {
               method: 'POST',
-              body: { node_ids: importNodeIds, action: 'inspect', payload: {}, ttl_seconds: 120 }
+              body: { node_ids: importNodeIds, action: 'config_inventory', payload: {}, ttl_seconds: 120 }
             }).then(function () {
-              notify('已下发节点探测；首版请确认路径与 Hash 后手工新增托管站点');
+              notify('已下发配置扫描任务；完成后将自动生成站点记录，不会修改节点文件');
               return refreshRemoteData(false);
             }).catch(function (error) {
-              notify('节点探测失败：' + error.message);
+              notify('配置扫描失败：' + error.message);
             });
             return;
           }

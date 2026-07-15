@@ -1,3 +1,5 @@
+import hashlib
+import json
 import secrets
 import sys
 import tempfile
@@ -381,6 +383,65 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(jobs[0]["result"]["previous_config_hash"], "b" * 64)
         self.assertNotIn("output", jobs[0]["result"])
         self.assertIn("output_sha256", jobs[0]["result"])
+
+    def test_config_inventory_result_is_bounded_validated_and_visible_to_web(self):
+        enrolled = self.enroll()
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [enrolled["agent_id"]],
+                "action": "config_inventory",
+                "payload": {},
+                "ttl_seconds": 60,
+            },
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        job_id = created.json()["jobs"][0]["id"]
+        polled = self.client.post("/api/v1/agent/poll", headers=agent_headers, json={"limit": 1})
+        self.assertEqual("config_inventory", polled.json()["jobs"][0]["action"])
+
+        content = "server { listen 80; server_name imported.example.com; }\n"
+        digest = hashlib.sha256(content.encode()).hexdigest()
+        result = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": job_id,
+                "action": "config_inventory",
+                "details": {
+                    "files": [
+                        {
+                            "path": "/apps/nginx/conf/conf.d/imported.conf",
+                            "content": content,
+                            "sha256": digest,
+                            "size": len(content.encode()),
+                        },
+                        {
+                            "path": "/apps/nginx/conf/conf.d/tampered.conf",
+                            "content": content,
+                            "sha256": "0" * 64,
+                            "size": len(content.encode()),
+                        },
+                    ],
+                    "skipped_count": 1,
+                    "truncated": False,
+                },
+            },
+        )
+        self.assertEqual(200, result.status_code, result.text)
+        jobs = self.client.get(
+            "/api/v1/admin/jobs?action=config_inventory",
+            headers=self.admin_headers,
+        ).json()["items"]
+        inventory = jobs[0]["result"]["config_inventory"]
+        self.assertEqual(1, inventory["file_count"])
+        self.assertEqual(2, inventory["skipped_count"])
+        self.assertEqual(content, inventory["files"][0]["content"])
+        self.assertEqual(digest, inventory["files"][0]["sha256"])
+        self.assertNotIn("tampered.conf", json.dumps(inventory))
 
     def test_certificate_payload_is_redacted_after_claim(self):
         enrolled = self.enroll()

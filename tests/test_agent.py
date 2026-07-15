@@ -90,6 +90,38 @@ class AgentTestCase(unittest.TestCase):
         self.assertEqual(later, target.read_bytes())
         self.assertEqual(1, self.executor._nginx_test.call_count)
 
+    def test_config_inventory_lists_only_conf_files_without_mutation(self):
+        first = self.config_root / "api.example.conf"
+        first_content = b"server { listen 80; server_name api.example.com; }\n"
+        first.write_bytes(first_content)
+        (self.config_root / "api.example.conf.bak").write_text("ignored", encoding="utf-8")
+        nested = self.config_root / "nested"
+        nested.mkdir()
+        second = nested / "static.example.conf"
+        second_content = b"server { listen 80; server_name static.example.com; }\n"
+        second.write_bytes(second_content)
+        private = self.config_root / "unsafe.conf"
+        private.write_text("-----BEGIN PRIVATE KEY-----\nrefused\n", encoding="utf-8")
+
+        response = self.executor.execute(self.job("job-inventory", "config_inventory", {}))
+
+        self.assertEqual("succeeded", response["status"])
+        inventory = response["result"]
+        self.assertEqual(2, inventory["file_count"])
+        self.assertEqual(1, inventory["skipped_count"])
+        self.assertFalse(inventory["truncated"])
+        by_name = {Path(item["path"]).name: item for item in inventory["files"]}
+        self.assertEqual(first_content.decode(), by_name[first.name]["content"])
+        self.assertEqual(self.sha(first_content), by_name[first.name]["sha256"])
+        self.assertEqual(second_content.decode(), by_name[second.name]["content"])
+        self.assertNotIn("api.example.conf.bak", by_name)
+        self.assertTrue(first.exists())
+        self.assertTrue(second.exists())
+        mapped = agent._to_server_result(response)
+        self.assertEqual("config_inventory", mapped["action"])
+        self.assertEqual(2, mapped["details"]["file_count"])
+        self.assertEqual(2, len(mapped["details"]["files"]))
+
     def test_config_apply_present_replaces_existing_but_never_creates(self):
         target = self.config_root / "migrated-site.conf"
         old = b"server { listen 80; }\n"
@@ -617,7 +649,9 @@ class AgentTestCase(unittest.TestCase):
             },
         }
         mapped = agent._to_server_result(local)
-        self.assertEqual({"status", "details", "duration_ms"}, set(mapped))
+        self.assertEqual({"status", "job_id", "action", "details", "duration_ms"}, set(mapped))
+        self.assertEqual("x", mapped["job_id"])
+        self.assertEqual("config_apply", mapped["action"])
         self.assertEqual("succeeded", mapped["status"])
         self.assertEqual("a" * 64, mapped["details"]["config_hash"])
         self.assertEqual("b" * 64, mapped["details"]["previous_config_hash"])
