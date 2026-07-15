@@ -929,6 +929,9 @@ class AgentTestCase(unittest.TestCase):
         self.assertIn('"allow_insecure_http": allow_insecure_http == "1"', installer)
         self.assertIn('value.scheme not in {"http", "https"}', installer)
         self.assertIn('"${NGINX_BINARY}" -t -c "${NGINX_CONFIG}"', installer)
+        self.assertIn("--managed-config-already-included", installer)
+        self.assertIn("zz-nginx-manager-probe.", installer)
+        self.assertIn("is not loaded by nginx", installer)
 
     def test_agent_uninstaller_preserves_managed_nginx_files(self):
         root = AGENT_DIR.parent

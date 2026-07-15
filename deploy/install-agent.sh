@@ -32,6 +32,7 @@ NGINX_CONFIG="/etc/nginx/nginx.conf"
 MANAGED_CONFIG_DIR=""
 MANAGED_CERT_DIR=""
 MANAGED_INCLUDE_FILE=""
+MANAGED_CONFIG_ALREADY_INCLUDED="0"
 HEALTH_URL=""
 POLL_SECONDS="3"
 INSTALL_NGINX="0"
@@ -84,6 +85,7 @@ usage() {
   --managed-config-dir <路径> Agent 专用托管配置目录，默认 <nginx-root>/nginx-manager.d
   --managed-cert-dir <路径> Agent 专用托管证书目录，默认 <nginx-root>/ssl/nginx-manager
   --managed-include-file <路径> 引入托管配置的 include 文件，默认 <nginx-root>/conf.d/00-nginx-manager.conf
+  --managed-config-already-included 托管目录已由现有 nginx.conf 加载；不创建额外 include 文件
   --nginx-service <单元> Nginx systemd 单元，默认 nginx.service
   --health-url <URL>   发布后的节点本地健康检查 URL
   --poll-seconds <秒>  任务轮询周期，默认 3
@@ -377,15 +379,37 @@ install_nginx_if_requested() {
 }
 
 prepare_managed_directories() {
-  local expected_include created dump temporary include_dir
+  local expected_include created dump temporary include_dir probe
   [[ -n "${MANAGED_CONFIG_DIR}" ]] || MANAGED_CONFIG_DIR="${NGINX_ROOT}/nginx-manager.d"
   [[ -n "${MANAGED_CERT_DIR}" ]] || MANAGED_CERT_DIR="${NGINX_ROOT}/ssl/nginx-manager"
+  install -d -m 0750 -o root -g root "${MANAGED_CONFIG_DIR}"
+  install -d -m 0700 -o root -g root "${MANAGED_CERT_DIR}"
+
+  if [[ "${MANAGED_CONFIG_ALREADY_INCLUDED}" == "1" ]]; then
+    [[ -z "${MANAGED_INCLUDE_FILE}" ]] || die "--managed-config-already-included 不能与 --managed-include-file 同时使用"
+    probe="$(mktemp "${MANAGED_CONFIG_DIR}/zz-nginx-manager-probe.XXXXXX.conf")"
+    printf '%s\n' '# nginx-manager managed directory probe' >"${probe}"
+    chmod 0644 "${probe}"
+    if ! dump="$("${NGINX_BINARY}" -T -c "${NGINX_CONFIG}" 2>&1)"; then
+      rm -f -- "${probe}"
+      printf '%s\n' "${dump}" >&2
+      die "nginx validation failed while checking the existing managed directory"
+    fi
+    rm -f -- "${probe}"
+    if ! grep -Fq -- "# configuration file ${probe}:" <<<"${dump}"; then
+      die "${MANAGED_CONFIG_DIR} is not loaded by nginx; remove --managed-config-already-included or fix nginx.conf"
+    fi
+    "${NGINX_BINARY}" -t -c "${NGINX_CONFIG}" >/dev/null 2>&1 || \
+      die "nginx validation failed after removing the managed-directory probe"
+    log "已确认现有 Nginx 配置直接加载 ${MANAGED_CONFIG_DIR}"
+    return
+  fi
+
   [[ -n "${MANAGED_INCLUDE_FILE}" ]] || MANAGED_INCLUDE_FILE="${NGINX_ROOT}/conf.d/00-nginx-manager.conf"
   include_dir="$(dirname -- "${MANAGED_INCLUDE_FILE}")"
   [[ -d "${include_dir}" ]] || die "托管 include 文件的父目录不存在：${include_dir}"
-
-  install -d -m 0750 -o root -g root "${MANAGED_CONFIG_DIR}"
-  install -d -m 0700 -o root -g root "${MANAGED_CERT_DIR}"
+  [[ "$(readlink -f -- "${MANAGED_CONFIG_DIR}")" != "$(readlink -f -- "${include_dir}")" ]] || \
+    die "托管目录已是 include 文件所在目录；请移除 --managed-include-file 并添加 --managed-config-already-included"
   expected_include="include ${MANAGED_CONFIG_DIR}/*.conf;"
   created="0"
   if [[ -e "${MANAGED_INCLUDE_FILE}" ]]; then
@@ -681,6 +705,7 @@ while [[ $# -gt 0 ]]; do
     --managed-config-dir) [[ $# -ge 2 ]] || die "--managed-config-dir 缺少值"; MANAGED_CONFIG_DIR="$2"; shift 2 ;;
     --managed-cert-dir) [[ $# -ge 2 ]] || die "--managed-cert-dir 缺少值"; MANAGED_CERT_DIR="$2"; shift 2 ;;
     --managed-include-file) [[ $# -ge 2 ]] || die "--managed-include-file 缺少值"; MANAGED_INCLUDE_FILE="$2"; shift 2 ;;
+    --managed-config-already-included) MANAGED_CONFIG_ALREADY_INCLUDED="1"; shift ;;
     --nginx-service) [[ $# -ge 2 ]] || die "--nginx-service 缺少值"; NGINX_SERVICE="$2"; shift 2 ;;
     --health-url) [[ $# -ge 2 ]] || die "--health-url 缺少值"; HEALTH_URL="$2"; shift 2 ;;
     --poll-seconds) [[ $# -ge 2 ]] || die "--poll-seconds 缺少值"; POLL_SECONDS="$2"; shift 2 ;;
@@ -695,6 +720,7 @@ require_root
 [[ -n "${SERVER_URL}" ]] || { usage; die "必须指定 --server"; }
 [[ -n "${NODE_NAME}" && "${NODE_NAME}" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "节点名称只允许字母、数字、点、下划线和短横线"
 [[ "${TLS_SKIP_VERIFY}" != "1" || -z "${CA_SOURCE}" ]] || die "--ca-file 与 --insecure-skip-tls-verify 不能同时使用"
+[[ "${MANAGED_CONFIG_ALREADY_INCLUDED}" != "1" || -z "${MANAGED_INCLUDE_FILE}" ]] || die "--managed-config-already-included 不能与 --managed-include-file 同时使用"
 [[ "${NGINX_ROOT}" = /* && "${NGINX_CONFIG}" = /* ]] || die "Nginx 路径必须是绝对路径"
 for optional_path in "${NGINX_BINARY}" "${MANAGED_CONFIG_DIR}" "${MANAGED_CERT_DIR}" "${MANAGED_INCLUDE_FILE}"; do
   [[ -z "${optional_path}" || "${optional_path}" = /* ]] || die "自定义 Nginx 路径必须是绝对路径：${optional_path}"

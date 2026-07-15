@@ -57,6 +57,15 @@ sudo bash -s -- \
 
 安装完成后登录 Web，在“节点 Agent”中批准待审批节点。Agent 不监听端口，也不需要注册令牌。
 
+如果要直接托管已经由 `nginx.conf` 加载的现有目录（例如 `/apps/nginx/conf/conf.d`），不要在该目录内再创建 include 文件，否则会递归加载。改用：
+
+```bash
+--managed-config-dir /apps/nginx/conf/conf.d \
+--managed-config-already-included
+```
+
+该模式会临时放置一个无副作用的探针配置，通过 `nginx -T` 确认目录确实被加载，验证后立即删除探针。它不能与 `--managed-include-file` 同时使用。
+
 ## HTTPS 与 LDAP
 
 默认 HTTP 仅建议用于隔离且可信的管理网。生产环境推荐复用本机 Nginx HTTPS：
