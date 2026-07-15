@@ -932,6 +932,8 @@ class AgentTestCase(unittest.TestCase):
         self.assertIn("--managed-config-already-included", installer)
         self.assertIn("zz-nginx-manager-probe.", installer)
         self.assertIn("is not loaded by nginx", installer)
+        self.assertIn('if [[ -e "${MANAGED_CONFIG_DIR}" ]]', installer)
+        self.assertIn('if [[ -e "${MANAGED_CERT_DIR}" ]]', installer)
 
     def test_agent_uninstaller_preserves_managed_nginx_files(self):
         root = AGENT_DIR.parent

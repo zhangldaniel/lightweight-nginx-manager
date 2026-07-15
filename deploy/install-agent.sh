@@ -382,8 +382,18 @@ prepare_managed_directories() {
   local expected_include created dump temporary include_dir probe
   [[ -n "${MANAGED_CONFIG_DIR}" ]] || MANAGED_CONFIG_DIR="${NGINX_ROOT}/nginx-manager.d"
   [[ -n "${MANAGED_CERT_DIR}" ]] || MANAGED_CERT_DIR="${NGINX_ROOT}/ssl/nginx-manager"
-  install -d -m 0750 -o root -g root "${MANAGED_CONFIG_DIR}"
-  install -d -m 0700 -o root -g root "${MANAGED_CERT_DIR}"
+  if [[ -e "${MANAGED_CONFIG_DIR}" ]]; then
+    [[ -d "${MANAGED_CONFIG_DIR}" && ! -L "${MANAGED_CONFIG_DIR}" ]] || \
+      die "托管配置路径必须是普通目录：${MANAGED_CONFIG_DIR}"
+  else
+    install -d -m 0750 -o root -g root "${MANAGED_CONFIG_DIR}"
+  fi
+  if [[ -e "${MANAGED_CERT_DIR}" ]]; then
+    [[ -d "${MANAGED_CERT_DIR}" && ! -L "${MANAGED_CERT_DIR}" ]] || \
+      die "托管证书路径必须是普通目录：${MANAGED_CERT_DIR}"
+  else
+    install -d -m 0700 -o root -g root "${MANAGED_CERT_DIR}"
+  fi
 
   if [[ "${MANAGED_CONFIG_ALREADY_INCLUDED}" == "1" ]]; then
     [[ -z "${MANAGED_INCLUDE_FILE}" ]] || die "--managed-config-already-included 不能与 --managed-include-file 同时使用"

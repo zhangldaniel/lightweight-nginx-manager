@@ -64,7 +64,7 @@ sudo bash -s -- \
 --managed-config-already-included
 ```
 
-该模式会临时放置一个无副作用的探针配置，通过 `nginx -T` 确认目录确实被加载，验证后立即删除探针。它不能与 `--managed-include-file` 同时使用。
+该模式会临时放置一个无副作用的探针配置，通过 `nginx -T` 确认目录确实被加载，验证后立即删除探针。它不能与 `--managed-include-file` 同时使用；安装器会保留现有配置及证书目录的属主和权限。
 
 ## HTTPS 与 LDAP
 
