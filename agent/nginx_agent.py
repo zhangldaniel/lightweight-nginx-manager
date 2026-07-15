@@ -22,6 +22,7 @@ import contextlib
 import datetime as dt
 import hashlib
 import hmac
+import http.client
 import json
 import logging
 import os
@@ -58,7 +59,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -414,38 +415,63 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 class ApiClient:
     def __init__(self, settings: Settings):
         self.settings = settings
-        if settings.tls_skip_verify:
-            self.ssl_context = ssl._create_unverified_context()
-        else:
-            self.ssl_context = ssl.create_default_context(cafile=settings.ca_file)
-        self.opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}),
-            urllib.request.HTTPHandler(),
-            urllib.request.HTTPSHandler(context=self.ssl_context),
-            _NoRedirectHandler(),
-        )
+        parsed = urllib.parse.urlparse(settings.server_url)
+        self.scheme = parsed.scheme
+        self.hostname = parsed.hostname or ""
+        self.port = parsed.port or (443 if self.scheme == "https" else 80)
+        self.ssl_context = None
+        if self.scheme == "https":
+            if settings.tls_skip_verify:
+                self.ssl_context = ssl._create_unverified_context()
+            else:
+                self.ssl_context = ssl.create_default_context(cafile=settings.ca_file)
 
     def post(self, path: str, payload: Dict[str, Any], token: Optional[str] = None) -> Dict[str, Any]:
-        url = self.settings.server_url + path
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "nginx-manager-agent/" + VERSION}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Connection": "close",
+            "User-Agent": "nginx-manager-agent/" + VERSION,
+        }
         if token:
             headers["Authorization"] = "Bearer " + token
-        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        connection: Optional[http.client.HTTPConnection] = None
         try:
-            with self.opener.open(request, timeout=self.settings.api_timeout) as response:
-                body = response.read(2 * 1024 * 1024)
-                if not body:
-                    return {}
-                decoded = json.loads(body.decode("utf-8"))
-                if not isinstance(decoded, dict):
-                    raise ApiError("server response must be a JSON object")
-                return decoded
-        except urllib.error.HTTPError as exc:
-            # Never include the response body: a broken server may echo a token or key.
-            raise ApiError("server returned HTTP {} for {}".format(exc.code, path), exc.code)
-        except (urllib.error.URLError, TimeoutError, ssl.SSLError, ValueError) as exc:
+            if self.scheme == "https":
+                connection = http.client.HTTPSConnection(
+                    self.hostname,
+                    self.port,
+                    timeout=self.settings.api_timeout,
+                    context=self.ssl_context,
+                )
+            else:
+                connection = http.client.HTTPConnection(
+                    self.hostname,
+                    self.port,
+                    timeout=self.settings.api_timeout,
+                )
+            connection.request("POST", path, body=data, headers=headers)
+            response = connection.getresponse()
+            if not 200 <= response.status < 300:
+                # Never include the response body: a broken server may echo a token or key.
+                raise ApiError("server returned HTTP {} for {}".format(response.status, path), response.status)
+            body = response.read(2 * 1024 * 1024 + 1)
+            if len(body) > 2 * 1024 * 1024:
+                raise ApiError("server response is too large")
+            if not body:
+                return {}
+            decoded = json.loads(body.decode("utf-8"))
+            if not isinstance(decoded, dict):
+                raise ApiError("server response must be a JSON object")
+            return decoded
+        except ApiError:
+            raise
+        except (OSError, http.client.HTTPException, TimeoutError, ssl.SSLError, ValueError) as exc:
             raise ApiError("request to {} failed: {}".format(path, exc))
+        finally:
+            if connection is not None:
+                connection.close()
 
 
 class JobStore:

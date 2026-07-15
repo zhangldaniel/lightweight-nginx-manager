@@ -1,8 +1,10 @@
 import hashlib
+import http.server
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -825,6 +827,93 @@ class AgentTestCase(unittest.TestCase):
                 tls_skip_verify=True,
                 allow_insecure_http=True,
             ).validate()
+
+    def test_api_client_uses_python36_compatible_http_client_transport(self):
+        settings = agent.Settings(
+            "http://127.0.0.1:8443",
+            "transport-test",
+            allow_insecure_http=True,
+        )
+        response = mock.Mock()
+        response.status = 200
+        response.read.return_value = b'{"status":"pending"}'
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+
+        with mock.patch.object(agent.http.client, "HTTPConnection", return_value=connection) as constructor:
+            result = agent.ApiClient(settings).post(
+                "/api/v1/agent/enroll",
+                {"node_name": "transport-test"},
+            )
+
+        self.assertEqual({"status": "pending"}, result)
+        constructor.assert_called_once_with("127.0.0.1", 8443, timeout=30.0)
+        request_args = connection.request.call_args
+        self.assertEqual("POST", request_args[0][0])
+        self.assertEqual("/api/v1/agent/enroll", request_args[0][1])
+        self.assertEqual("close", request_args[1]["headers"]["Connection"])
+        connection.close.assert_called_once_with()
+
+    def test_api_client_completes_real_http_post(self):
+        received = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                received["path"] = self.path
+                received["payload"] = json.loads(self.rfile.read(length).decode("utf-8"))
+                body = b'{"status":"pending"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format_string, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.daemon = True
+        thread.start()
+        try:
+            settings = agent.Settings(
+                "http://127.0.0.1:{}".format(server.server_port),
+                "transport-test",
+                allow_insecure_http=True,
+                api_timeout=3,
+            )
+            result = agent.ApiClient(settings).post(
+                "/api/v1/agent/enroll",
+                {"node_name": "transport-test"},
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(3)
+
+        self.assertEqual({"status": "pending"}, result)
+        self.assertEqual("/api/v1/agent/enroll", received["path"])
+        self.assertEqual({"node_name": "transport-test"}, received["payload"])
+
+    def test_api_client_rejects_http_error_without_reading_response_body(self):
+        settings = agent.Settings(
+            "http://127.0.0.1:8443",
+            "transport-test",
+            allow_insecure_http=True,
+        )
+        response = mock.Mock()
+        response.status = 503
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+
+        with mock.patch.object(agent.http.client, "HTTPConnection", return_value=connection):
+            with self.assertRaises(agent.ApiError) as raised:
+                agent.ApiClient(settings).post("/api/v1/agent/enroll", {})
+
+        self.assertEqual(503, raised.exception.status_code)
+        response.read.assert_not_called()
+        connection.close.assert_called_once_with()
 
     def test_installer_accepts_custom_apps_nginx_layout(self):
         installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
