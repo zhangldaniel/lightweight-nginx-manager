@@ -1845,7 +1845,7 @@
             </div>
             <div class="form-field">
               <label for="change-note">本次变更说明</label>
-              <textarea class="textarea" id="change-note" placeholder="例如：将上传限制从 10m 调整为 50m" required></textarea>
+              <textarea class="textarea" id="change-note" placeholder="例如：将上传限制从 10m 调整为 50m"></textarea>
               <span class="field-help">保存草稿可以留空；校验和发布必须填写。</span>
             </div>
             <div class="form-field">
@@ -1853,7 +1853,7 @@
               <div class="chips" id="config-node-chips"></div>
             </div>
             <div class="diff-badge" id="config-diff-badge">与当前版本一致</div>
-            <div class="notice">发布时会在每个 Agent 节点执行 nginx -t，通过后才会原子替换并 reload。</div>
+            <div class="notice" id="config-editor-notice">发布时会在每个 Agent 节点执行 nginx -t，通过后才会原子替换并 reload。</div>
           </aside>
           <div>
             <label class="sr-only" for="config-editor">Nginx 配置内容</label>
@@ -1863,9 +1863,9 @@
       </div>
       <footer class="dialog-foot">
         <button class="button" type="button" data-close-dialog="config-dialog">取消</button>
-        <button class="button" type="submit" value="draft">保存草稿</button>
-        <button class="button" type="submit" value="validate">逐节点校验</button>
-        <button class="button primary" type="submit" value="publish">校验并发布</button>
+        <button class="button" id="config-draft-button" type="submit" value="draft">保存草稿</button>
+        <button class="button" id="config-validate-button" type="submit" value="validate">逐节点校验</button>
+        <button class="button primary" id="config-publish-button" type="submit" value="publish">校验并发布</button>
       </footer>
     </form>
   </dialog>
@@ -2759,7 +2759,7 @@
         if (Object.keys(site.nodeConfigs).length) {
           site.status = 'drift';
           site.changeNote = '扫描发现节点实际配置与平台配置不一致';
-        } else if (site.status === 'drift') {
+        } else if (site.status === 'drift' || site.status === 'failed') {
           site.status = 'published';
           site.changeNote = '重新扫描确认各节点配置一致';
         }
@@ -3572,6 +3572,7 @@
         document.getElementById('config-dialog-title').textContent = '编辑 ' + site.domain;
         document.getElementById('config-dialog-subtitle').textContent = '当前发布版本 v' + site.version + ' · ' + site.nodeIds.length + ' 个目标节点';
         document.getElementById('config-note').value = site.note || '';
+        document.getElementById('config-note').dataset.original = site.note || '';
         document.getElementById('change-note').value = site.status === 'draft' ? site.changeNote.replace(/^草稿：/, '') : '';
         document.getElementById('config-editor').value = site.config;
         document.getElementById('config-editor').dataset.original = site.config;
@@ -3587,7 +3588,25 @@
         var editor = document.getElementById('config-editor');
         var original = editor.dataset.original || '';
         var current = editor.value;
+        var site = getSite(editingSiteId);
+        var note = document.getElementById('config-note');
+        var noteChanged = note.value.trim() !== (note.dataset.original || '');
+        var metadataOnly = Boolean(current === original && noteChanged && site);
         var badge = document.getElementById('config-diff-badge');
+        var draftButton = document.getElementById('config-draft-button');
+        var validateButton = document.getElementById('config-validate-button');
+        var publishButton = document.getElementById('config-publish-button');
+        var notice = document.getElementById('config-editor-notice');
+        draftButton.hidden = metadataOnly;
+        validateButton.hidden = metadataOnly;
+        publishButton.textContent = metadataOnly ? '保存备注' : '校验并发布';
+        notice.textContent = metadataOnly
+          ? '仅修改配置备注：只保存到控制端，不下发 Agent，不执行 nginx -t 或 reload，配置版本保持不变。'
+          : '发布时会在每个 Agent 节点执行 nginx -t，通过后才会原子替换并 reload。';
+        if (metadataOnly) {
+          badge.textContent = '仅修改备注 · 不下发 Agent';
+          return;
+        }
         if (current === original) {
           badge.textContent = '与当前版本一致';
           return;
@@ -3605,14 +3624,35 @@
       function saveConfig(mode) {
         var site = getSite(editingSiteId);
         if (!site) return;
+        var editor = document.getElementById('config-editor');
+        var noteInput = document.getElementById('config-note');
+        var nextConfig = editor.value;
+        var nextNote = noteInput.value.trim();
+        var configChanged = nextConfig !== (editor.dataset.original || '');
+        var noteChanged = nextNote !== (noteInput.dataset.original || '');
+        var stableSite = !['draft', 'failed', 'publishing'].includes(site.status);
+        if (!configChanged && noteChanged) {
+          site.note = nextNote;
+          site.updatedAt = '刚刚';
+          saveState();
+          closeDialog('config-dialog');
+          selectedSiteId = site.id;
+          notify('配置备注已保存；未下发 Agent，配置版本仍为 v' + site.version);
+          render();
+          return;
+        }
+        if (!configChanged && !noteChanged && stableSite) {
+          notify('配置和备注都没有变化');
+          return;
+        }
         var changeNote = document.getElementById('change-note').value.trim();
         if (mode !== 'draft' && !changeNote) {
           document.getElementById('change-note').focus();
           notify('校验或发布前，请填写本次变更说明');
           return;
         }
-        site.config = document.getElementById('config-editor').value;
-        site.note = document.getElementById('config-note').value.trim();
+        site.config = nextConfig;
+        site.note = nextNote;
         site.changeNote = changeNote ? (mode === 'draft' ? '草稿：' + changeNote : changeNote) : '草稿未填写变更说明';
         site.status = 'draft';
         site.updatedAt = '刚刚';
@@ -4461,6 +4501,7 @@
       });
 
       document.getElementById('config-editor').addEventListener('input', updateDiffBadge);
+      document.getElementById('config-note').addEventListener('input', updateDiffBadge);
 
       document.getElementById('site-node-checks').addEventListener('change', function (event) {
         if (event.target && event.target.name === 'site-node') updateSiteCertificateOptions();
