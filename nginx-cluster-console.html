@@ -1109,6 +1109,7 @@
     }
 
     .dialog-shell {
+      position: relative;
       max-height: calc(100vh - 34px);
       display: grid;
       grid-template-rows: auto minmax(0, 1fr) auto;
@@ -1443,15 +1444,19 @@
 
     .toast {
       position: fixed;
+      top: auto;
+      left: auto;
       right: 20px;
-      bottom: 20px;
-      z-index: 100;
+      bottom: max(20px, env(safe-area-inset-bottom));
+      z-index: 10000;
       max-width: min(360px, calc(100vw - 32px));
+      margin: 0;
       padding: 11px 14px;
+      border: 0;
       border-radius: 10px;
       background: var(--ink);
       color: #fff;
-      box-shadow: var(--shadow);
+      box-shadow: 0 14px 40px rgba(7, 20, 39, .34);
       opacity: 0;
       transform: translateY(10px);
       pointer-events: none;
@@ -1459,8 +1464,18 @@
     }
 
     .toast.show {
+      display: block;
       opacity: 1;
       transform: translateY(0);
+    }
+
+    .toast.in-dialog {
+      display: block;
+      position: absolute;
+      right: 18px;
+      bottom: 82px;
+      z-index: 30;
+      max-width: calc(100% - 36px);
     }
 
     .sr-only {
@@ -3707,7 +3722,7 @@
     </form>
   </dialog>
 
-  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" popover="manual"></div>
 
   <script>
     (function () {
@@ -3737,6 +3752,7 @@
       var pendingDeleteSiteId = null;
       var activeRunTimer = null;
       var toastTimer = null;
+      var toastHideTimer = null;
 
       function clone(value) {
         return JSON.parse(JSON.stringify(value));
@@ -5007,11 +5023,47 @@
       function notify(message) {
         var toast = document.getElementById('toast');
         toast.textContent = message;
+        clearTimeout(toastHideTimer);
+        var promoted = false;
+        if (typeof toast.showPopover === 'function') {
+          try {
+            if (toast.matches(':popover-open')) toast.hidePopover();
+            toast.showPopover();
+            promoted = toast.matches(':popover-open');
+          } catch (_error) {
+            promoted = false;
+          }
+        }
+        if (!promoted) {
+          var dialogs = document.querySelectorAll('dialog[open]');
+          var activeDialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+          var shell = activeDialog && activeDialog.querySelector('.dialog-shell');
+          (shell || document.body).appendChild(toast);
+          toast.classList.toggle('in-dialog', Boolean(shell));
+        }
         toast.classList.add('show');
         clearTimeout(toastTimer);
         toastTimer = setTimeout(function () {
           toast.classList.remove('show');
+          toastHideTimer = setTimeout(function () {
+            if (typeof toast.hidePopover === 'function') {
+              try {
+                if (toast.matches(':popover-open')) toast.hidePopover();
+              } catch (_error) {}
+            }
+            if (toast.classList.contains('in-dialog')) {
+              document.body.appendChild(toast);
+              toast.classList.remove('in-dialog');
+            }
+          }, 220);
         }, 2300);
+      }
+
+      function restoreDialogToast(dialog) {
+        var toast = document.getElementById('toast');
+        if (!toast || !dialog || !dialog.contains(toast)) return;
+        document.body.appendChild(toast);
+        toast.classList.remove('in-dialog');
       }
 
       function openDialog(id) {
@@ -6550,6 +6602,10 @@
         notify(node.name + '：' + meta[0] + '成功');
         showHistoricalRun(run);
       }
+
+      document.addEventListener('close', function (event) {
+        if (event.target && event.target.tagName === 'DIALOG') restoreDialogToast(event.target);
+      }, true);
 
       document.addEventListener('click', function (event) {
         var nav = event.target.closest('[data-nav]');

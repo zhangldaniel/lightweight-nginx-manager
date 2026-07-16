@@ -11,6 +11,10 @@ class ConsoleTestCase(unittest.TestCase):
         script = r"""
 const fs = require("fs");
 const html = fs.readFileSync(process.argv[1], "utf8");
+if (!html.includes('id="toast" role="status" aria-live="polite" popover="manual"')
+    || !html.includes("toast.showPopover()")) {
+  throw new Error("toast is not promoted into the browser top layer");
+}
 function take(startName, endName) {
   const start = html.indexOf("      " + startName);
   const end = html.indexOf("\n      " + endName, start);
