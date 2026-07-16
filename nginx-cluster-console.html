@@ -3760,6 +3760,7 @@
       var remoteConnected = false;
       var remoteRevision = 0;
       var remoteSaveTimer = null;
+      var remoteSaveInFlight = Promise.resolve(true);
       var remoteRefreshTimer = null;
       var csrfToken = '';
       var currentUsername = '';
@@ -4086,6 +4087,17 @@
         return changed;
       }
 
+      function normalizeNoopDraftStates(sites) {
+        var changed = false;
+        (sites || []).forEach(function (site) {
+          if (site.status === 'draft' && Number(site.version || 0) > 0 && !site.pendingRemote && !siteHasUnpublishedChanges(site)) {
+            site.status = 'published';
+            changed = true;
+          }
+        });
+        return changed;
+      }
+
       function applyRemoteUiStateDocument(uiDocument) {
         var remoteState = (uiDocument && uiDocument.state) || {};
         remoteRevision = Number((uiDocument && uiDocument.revision) || 0);
@@ -4167,27 +4179,113 @@
         remoteSaveTimer = setTimeout(saveRemoteState, 350);
       }
 
-      async function saveRemoteState() {
-        if (!remoteConnected || !canOperate()) return;
-        try {
-          var response = await apiRequest('/api/v1/admin/ui-state', {
-            method: 'PUT',
-            body: { revision: remoteRevision, state: serializableUiState() }
-          });
-          remoteRevision = response.revision;
-        } catch (error) {
-          if (error.status === 409 && error.body && error.body.state) {
-            var normalizedDeploymentState = applyRemoteUiStateDocument(error.body);
-            selectedSiteId = getSite(selectedSiteId) ? selectedSiteId : (state.sites[0] ? state.sites[0].id : null);
-            localStorage.setItem(storageKey, JSON.stringify(state));
-            if (normalizedDeploymentState && canOperate()) scheduleRemoteSave();
-            updateChrome();
-            render();
-            notify('控制端数据已被其他页面修改，已加载最新状态；本页旧数据没有覆盖控制端');
+      function capturePendingRemoteState() {
+        return {
+          sites: state.sites.filter(function (site) { return site.pendingRemote; }).map(clone),
+          certificates: state.certificates.filter(function (certificate) { return certificate.pendingRemote; }).map(clone)
+        };
+      }
+
+      function pendingJobKey(pending) {
+        return (pending && Array.isArray(pending.jobs) ? pending.jobs : [])
+          .map(function (item) { return item.id; })
+          .filter(Boolean)
+          .sort()
+          .join(',');
+      }
+
+      function pendingCandidateMatchesSite(site, pending) {
+        return (pending.jobs || []).every(function (item) {
+          if (!item.candidateHash) return true;
+          var node = getNode(item.nodeId);
+          return Boolean(node) && sha256Hex(managedConfigContent(site, node)) === item.candidateHash;
+        });
+      }
+
+      function restorePendingRemoteState(snapshot) {
+        var changed = false;
+        var conflicts = 0;
+        (snapshot.sites || []).forEach(function (localSite) {
+          var remoteSite = getSite(localSite.id);
+          if (!remoteSite) {
+            state.sites.push(localSite);
+            changed = true;
             return;
           }
-          notify('保存到控制端失败：' + error.message);
-        }
+          if (remoteSite.pendingRemote) {
+            if (pendingJobKey(remoteSite.pendingRemote) !== pendingJobKey(localSite.pendingRemote)) conflicts += 1;
+            return;
+          }
+          var pending = clone(localSite.pendingRemote);
+          var candidateMatches = pendingCandidateMatchesSite(remoteSite, pending);
+          if (pending.operation === 'validate') {
+            pending.baseStatus = validationBaseStatus(remoteSite);
+            remoteSite.status = pending.baseStatus;
+          } else if (pending.publish) {
+            remoteSite.status = 'publishing';
+          }
+          if (!candidateMatches) {
+            pending.submissionFailure = {
+              summary: '任务已提交，但配置同时被其他页面修改；已保留节点结果，版本不会自动增加，请检查后重试',
+              items: [],
+              jobIds: (pending.jobs || []).map(function (item) { return item.id; }),
+              failedAt: new Date().toISOString(),
+              operation: pending.operation || (pending.publish ? 'publish' : 'validate')
+            };
+            conflicts += 1;
+          }
+          remoteSite.pendingRemote = pending;
+          changed = true;
+        });
+        (snapshot.certificates || []).forEach(function (localCertificate) {
+          var remoteCertificate = getCert(localCertificate.id);
+          if (!remoteCertificate) {
+            state.certificates.push(localCertificate);
+            changed = true;
+            return;
+          }
+          if (remoteCertificate.pendingRemote) {
+            if (pendingJobKey(remoteCertificate.pendingRemote) !== pendingJobKey(localCertificate.pendingRemote)) conflicts += 1;
+            return;
+          }
+          remoteCertificate.pendingRemote = clone(localCertificate.pendingRemote);
+          changed = true;
+        });
+        return { changed: changed, conflicts: conflicts };
+      }
+
+      function saveRemoteState() {
+        var performSave = async function () {
+          if (!remoteConnected || !canOperate()) return false;
+          try {
+            var response = await apiRequest('/api/v1/admin/ui-state', {
+              method: 'PUT',
+              body: { revision: remoteRevision, state: serializableUiState() }
+            });
+            remoteRevision = response.revision;
+            return true;
+          } catch (error) {
+            if (error.status === 409 && error.body && error.body.state) {
+              var pendingSnapshot = capturePendingRemoteState();
+              var normalizedDeploymentState = applyRemoteUiStateDocument(error.body);
+              var restoredPendingState = restorePendingRemoteState(pendingSnapshot);
+              normalizedDeploymentState = normalizeNoopDraftStates(state.sites) || normalizedDeploymentState;
+              selectedSiteId = getSite(selectedSiteId) ? selectedSiteId : (state.sites[0] ? state.sites[0].id : null);
+              localStorage.setItem(storageKey, JSON.stringify(state));
+              if ((normalizedDeploymentState || restoredPendingState.changed) && canOperate()) scheduleRemoteSave();
+              updateChrome();
+              render();
+              notify(restoredPendingState.conflicts
+                ? '控制端数据已被其他页面修改；已保留已提交任务，冲突结果不会增加版本'
+                : '控制端数据已被其他页面修改，已加载最新状态；本页旧数据没有覆盖控制端');
+              return false;
+            }
+            notify('保存到控制端失败：' + error.message);
+            return false;
+          }
+        };
+        remoteSaveInFlight = remoteSaveInFlight.then(performSave, performSave);
+        return remoteSaveInFlight;
       }
 
       function relativeTime(value) {
@@ -4354,7 +4452,10 @@
           summary: summary || '节点任务未成功完成',
           items: items,
           jobIds: items.map(function (item) { return item.jobId; }),
-          failedAt: items[0] && items[0].completedAt ? items[0].completedAt : new Date().toISOString()
+          failedAt: items[0] && items[0].completedAt ? items[0].completedAt : new Date().toISOString(),
+          operation: pending.operation || (pending.publish
+            ? 'publish'
+            : (!pending.deleteConfig && !pending.transfer ? 'validate' : ''))
         };
       }
 
@@ -4381,7 +4482,8 @@
           summary: (operation || '发布') + '任务提交未完成：' + reason,
           items: items,
           jobIds: items.map(function (item) { return item.jobId; }),
-          failedAt: new Date().toISOString()
+          failedAt: new Date().toISOString(),
+          operation: operation === '校验' ? 'validate' : 'publish'
         };
       }
 
@@ -4436,9 +4538,22 @@
           if (related.length !== pending.jobs.length) return;
           var terminal = related.every(function (job) { return ['succeeded', 'failed', 'expired'].includes(job.status); });
           if (!terminal) return;
-          var failed = related.some(function (job) { return job.status !== 'succeeded'; });
-          if (failed) site.lastFailure = buildSiteFailure(related, pending);
+          var failed = related.some(function (job) { return job.status !== 'succeeded'; }) || Boolean(pending.submissionFailure);
+          if (failed) site.lastFailure = pending.submissionFailure || buildSiteFailure(related, pending);
+          else if (pending.operation === 'validate' && pending.baseFailure) site.lastFailure = pending.baseFailure;
           else delete site.lastFailure;
+          if (pending.publish) {
+            site.nodeHashes = site.nodeHashes || {};
+            site.nodeConfigPaths = site.nodeConfigPaths || {};
+            site.nodeConfigs = site.nodeConfigs || {};
+            pending.jobs.forEach(function (item) {
+              var job = byId[item.id];
+              if (!job || job.status !== 'succeeded') return;
+              if (job.result && job.result.config_hash) site.nodeHashes[item.nodeId] = job.result.config_hash;
+              if (item.path) site.nodeConfigPaths[item.nodeId] = item.path;
+              delete site.nodeConfigs[item.nodeId];
+            });
+          }
           if (pending.deleteConfig) {
             site.nodeHashes = site.nodeHashes || {};
             site.nodeConfigPaths = site.nodeConfigPaths || {};
@@ -4504,18 +4619,11 @@
               });
             }
             site.status = failed ? 'failed' : 'published';
+          } else if (pending.operation === 'validate' || (!pending.publish && !pending.deleteConfig && !pending.transfer)) {
+            site.status = pending.baseStatus || validationBaseStatus(site);
           } else if (failed) {
             site.status = 'failed';
           } else if (pending.publish) {
-            site.nodeHashes = site.nodeHashes || {};
-            site.nodeConfigPaths = site.nodeConfigPaths || {};
-            site.nodeConfigs = site.nodeConfigs || {};
-            pending.jobs.forEach(function (item) {
-              var job = byId[item.id];
-              if (job && job.result && job.result.config_hash) site.nodeHashes[item.nodeId] = job.result.config_hash;
-              if (job && job.status === 'succeeded' && item.path) site.nodeConfigPaths[item.nodeId] = item.path;
-              if (job && job.status === 'succeeded') delete site.nodeConfigs[item.nodeId];
-            });
             site.version += 1;
             site.status = 'published';
             site.updatedAt = '刚刚';
@@ -4879,6 +4987,7 @@
         pendingEnrollments = (responses[2] && responses[2].items) || [];
         var rawJobs = responses[1].items || [];
         state.nodes = (responses[0].items || []).map(mapRemoteNode);
+        normalizedDeploymentState = normalizeNoopDraftStates(state.sites) || normalizedDeploymentState;
         if (siteNodeFilter !== 'all' && !getNode(siteNodeFilter)) siteNodeFilter = 'all';
         processConfigInventoryJobs(rawJobs);
         processCertificateInventoryJobs(rawJobs);
@@ -5036,9 +5145,37 @@
           || nginxDirectiveValues(content, 'listen').some(function (value) { return /\bssl\b/i.test(value); });
       }
 
+      function siteHasUnpublishedChanges(site) {
+        if (!site || site.status !== 'draft') return false;
+        var nodeIds = Array.isArray(site.nodeIds) ? site.nodeIds : [];
+        if (Number(site.version || 0) < 1 || !nodeIds.length) return true;
+        return nodeIds.some(function (nodeId) {
+          var node = getNode(nodeId);
+          var knownHash = site.nodeHashes && site.nodeHashes[nodeId];
+          if (!node || !knownHash) return true;
+          return sha256Hex(managedConfigContent(site, node)) !== String(knownHash).toLowerCase();
+        });
+      }
+
+      function validationBaseStatus(site) {
+        if (!site) return 'published';
+        return site.status === 'draft' && !siteHasUnpublishedChanges(site) ? 'published' : site.status;
+      }
+
+      function hasValidationFailure(site) {
+        return Boolean(site && site.lastFailure && site.lastFailure.operation === 'validate');
+      }
+
+      function hasValidationPending(site) {
+        var pending = site && site.pendingRemote;
+        return Boolean(pending && (pending.operation === 'validate' || (!pending.publish && !pending.deleteConfig && !pending.transfer)));
+      }
+
       function siteStatus(site) {
+        if (hasValidationPending(site)) return { label: '校验中', className: 'draft' };
+        if (hasValidationFailure(site)) return { label: '校验失败', className: 'danger' };
         if (site.status === 'publishing') return { label: '发布中', className: 'draft' };
-        if (site.status === 'draft') return { label: '有草稿', className: 'draft' };
+        if (site.status === 'draft' && siteHasUnpublishedChanges(site)) return { label: '有草稿', className: 'draft' };
         if (site.status === 'unassigned') return { label: '未部署', className: 'warn' };
         if (site.status === 'drift') return { label: '配置漂移', className: 'warn' };
         if (site.status === 'failed') return { label: '发布失败', className: 'danger' };
@@ -5046,7 +5183,7 @@
       }
 
       function siteVersionLabel(site) {
-        return 'v' + Number(site.version || 0) + (site.status === 'draft' ? ' → v' + (Number(site.version || 0) + 1) : '');
+        return 'v' + Number(site.version || 0) + (site.status === 'draft' && siteHasUnpublishedChanges(site) ? ' → v' + (Number(site.version || 0) + 1) : '');
       }
 
       function runStatus(run) {
@@ -5150,7 +5287,7 @@
 
       function renderSummary() {
         var expiring = state.certificates.filter(function (cert) { return cert.days <= 30; }).length;
-        var drift = state.sites.filter(function (site) { return site.status === 'drift' || site.status === 'failed'; }).length;
+        var drift = state.sites.filter(function (site) { return site.status === 'drift' || site.status === 'failed' || hasValidationFailure(site); }).length;
         var deployedSites = state.sites.filter(function (site) { return (site.nodeIds || []).length > 0; }).length;
         return [
           '<div class="summary-grid">',
@@ -5167,7 +5304,7 @@
         return state.sites.filter(function (site) {
           var matchesQuery = !query || [site.domain, site.note, site.changeNote, site.environment].join(' ').toLowerCase().indexOf(query) >= 0;
           var matchesFilter = siteFilter === 'all' ||
-            (siteFilter === 'attention' && (site.status === 'drift' || site.status === 'failed')) ||
+            (siteFilter === 'attention' && (site.status === 'drift' || site.status === 'failed' || hasValidationFailure(site))) ||
             site.status === siteFilter;
           var matchesNode = siteNodeFilter === 'all' || (site.nodeIds || []).includes(siteNodeFilter);
           return matchesQuery && matchesFilter && matchesNode;
@@ -5236,7 +5373,8 @@
       }
 
       function renderSiteFailure(site) {
-        if (!site || site.status !== 'failed') return '';
+        var validationFailure = hasValidationFailure(site);
+        if (!site || (site.status !== 'failed' && !validationFailure)) return '';
         var failure = site.lastFailure && typeof site.lastFailure === 'object' ? site.lastFailure : null;
         var items = failure && Array.isArray(failure.items) ? failure.items : [];
         var summary = failure && failure.summary
@@ -5263,7 +5401,7 @@
           '<div class="failure-notice" role="alert">',
           '  <span class="failure-mark" aria-hidden="true">!</span>',
           '  <div class="failure-copy">',
-          '    <div class="failure-title-row"><strong>发布未完成</strong><span class="status-pill danger">需处理</span></div>',
+          '    <div class="failure-title-row"><strong>' + (validationFailure ? '校验未通过' : '发布未完成') + '</strong><span class="status-pill danger">需处理</span></div>',
           '    <div class="failure-reason">' + escapeHtml(summary) + '</div>',
           '    <div class="failure-meta">' + escapeHtml(meta.join(' · ')) + '</div>',
           '    <button class="failure-link" type="button" data-action="open-site-failure" data-site-id="' + escapeHtml(site.id) + '">查看失败记录</button>',
@@ -5328,12 +5466,12 @@
           failureNotice,
           '      <button class="button" type="button" data-action="edit-config" data-site-id="' + escapeHtml(site.id) + '">编辑配置</button>',
           '      <button class="button" type="button" data-action="transfer-config" data-site-id="' + escapeHtml(site.id) + '">复制到其他节点</button>',
-          '      <button class="button" type="button" data-action="validate-site" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length ? '' : ' disabled') + '>逐节点校验</button>',
+          '      <button class="button" type="button" data-action="validate-site" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length && !site.pendingRemote ? '' : ' disabled') + '>逐节点校验</button>',
           previewHasDrift ? '<button class="button" type="button" data-action="import-drift" data-site-id="' + escapeHtml(site.id) + '">导入节点配置</button>' : '<button class="button" type="button" data-action="view-runs" data-site-id="' + escapeHtml(site.id) + '">查看记录</button>',
           site.nodeIds.length
             ? '      <button class="button subtle-danger" type="button" data-action="delete-config" data-site-id="' + escapeHtml(site.id) + '">从节点移除配置</button>'
             : '      <button class="button subtle-danger" type="button" data-action="delete-site-record" data-site-id="' + escapeHtml(site.id) + '">删除站点记录</button>',
-          '      <button class="button primary" type="button" data-action="deploy-site" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length ? '' : ' disabled') + '>发布并 reload</button>',
+          '      <button class="button primary" type="button" data-action="deploy-site" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length && !site.pendingRemote ? '' : ' disabled') + '>发布并 reload</button>',
           '    </div>',
           '  </div>',
           '  <div class="detail-body">',
@@ -6199,6 +6337,7 @@
         } catch (error) {
           if (error.status === 409 && error.body && error.body.state) {
             var normalizedDeploymentState = applyRemoteUiStateDocument(error.body);
+            normalizedDeploymentState = normalizeNoopDraftStates(state.sites) || normalizedDeploymentState;
             selectedSiteId = getSite(selectedSiteId) ? selectedSiteId : (state.sites[0] ? state.sites[0].id : null);
             pendingRecordDeleteSiteId = null;
             closeDialog('site-record-delete-dialog');
@@ -6371,10 +6510,48 @@
         return content;
       }
 
+      function configRunFingerprint(site, nodeIds) {
+        return sha256Hex(JSON.stringify((nodeIds || []).slice().sort().map(function (nodeId) {
+          var node = getNode(nodeId);
+          return {
+            nodeId: nodeId,
+            path: node ? managedConfigPath(site, node) : '',
+            knownHash: site.nodeHashes && site.nodeHashes[nodeId] ? String(site.nodeHashes[nodeId]).toLowerCase() : '',
+            candidateHash: node ? sha256Hex(managedConfigContent(site, node)) : ''
+          };
+        })));
+      }
+
       async function startRemoteConfigRun(site, willPublish, nodeIds) {
-        var targets = (nodeIds || site.nodeIds).map(getNode).filter(Boolean);
+        if (site.pendingRemote) {
+          notify('该站点已有任务执行中，请等待完成后再操作');
+          return;
+        }
+        var siteId = site.id;
+        var requestedNodeIds = (nodeIds || site.nodeIds).slice();
+        var requestedFingerprint = configRunFingerprint(site, requestedNodeIds);
+        clearTimeout(remoteSaveTimer);
+        var stateSaved = await saveRemoteState();
+        var currentSite = getSite(siteId);
+        if (!stateSaved || !currentSite || configRunFingerprint(currentSite, requestedNodeIds) !== requestedFingerprint) {
+          notify('任务未提交：控制端状态刚刚发生变化，请确认当前配置后重试');
+          render();
+          return;
+        }
+        site = currentSite;
+        if (site.pendingRemote) {
+          notify('该站点已有任务执行中，请等待完成后再操作');
+          return;
+        }
+        var targets = requestedNodeIds.map(getNode).filter(Boolean);
         var queued = [];
         var unchangedNodes = [];
+        var operation = willPublish ? 'publish' : 'validate';
+        var baseStatus = willPublish ? site.status : validationBaseStatus(site);
+        var baseFailure = !willPublish && site.lastFailure && site.lastFailure.operation !== 'validate'
+          ? clone(site.lastFailure)
+          : null;
+        if (!willPublish) site.status = baseStatus;
         try {
           for (var index = 0; index < targets.length; index += 1) {
             var node = targets[index];
@@ -6406,7 +6583,7 @@
               }
             });
             (response.jobs || []).forEach(function (job) {
-              queued.push({ id: job.id, nodeId: job.node_id, path: targetPath });
+              queued.push({ id: job.id, nodeId: job.node_id, path: targetPath, candidateHash: candidateHash });
             });
           }
           if (willPublish && !queued.length && unchangedNodes.length === targets.length) {
@@ -6420,8 +6597,14 @@
           }
           if (!queued.length) throw new Error('控制端没有创建任何目标任务');
           delete site.lastFailure;
-          site.pendingRemote = { jobs: queued, publish: Boolean(willPublish) };
-          site.status = willPublish ? 'publishing' : 'draft';
+          site.pendingRemote = {
+            jobs: queued,
+            publish: Boolean(willPublish),
+            operation: operation,
+            baseStatus: baseStatus,
+            baseFailure: baseFailure
+          };
+          site.status = willPublish ? 'publishing' : baseStatus;
           saveState();
           notify(willPublish
             ? (unchangedNodes.length
@@ -6430,11 +6613,19 @@
             : '已提交真实节点校验任务');
           setTimeout(function () { refreshRemoteData(false).catch(function () {}); }, 500);
         } catch (error) {
+          var submissionFailure = buildSubmissionFailure(queued, error, willPublish ? '发布' : '校验');
           if (queued.length) {
-            site.pendingRemote = { jobs: queued, publish: Boolean(willPublish) };
+            site.pendingRemote = {
+              jobs: queued,
+              publish: Boolean(willPublish),
+              operation: operation,
+              baseStatus: baseStatus,
+              baseFailure: baseFailure,
+              submissionFailure: submissionFailure
+            };
           }
-          site.lastFailure = buildSubmissionFailure(queued, error, willPublish ? '发布' : '校验');
-          site.status = 'failed';
+          site.lastFailure = submissionFailure;
+          site.status = willPublish ? 'failed' : baseStatus;
           saveState();
           notify('任务提交失败：' + error.message);
           render();
@@ -6623,6 +6814,10 @@
 
       function startRun(site, type, willPublish, nodeIds) {
         if (normalizeGuidedSiteConfig(site)) saveState();
+        if (!willPublish && site.status !== validationBaseStatus(site)) {
+          site.status = validationBaseStatus(site);
+          saveState();
+        }
         if (remoteConnected) {
           startRemoteConfigRun(site, willPublish, nodeIds);
           return;

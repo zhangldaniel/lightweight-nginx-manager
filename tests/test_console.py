@@ -27,16 +27,19 @@ function take(startName, endName) {
   if (start < 0 || end < 0) throw new Error("cannot extract " + startName);
   return html.slice(start, end);
 }
+eval(take("function sha256Hex", "function roleLabel"));
 eval(take("function safeResourceName", "function managedConfigFilename"));
 eval(take("function managedCertificateRoot", "function certificateTargetPaths"));
 eval(take("function certificateTargetPaths", "function renderCertificateNodeChoices"));
 eval(take("function certificateCoversDomain", "function getSite"));
 eval(take("function normalizeSiteDeploymentStates", "function loadState"));
-eval(take("function siteStatus", "function runStatus"));
+eval(take("function capturePendingRemoteState", "function relativeTime"));
+eval(take("function siteHasUnpublishedChanges", "function runStatus"));
 eval(take("function normalizeProxyTarget", "function defaultConfig"));
 eval(take("function defaultConfig", "function configCertificateState"));
 eval(take("function rewriteConfigCertificatePaths", "function openConfigEditor"));
 eval(take("function canDeleteSiteRecord", "async function deletePlatformSiteRecord"));
+eval(take("function applyRemoteJobOutcomes", "function stripNginxComments"));
 eval(take("function managedConfigContent", "async function startRemoteConfigRun"));
 
 const node = { id: "node-1", managedCertificateRoot: "/apps/nginx/cert" };
@@ -61,6 +64,68 @@ const correctWildcard = {
 const state = { nodes: [node], sites: [], certificates: [] };
 let activeCertificate = wrongWildcard;
 function getCert() { return activeCertificate; }
+function getNode(nodeId) { return state.nodes.find((item) => item.id === nodeId); }
+function getSite(siteId) { return state.sites.find((item) => item.id === siteId); }
+function clone(value) { return JSON.parse(JSON.stringify(value)); }
+function buildSiteFailure(jobs, pending) {
+  return { summary: "validation failed", items: [], operation: pending.operation || "" };
+}
+function saveState() {}
+function notify() {}
+
+const staleValidationDraft = {
+  id: "site-stale-validation-draft",
+  version: 1,
+  status: "draft",
+  nodeIds: ["node-1"],
+  nodeHashes: {},
+  configMode: "conf",
+  config: "server { listen 80; }",
+  certificateId: ""
+};
+activeCertificate = null;
+staleValidationDraft.nodeHashes["node-1"] = sha256Hex(staleValidationDraft.config);
+if (!normalizeNoopDraftStates([staleValidationDraft]) || staleValidationDraft.status !== "published") {
+  throw new Error("a legacy no-op validation draft was not restored to published");
+}
+const realChangedDraft = Object.assign({}, staleValidationDraft, {
+  id: "site-real-draft",
+  status: "draft",
+  config: "server { listen 8080; }"
+});
+if (normalizeNoopDraftStates([realChangedDraft]) || realChangedDraft.status !== "draft") {
+  throw new Error("a real config draft was incorrectly normalized to published");
+}
+activeCertificate = wrongWildcard;
+
+const remoteConflictSite = {
+  id: "site-conflict",
+  version: 1,
+  status: "published",
+  nodeIds: ["node-1"],
+  nodeHashes: { "node-1": "old-hash" },
+  configMode: "conf",
+  config: "server { listen 80; }",
+  certificateId: ""
+};
+const conflictingPending = {
+  operation: "validate",
+  publish: false,
+  baseStatus: "published",
+  jobs: [{ id: "conflict-validation", nodeId: "node-1", candidateHash: sha256Hex("server { listen 8080; }") }]
+};
+state.sites = [remoteConflictSite];
+state.certificates = [];
+const restoredConflict = restorePendingRemoteState({
+  sites: [Object.assign({}, remoteConflictSite, { pendingRemote: conflictingPending })],
+  certificates: []
+});
+if (!restoredConflict.changed || !restoredConflict.conflicts || !remoteConflictSite.pendingRemote) {
+  throw new Error("a UI-state conflict discarded an already submitted validation job");
+}
+if (remoteConflictSite.status !== "published" || !remoteConflictSite.pendingRemote.submissionFailure) {
+  throw new Error("a conflicting validation job changed lifecycle state or lost its conflict marker");
+}
 
 const legacyRemovedSite = {
   version: 1,
@@ -109,6 +174,112 @@ if (state.sites.some((site) => site.id === unassignedSite.id)
 }
 if (removeSiteRecordFromState(deployedSite)) {
   throw new Error("a deployed site record was deleted before its node config");
+}
+
+const publishedValidation = {
+  id: "site-validation-published",
+  version: 1,
+  status: "published",
+  nodeIds: ["node-1"],
+  pendingRemote: {
+    jobs: [{ id: "validate-success", nodeId: "node-1" }],
+    publish: false,
+    operation: "validate",
+    baseStatus: "published"
+  }
+};
+state.sites = [publishedValidation];
+state.certificates = [];
+if (siteStatus(publishedValidation).label !== "校验中" || siteVersionLabel(publishedValidation) !== "v1") {
+  throw new Error("a read-only validation looks like a v2 draft while it is running");
+}
+applyRemoteJobOutcomes([{ id: "validate-success", status: "succeeded" }]);
+if (publishedValidation.status !== "published" || publishedValidation.version !== 1 || publishedValidation.pendingRemote) {
+  throw new Error("a successful read-only validation changed the published lifecycle or version");
+}
+
+const failedValidation = {
+  id: "site-validation-failed",
+  version: 1,
+  status: "published",
+  nodeIds: ["node-1"],
+  pendingRemote: {
+    jobs: [{ id: "validate-failed", nodeId: "node-1" }],
+    publish: false,
+    operation: "validate",
+    baseStatus: "published"
+  }
+};
+state.sites = [failedValidation];
+applyRemoteJobOutcomes([{ id: "validate-failed", status: "failed" }]);
+if (failedValidation.status !== "published"
+    || failedValidation.version !== 1
+    || siteStatus(failedValidation).label !== "校验失败") {
+  throw new Error("a failed read-only validation replaced the published lifecycle state");
+}
+
+const draftValidation = {
+  id: "site-validation-draft",
+  version: 1,
+  status: "draft",
+  nodeIds: ["node-1"],
+  pendingRemote: {
+    jobs: [{ id: "validate-draft", nodeId: "node-1" }],
+    publish: false,
+    operation: "validate",
+    baseStatus: "draft"
+  }
+};
+state.sites = [draftValidation];
+applyRemoteJobOutcomes([{ id: "validate-draft", status: "succeeded" }]);
+if (draftValidation.status !== "draft" || draftValidation.version !== 1) {
+  throw new Error("validating a real draft discarded or published the draft");
+}
+
+const successfulPublish = {
+  id: "site-publish",
+  version: 1,
+  status: "publishing",
+  nodeIds: ["node-1"],
+  pendingRemote: {
+    jobs: [{ id: "publish-success", nodeId: "node-1", path: "/etc/nginx/site.conf" }],
+    publish: true,
+    operation: "publish",
+    baseStatus: "draft"
+  }
+};
+state.sites = [successfulPublish];
+applyRemoteJobOutcomes([{ id: "publish-success", status: "succeeded", result: { config_hash: "abc" } }]);
+if (successfulPublish.status !== "published" || successfulPublish.version !== 2) {
+  throw new Error("a successful real publish no longer increments the version exactly once");
+}
+
+const partialPublish = {
+  id: "site-partial-publish",
+  version: 3,
+  status: "publishing",
+  nodeIds: ["node-1", "node-2"],
+  nodeHashes: { "node-1": "old-1", "node-2": "old-2" },
+  pendingRemote: {
+    jobs: [
+      { id: "publish-partial-success", nodeId: "node-1", path: "/etc/nginx/site.conf" },
+      { id: "publish-partial-failed", nodeId: "node-2", path: "/etc/nginx/site.conf" }
+    ],
+    publish: true,
+    operation: "publish",
+    baseStatus: "draft"
+  }
+};
+state.sites = [partialPublish];
+applyRemoteJobOutcomes([
+  { id: "publish-partial-success", status: "succeeded", result: { config_hash: "new-1" } },
+  { id: "publish-partial-failed", status: "failed", result: {} }
+]);
+if (partialPublish.version !== 3 || partialPublish.status !== "failed") {
+  throw new Error("a partial publish failure incorrectly incremented the version");
+}
+if (partialPublish.nodeHashes["node-1"] !== "new-1" || partialPublish.nodeHashes["node-2"] !== "old-2") {
+  throw new Error("a partial publish failure lost the successful node hash needed for retry");
 }
 
 if (normalizeProxyTarget("10.165.0.29:8080") !== "http://10.165.0.29:8080") {
