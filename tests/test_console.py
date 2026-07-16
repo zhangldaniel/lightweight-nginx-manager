@@ -15,6 +15,12 @@ if (!html.includes('id="toast" role="status" aria-live="polite" popover="manual"
     || !html.includes("toast.showPopover()")) {
   throw new Error("toast is not promoted into the browser top layer");
 }
+if ((html.match(/'delete-config', 'delete-site-record'/g) || []).length < 2) {
+  throw new Error("platform record deletion is not protected by both action and visibility permissions");
+}
+if ((html.match(/applyRemoteUiStateDocument\(error\.body\)/g) || []).length < 2) {
+  throw new Error("revision conflicts do not consistently reload the authoritative remote UI state");
+}
 function take(startName, endName) {
   const start = html.indexOf("      " + startName);
   const end = html.indexOf("\n      " + endName, start);
@@ -25,9 +31,12 @@ eval(take("function safeResourceName", "function managedConfigFilename"));
 eval(take("function managedCertificateRoot", "function certificateTargetPaths"));
 eval(take("function certificateTargetPaths", "function renderCertificateNodeChoices"));
 eval(take("function certificateCoversDomain", "function getSite"));
+eval(take("function normalizeSiteDeploymentStates", "function loadState"));
+eval(take("function siteStatus", "function runStatus"));
 eval(take("function normalizeProxyTarget", "function defaultConfig"));
 eval(take("function defaultConfig", "function configCertificateState"));
 eval(take("function rewriteConfigCertificatePaths", "function openConfigEditor"));
+eval(take("function canDeleteSiteRecord", "async function deletePlatformSiteRecord"));
 eval(take("function managedConfigContent", "async function startRemoteConfigRun"));
 
 const node = { id: "node-1", managedCertificateRoot: "/apps/nginx/cert" };
@@ -49,9 +58,58 @@ const correctWildcard = {
     }
   }
 };
-const state = { nodes: [node] };
+const state = { nodes: [node], sites: [], certificates: [] };
 let activeCertificate = wrongWildcard;
 function getCert() { return activeCertificate; }
+
+const legacyRemovedSite = {
+  version: 1,
+  status: "draft",
+  nodeIds: [],
+  changeNote: "从节点移除配置：edge-a-01"
+};
+if (!normalizeSiteDeploymentStates([legacyRemovedSite])
+    || legacyRemovedSite.status !== "unassigned"
+    || legacyRemovedSite.version !== 1) {
+  throw new Error("a retained site from the old delete flow was not migrated without a version bump");
+}
+
+const unassignedSite = {
+  id: "site-unassigned",
+  domain: "old.example.com",
+  version: 1,
+  status: "unassigned",
+  nodeIds: [],
+  nodeHashes: {},
+  nodeConfigPaths: {},
+  nodeConfigs: {}
+};
+const deployedSite = {
+  id: "site-deployed",
+  domain: "live.example.com",
+  version: 1,
+  status: "published",
+  nodeIds: ["node-1"]
+};
+if (siteStatus(unassignedSite).label !== "未部署" || siteVersionLabel(unassignedSite) !== "v1") {
+  throw new Error("an unassigned site still looks like a v2 draft");
+}
+if (siteVersionLabel({ version: 1, status: "draft" }) !== "v1 → v2") {
+  throw new Error("a real draft lost its candidate-version label");
+}
+state.sites = [unassignedSite, deployedSite];
+state.certificates = [{ id: "cert-1", siteIds: [unassignedSite.id, deployedSite.id], nodeIds: ["node-1"] }];
+if (!removeSiteRecordFromState(unassignedSite)) {
+  throw new Error("an unassigned platform record could not be deleted");
+}
+if (state.sites.some((site) => site.id === unassignedSite.id)
+    || state.certificates[0].siteIds.includes(unassignedSite.id)
+    || state.certificates[0].nodeIds.length !== 1) {
+  throw new Error("platform record deletion did not clean only the certificate reverse reference");
+}
+if (removeSiteRecordFromState(deployedSite)) {
+  throw new Error("a deployed site record was deleted before its node config");
+}
 
 if (normalizeProxyTarget("10.165.0.29:8080") !== "http://10.165.0.29:8080") {
   throw new Error("a bare guided proxy target did not receive the HTTP scheme");

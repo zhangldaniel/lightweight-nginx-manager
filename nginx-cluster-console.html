@@ -3566,6 +3566,33 @@
     </form>
   </dialog>
 
+  <dialog id="site-record-delete-dialog">
+    <form class="dialog-shell" id="site-record-delete-form">
+      <header class="dialog-head">
+        <div>
+          <h2 id="site-record-delete-title">删除平台站点记录</h2>
+          <p>永久移除控制端保存的配置正文、备注和版本历史</p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="site-record-delete-dialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <div class="form-field full">
+            <label for="site-record-delete-confirm">输入站点域名确认</label>
+            <input class="input" id="site-record-delete-confirm" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-field full">
+            <div class="notice"><span>!</span><div>此操作只允许在站点已经没有部署节点时执行。它会删除平台站点记录并解除证书关联，但不会删除证书、Agent 执行记录或节点上的其他文件。</div></div>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="button" type="button" data-close-dialog="site-record-delete-dialog">取消</button>
+        <button class="button danger" id="site-record-delete-submit" type="submit">永久删除站点记录</button>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog id="certificate-dialog">
     <form class="dialog-shell" id="certificate-form">
       <header class="dialog-head">
@@ -3750,6 +3777,7 @@
       var pendingDeploySiteId = null;
       var pendingTransferSiteId = null;
       var pendingDeleteSiteId = null;
+      var pendingRecordDeleteSiteId = null;
       var activeRunTimer = null;
       var toastTimer = null;
       var toastHideTimer = null;
@@ -3866,7 +3894,7 @@
         var adminActions = ['add-node', 'approve-enrollment', 'reject-enrollment'];
         var operatorActions = [
           'add-site', 'add-certificate', 'edit-config', 'validate-site', 'import-drift',
-          'deploy-site', 'transfer-config', 'delete-config', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
+          'deploy-site', 'transfer-config', 'delete-config', 'delete-site-record', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
           'rollback', 'import-sites', 'import-certificates'
         ];
         if (adminActions.includes(action)) return canAdminister();
@@ -3879,7 +3907,7 @@
         var protectedActions = [
           'add-node', 'approve-enrollment', 'reject-enrollment',
           'add-site', 'add-certificate', 'edit-config', 'validate-site', 'import-drift',
-          'deploy-site', 'transfer-config', 'delete-config', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
+          'deploy-site', 'transfer-config', 'delete-config', 'delete-site-record', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
           'rollback', 'import-sites', 'import-certificates'
         ];
         document.querySelectorAll('[data-action]').forEach(function (button) {
@@ -4045,6 +4073,29 @@
         ]
       };
 
+      function normalizeSiteDeploymentStates(sites) {
+        var changed = false;
+        (sites || []).forEach(function (site) {
+          var hasNodes = Array.isArray(site.nodeIds) && site.nodeIds.length > 0;
+          var removedFromLastNode = /^从节点移除配置(?:：|$)/.test(String(site.changeNote || ''));
+          if (!hasNodes && site.status === 'draft' && Number(site.version || 0) > 0 && removedFromLastNode) {
+            site.status = 'unassigned';
+            changed = true;
+          }
+        });
+        return changed;
+      }
+
+      function applyRemoteUiStateDocument(uiDocument) {
+        var remoteState = (uiDocument && uiDocument.state) || {};
+        remoteRevision = Number((uiDocument && uiDocument.revision) || 0);
+        state.sites = Array.isArray(remoteState.sites) ? remoteState.sites : [];
+        state.certificates = Array.isArray(remoteState.certificates) ? remoteState.certificates : [];
+        state.importedInventoryJobs = Array.isArray(remoteState.importedInventoryJobs) ? remoteState.importedInventoryJobs : [];
+        state.importedCertificateInventoryJobs = Array.isArray(remoteState.importedCertificateInventoryJobs) ? remoteState.importedCertificateInventoryJobs : [];
+        return normalizeSiteDeploymentStates(state.sites);
+      }
+
       function loadState() {
         try {
           var saved = localStorage.getItem(storageKey);
@@ -4056,6 +4107,7 @@
               node.managedConfigRoot = String(node.root || '/etc/nginx').replace(/\/+$/, '') + '/nginx-manager.d';
             }
           });
+          normalizeSiteDeploymentStates(parsed.sites);
           parsed.importedInventoryJobs = Array.isArray(parsed.importedInventoryJobs) ? parsed.importedInventoryJobs : [];
           parsed.importedCertificateInventoryJobs = Array.isArray(parsed.importedCertificateInventoryJobs) ? parsed.importedCertificateInventoryJobs : [];
           return parsed;
@@ -4124,9 +4176,14 @@
           });
           remoteRevision = response.revision;
         } catch (error) {
-          if (error.status === 409 && error.body) {
-            remoteRevision = Number(error.body.revision || remoteRevision);
-            notify('控制端数据已被其他页面修改，请刷新后继续');
+          if (error.status === 409 && error.body && error.body.state) {
+            var normalizedDeploymentState = applyRemoteUiStateDocument(error.body);
+            selectedSiteId = getSite(selectedSiteId) ? selectedSiteId : (state.sites[0] ? state.sites[0].id : null);
+            localStorage.setItem(storageKey, JSON.stringify(state));
+            if (normalizedDeploymentState && canOperate()) scheduleRemoteSave();
+            updateChrome();
+            render();
+            notify('控制端数据已被其他页面修改，已加载最新状态；本页旧数据没有覆盖控制端');
             return;
           }
           notify('保存到控制端失败：' + error.message);
@@ -4411,7 +4468,12 @@
                 user: '控制端'
               });
             }
-            site.status = failed ? 'failed' : (site.nodeIds.length ? 'published' : 'draft');
+            site.status = failed ? 'failed' : (site.nodeIds.length ? 'published' : 'unassigned');
+            if (!failed && removedNodes.length) {
+              notify(site.nodeIds.length
+                ? '所选节点配置已移除，站点仍部署在其他节点'
+                : '全部节点配置已移除；如不再需要，可继续删除平台站点记录');
+            }
           } else if (pending.transfer) {
             site.nodeHashes = site.nodeHashes || {};
             site.nodeConfigPaths = site.nodeConfigPaths || {};
@@ -4646,7 +4708,7 @@
         if (Object.keys(site.nodeConfigs).length) {
           site.status = 'drift';
           site.changeNote = '扫描发现节点实际配置与平台配置不一致';
-        } else if (site.status === 'drift' || site.status === 'failed') {
+        } else if (site.status === 'drift' || site.status === 'failed' || site.status === 'unassigned') {
           site.status = 'published';
           site.changeNote = '重新扫描确认各节点配置一致';
         }
@@ -4803,6 +4865,7 @@
       }
 
       async function refreshRemoteData(includeUiState) {
+        var normalizedDeploymentState = false;
         var requests = [
           apiRequest('/api/v1/admin/nodes'),
           apiRequest('/api/v1/admin/jobs?limit=100'),
@@ -4811,13 +4874,7 @@
         if (includeUiState) requests.push(apiRequest('/api/v1/admin/ui-state'));
         var responses = await Promise.all(requests);
         if (includeUiState) {
-          var uiDocument = responses[3] || { revision: 0, state: {} };
-          var remoteState = uiDocument.state || {};
-          remoteRevision = Number(uiDocument.revision || 0);
-          state.sites = Array.isArray(remoteState.sites) ? remoteState.sites : [];
-          state.certificates = Array.isArray(remoteState.certificates) ? remoteState.certificates : [];
-          state.importedInventoryJobs = Array.isArray(remoteState.importedInventoryJobs) ? remoteState.importedInventoryJobs : [];
-          state.importedCertificateInventoryJobs = Array.isArray(remoteState.importedCertificateInventoryJobs) ? remoteState.importedCertificateInventoryJobs : [];
+          normalizedDeploymentState = applyRemoteUiStateDocument(responses[3] || { revision: 0, state: {} });
         }
         pendingEnrollments = (responses[2] && responses[2].items) || [];
         var rawJobs = responses[1].items || [];
@@ -4829,6 +4886,7 @@
         state.runs = rawJobs.map(mapRemoteJob);
         selectedSiteId = getSite(selectedSiteId) ? selectedSiteId : (state.sites[0] ? state.sites[0].id : null);
         localStorage.setItem(storageKey, JSON.stringify(state));
+        if (normalizedDeploymentState && canOperate()) scheduleRemoteSave();
         updateChrome();
         render();
       }
@@ -4981,9 +5039,14 @@
       function siteStatus(site) {
         if (site.status === 'publishing') return { label: '发布中', className: 'draft' };
         if (site.status === 'draft') return { label: '有草稿', className: 'draft' };
+        if (site.status === 'unassigned') return { label: '未部署', className: 'warn' };
         if (site.status === 'drift') return { label: '配置漂移', className: 'warn' };
         if (site.status === 'failed') return { label: '发布失败', className: 'danger' };
         return { label: '已发布', className: '' };
+      }
+
+      function siteVersionLabel(site) {
+        return 'v' + Number(site.version || 0) + (site.status === 'draft' ? ' → v' + (Number(site.version || 0) + 1) : '');
       }
 
       function runStatus(run) {
@@ -5088,9 +5151,10 @@
       function renderSummary() {
         var expiring = state.certificates.filter(function (cert) { return cert.days <= 30; }).length;
         var drift = state.sites.filter(function (site) { return site.status === 'drift' || site.status === 'failed'; }).length;
+        var deployedSites = state.sites.filter(function (site) { return (site.nodeIds || []).length > 0; }).length;
         return [
           '<div class="summary-grid">',
-          '  <div class="summary-card"><span class="summary-icon blue" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"></rect><rect x="4" y="14" width="16" height="6" rx="1.5"></rect><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"></path></svg></span><span class="summary-copy"><span class="summary-label">托管站点</span><strong class="summary-value">' + state.sites.length + '</strong><span class="summary-hint">配置、证书统一管理</span></span></div>',
+          '  <div class="summary-card"><span class="summary-icon blue" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"></rect><rect x="4" y="14" width="16" height="6" rx="1.5"></rect><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"></path></svg></span><span class="summary-copy"><span class="summary-label">已部署站点</span><strong class="summary-value">' + deployedSites + '</strong><span class="summary-hint">平台记录共 ' + state.sites.length + ' 条</span></span></div>',
           '  <div class="summary-card"><button type="button" data-nav-jump="nodes"><span class="summary-icon green" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"></rect><rect x="3.5" y="14" width="17" height="6" rx="1.5"></rect><path d="M7.5 7h.01M7.5 17h.01M11 7h6M11 17h6"></path></svg></span><span class="summary-copy"><span class="summary-label">在线 Agent</span><strong class="summary-value">' + onlineNodes().length + ' / ' + state.nodes.length + '</strong><span class="summary-hint">主动出站连接</span></span></button></div>',
           '  <div class="summary-card"><button type="button" data-nav-jump="certificates"><span class="summary-icon amber" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 19 7v5c0 4.6-2.9 7.3-7 9-4.1-1.7-7-4.4-7-9V7l7-4Z"></path><path d="M12 8v5M12 16.5h.01"></path></svg></span><span class="summary-copy"><span class="summary-label">即将到期证书</span><strong class="summary-value">' + expiring + '</strong><span class="summary-hint ' + (expiring ? 'warn' : '') + '">' + (expiring ? '需要处理' : '暂无风险') + '</span></span></button></div>',
           '  <div class="summary-card"><button type="button" data-site-filter="attention"><span class="summary-icon red" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3L12 3.5Z"></path><path d="M12 9v4M12 16.5h.01"></path></svg></span><span class="summary-copy"><span class="summary-label">漂移 / 失败</span><strong class="summary-value">' + drift + '</strong><span class="summary-hint ' + (drift ? 'danger' : '') + '">' + (drift ? '点击查看异常站点' : '全部一致') + '</span></span></button></div>',
@@ -5157,7 +5221,7 @@
             '  <div class="table-cell primary" data-label="站点"><button class="site-open" type="button" data-site-select="' + escapeHtml(site.id) + '"><span class="cell-title">' + escapeHtml(site.domain) + '</span><span class="cell-sub">' + escapeHtml(site.note || formatSiteType(site.type)) + '</span></button></div>',
             '  <div class="table-cell" data-label="目标节点"><div class="chips">' + nodeChips + '</div></div>',
             '  <div class="table-cell" data-label="证书"><span class="cell-title">' + escapeHtml(cert ? cert.domain : (confTls ? 'Conf 内定义' : '未绑定')) + '</span><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天' : (confTls ? 'TLS 路径由配置提供' : '仅 HTTP')) + '</span></div>',
-            '  <div class="table-cell" data-label="配置版本"><span class="cell-title">v' + site.version + (site.status === 'draft' ? ' → v' + (site.version + 1) : '') + '</span><span class="cell-sub">' + escapeHtml(site.updatedAt) + '</span></div>',
+            '  <div class="table-cell" data-label="配置版本"><span class="cell-title">' + siteVersionLabel(site) + '</span><span class="cell-sub">' + escapeHtml(site.updatedAt) + '</span></div>',
             '  <div class="table-cell" data-label="状态"><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
             '</div>'
           ].join('');
@@ -5244,7 +5308,9 @@
         }).join('');
 
         var warning = '';
-        if (previewHasDrift) {
+        if (!site.nodeIds.length) {
+          warning = '<div class="notice"><span>!</span><div>该站点当前没有部署节点，只保留平台配置。可复制到其他节点重新部署，或永久删除平台站点记录。</div></div>';
+        } else if (previewHasDrift) {
           warning = '<div class="notice"><span>!</span><div>节点上的配置 Hash 与平台 v' + site.version + ' 不一致。发布前请选择导入节点配置或覆盖节点。</div></div>';
         } else if (site.status === 'drift') {
           warning = '<div class="notice"><span>!</span><div>所选节点与平台配置一致，但该站点的其他节点仍有配置漂移。</div></div>';
@@ -5262,10 +5328,12 @@
           failureNotice,
           '      <button class="button" type="button" data-action="edit-config" data-site-id="' + escapeHtml(site.id) + '">编辑配置</button>',
           '      <button class="button" type="button" data-action="transfer-config" data-site-id="' + escapeHtml(site.id) + '">复制到其他节点</button>',
-          '      <button class="button" type="button" data-action="validate-site" data-site-id="' + escapeHtml(site.id) + '">逐节点校验</button>',
+          '      <button class="button" type="button" data-action="validate-site" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length ? '' : ' disabled') + '>逐节点校验</button>',
           previewHasDrift ? '<button class="button" type="button" data-action="import-drift" data-site-id="' + escapeHtml(site.id) + '">导入节点配置</button>' : '<button class="button" type="button" data-action="view-runs" data-site-id="' + escapeHtml(site.id) + '">查看记录</button>',
-          '      <button class="button subtle-danger" type="button" data-action="delete-config" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length ? '' : ' disabled') + '>从节点移除配置</button>',
-          '      <button class="button primary" type="button" data-action="deploy-site" data-site-id="' + escapeHtml(site.id) + '">发布并 reload</button>',
+          site.nodeIds.length
+            ? '      <button class="button subtle-danger" type="button" data-action="delete-config" data-site-id="' + escapeHtml(site.id) + '">从节点移除配置</button>'
+            : '      <button class="button subtle-danger" type="button" data-action="delete-site-record" data-site-id="' + escapeHtml(site.id) + '">删除站点记录</button>',
+          '      <button class="button primary" type="button" data-action="deploy-site" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length ? '' : ' disabled') + '>发布并 reload</button>',
           '    </div>',
           '  </div>',
           '  <div class="detail-body">',
@@ -5283,7 +5351,7 @@
       function renderSites() {
         if (!selectedSiteId || !getSite(selectedSiteId)) selectedSiteId = state.sites[0] ? state.sites[0].id : null;
         ensureFilteredSiteSelection();
-        var nodeOptions = ['<option value="all"' + (siteNodeFilter === 'all' ? ' selected' : '') + '>全部 Agent（' + state.sites.length + '）</option>'].concat(state.nodes.map(function (node) {
+        var nodeOptions = ['<option value="all"' + (siteNodeFilter === 'all' ? ' selected' : '') + '>全部站点记录（' + state.sites.length + '）</option>'].concat(state.nodes.map(function (node) {
           var count = state.sites.filter(function (site) { return (site.nodeIds || []).includes(node.id); }).length;
           return '<option value="' + escapeHtml(node.id) + '"' + (siteNodeFilter === node.id ? ' selected' : '') + '>' + escapeHtml(node.name) + '（' + count + '）</option>';
         })).join('');
@@ -5295,6 +5363,7 @@
           '    <option value="all"' + (siteFilter === 'all' ? ' selected' : '') + '>全部状态</option>',
           '    <option value="published"' + (siteFilter === 'published' ? ' selected' : '') + '>已发布</option>',
           '    <option value="draft"' + (siteFilter === 'draft' ? ' selected' : '') + '>有草稿</option>',
+          '    <option value="unassigned"' + (siteFilter === 'unassigned' ? ' selected' : '') + '>未部署</option>',
           '    <option value="attention"' + (siteFilter === 'attention' ? ' selected' : '') + '>漂移 / 失败</option>',
           '  </select>',
           '</div>'
@@ -6050,6 +6119,101 @@
         openDialog('config-delete-dialog');
       }
 
+      function canDeleteSiteRecord(site) {
+        if (!site || site.pendingRemote || site.status === 'publishing') return false;
+        if ((site.nodeIds || []).length) return false;
+        return ['nodeHashes', 'nodeConfigPaths', 'nodeConfigs'].every(function (key) {
+          return !site[key] || Object.keys(site[key]).length === 0;
+        });
+      }
+
+      function removeSiteRecordReferences(siteId, sites, certificates) {
+        (certificates || []).forEach(function (certificate) {
+          certificate.siteIds = (certificate.siteIds || []).filter(function (candidateId) {
+            return candidateId !== siteId;
+          });
+        });
+        return (sites || []).filter(function (item) { return item.id !== siteId; });
+      }
+
+      function removeSiteRecordFromState(site) {
+        if (!canDeleteSiteRecord(site)) return false;
+        state.sites = removeSiteRecordReferences(site.id, state.sites, state.certificates);
+        return true;
+      }
+
+      function openSiteRecordDeleteDialog(siteId) {
+        var site = getSite(siteId);
+        if (!site) return;
+        if ((site.nodeIds || []).length) {
+          notify('请先从全部节点安全移除配置，再删除平台站点记录');
+          return;
+        }
+        if (!canDeleteSiteRecord(site)) {
+          notify(site.pendingRemote || site.status === 'publishing'
+            ? '当前站点仍有任务执行中，请等待完成'
+            : '平台仍保存该站点的节点 Hash 或路径，请刷新状态后再删除');
+          return;
+        }
+        pendingRecordDeleteSiteId = site.id;
+        document.getElementById('site-record-delete-title').textContent = '删除平台记录 ' + site.domain;
+        var confirmation = document.getElementById('site-record-delete-confirm');
+        confirmation.value = '';
+        confirmation.placeholder = '请输入 ' + site.domain;
+        openDialog('site-record-delete-dialog');
+      }
+
+      async function deletePlatformSiteRecord(site) {
+        if (remoteConnected && !canOperate()) {
+          notify('当前账号没有删除平台站点记录的权限');
+          return false;
+        }
+        if (!canDeleteSiteRecord(site)) {
+          notify('站点仍有关联节点或执行中的任务，未删除平台记录');
+          return false;
+        }
+        clearTimeout(remoteSaveTimer);
+        try {
+          if (remoteConnected) {
+            var nextUiState = clone(serializableUiState());
+            nextUiState.sites = removeSiteRecordReferences(site.id, nextUiState.sites, nextUiState.certificates);
+            var response = await apiRequest('/api/v1/admin/ui-state', {
+              method: 'PUT',
+              body: { revision: remoteRevision, state: nextUiState }
+            });
+            remoteRevision = response.revision;
+          }
+          state.sites = removeSiteRecordReferences(site.id, state.sites, state.certificates);
+          var needsFollowUpSave = remoteConnected && JSON.stringify(serializableUiState()) !== JSON.stringify(nextUiState);
+          localStorage.setItem(storageKey, JSON.stringify(state));
+          if (selectedSiteId === site.id) selectedSiteId = state.sites[0] ? state.sites[0].id : null;
+          if (editingSiteId === site.id) editingSiteId = null;
+          if (pendingDeploySiteId === site.id) pendingDeploySiteId = null;
+          if (pendingTransferSiteId === site.id) pendingTransferSiteId = null;
+          if (pendingDeleteSiteId === site.id) pendingDeleteSiteId = null;
+          pendingRecordDeleteSiteId = null;
+          if (needsFollowUpSave) scheduleRemoteSave();
+          notify('平台站点记录已删除；证书和 Agent 执行记录均已保留');
+          render();
+          return true;
+        } catch (error) {
+          if (error.status === 409 && error.body && error.body.state) {
+            var normalizedDeploymentState = applyRemoteUiStateDocument(error.body);
+            selectedSiteId = getSite(selectedSiteId) ? selectedSiteId : (state.sites[0] ? state.sites[0].id : null);
+            pendingRecordDeleteSiteId = null;
+            closeDialog('site-record-delete-dialog');
+            localStorage.setItem(storageKey, JSON.stringify(state));
+            if (normalizedDeploymentState && canOperate()) scheduleRemoteSave();
+            updateChrome();
+            notify('控制端数据已被其他页面修改，已加载最新状态；请重新确认后再删除');
+          } else {
+            notify('删除平台站点记录失败：' + error.message);
+          }
+          render();
+          return false;
+        }
+      }
+
       function addRun(type, target, nodeNames, status, note, log) {
         var run = {
           id: uid('run'),
@@ -6445,7 +6609,7 @@
         site.changeNote = '从节点移除配置：' + targets.map(function (node) { return node.name; }).join('、');
         site.history = site.history || [];
         site.history.unshift({ version: site.version, note: site.changeNote, time: '刚刚', user: '当前用户' });
-        site.status = site.nodeIds.length ? 'published' : 'draft';
+        site.status = site.nodeIds.length ? 'published' : 'unassigned';
         addRun('移除节点配置', site.domain, targets.map(function (node) { return node.name; }), 'success', site.changeNote, [
           'verified exact current SHA-256',
           'configuration removed from managed directory',
@@ -6453,7 +6617,7 @@
           'nginx reload successful'
         ]);
         saveState();
-        notify('已从 ' + targets.length + ' 个节点移除配置；站点记录和证书已保留');
+        notify('已从 ' + targets.length + ' 个节点移除配置；如不再需要，可继续删除平台站点记录');
         render();
       }
 
@@ -6676,6 +6840,7 @@
         else if (action === 'deploy-site') openDeployDialog(siteId);
         else if (action === 'transfer-config') openConfigTransferDialog(siteId);
         else if (action === 'delete-config') openConfigDeleteDialog(siteId);
+        else if (action === 'delete-site-record') openSiteRecordDeleteDialog(siteId);
         else if (action === 'validate-site') {
           var validateSite = getSite(siteId);
           if (validateSite) startRun(validateSite, '配置校验', false);
@@ -7018,6 +7183,25 @@
         }
         closeDialog('config-delete-dialog');
         startConfigDelete(site, nodeIds);
+      });
+
+      document.getElementById('site-record-delete-form').addEventListener('submit', async function (event) {
+        event.preventDefault();
+        var site = getSite(pendingRecordDeleteSiteId);
+        if (!site) return;
+        var confirmation = document.getElementById('site-record-delete-confirm');
+        if (confirmation.value.trim() !== site.domain) {
+          confirmation.focus();
+          notify('请输入完整站点域名 ' + site.domain + ' 以确认永久删除');
+          return;
+        }
+        var submit = document.getElementById('site-record-delete-submit');
+        submit.disabled = true;
+        submit.textContent = '正在删除…';
+        var deleted = await deletePlatformSiteRecord(site);
+        submit.disabled = false;
+        submit.textContent = '永久删除站点记录';
+        if (deleted) closeDialog('site-record-delete-dialog');
       });
 
       document.getElementById('cert-source').addEventListener('change', function (event) {
