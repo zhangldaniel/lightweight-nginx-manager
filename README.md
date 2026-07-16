@@ -1,8 +1,12 @@
-# Lightweight Nginx Manager
+# Lightweight Nginx Manager（轻量级 Nginx 管理平台）
 
-轻量、自托管的多节点 Nginx 管理台。Server 使用 FastAPI、SQLite 和单 HTML 页面；每个 Linux 节点运行主动出站连接的 Agent。
+一个轻量、自托管的多节点 Nginx 管理平台。通过 Web 控制台统一管理 Linux 节点上的站点配置与 TLS 证书，支持现有配置导入、编辑、复制、逐节点校验、发布、回滚和审计。
 
-支持节点审批、现有配置导入、配置复制/替换/删除、证书替换、`nginx -t`、reload、LDAP/AD、RBAC、审计和失败回滚。Agent 不开放端口，也不提供任意 Shell。
+Server 基于 FastAPI、SQLite 和单文件 Web 控制台；Agent 主动连接 Server，无需开放管理端口，也不提供任意 Shell。适合从少量节点开始部署并逐步扩展。
+
+## 界面预览
+
+![站点与配置界面预览](docs/images/console-overview.png)
 
 ## 快速安装
 
