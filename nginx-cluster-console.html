@@ -2532,6 +2532,10 @@
       width: min(820px, calc(100vw - 32px));
     }
 
+    #site-dialog[data-mode="conf"] {
+      width: min(1120px, calc(100vw - 32px));
+    }
+
     dialog::backdrop {
       background: rgba(7, 20, 39, .5);
       backdrop-filter: blur(2px);
@@ -2569,6 +2573,7 @@
 
     .site-form-grid {
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(160px, .8fr);
+      align-items: start;
     }
 
     .form-field.span-2 {
@@ -2577,6 +2582,222 @@
 
     .form-field {
       gap: 8px;
+    }
+
+    .site-form-grid > .form-field {
+      align-content: start;
+      grid-auto-rows: max-content;
+    }
+
+    .site-guided-field[hidden],
+    .site-conf-field[hidden] {
+      display: none !important;
+    }
+
+    .site-mode-switch {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5px;
+      margin-bottom: 22px;
+      padding: 5px;
+      border: 1px solid #d8e1ec;
+      border-radius: 10px;
+      background: #eef3f8;
+    }
+
+    .site-mode-button {
+      min-width: 0;
+      min-height: 58px;
+      padding: 9px 13px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: #526176;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .site-mode-button b,
+    .site-mode-button span {
+      display: block;
+    }
+
+    .site-mode-button b {
+      color: #25324a;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .site-mode-button span {
+      margin-top: 3px;
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .site-mode-button:hover {
+      background: rgba(255, 255, 255, .62);
+    }
+
+    .site-mode-button.active {
+      border-color: #cbd8e8;
+      background: #fff;
+      color: #526176;
+      box-shadow: 0 2px 8px rgba(24, 48, 82, .08);
+    }
+
+    .site-mode-button.active b {
+      color: var(--primary);
+    }
+
+    #site-dialog[data-mode="conf"] .site-domain-field,
+    #site-dialog[data-mode="conf"] .site-environment-field {
+      order: 1;
+    }
+
+    #site-dialog[data-mode="conf"] .site-nodes-field {
+      order: 2;
+    }
+
+    #site-dialog[data-mode="conf"] .site-cert-field {
+      order: 3;
+    }
+
+    #site-dialog[data-mode="conf"] .site-environment-field {
+      grid-column: 3;
+    }
+
+    #site-dialog[data-mode="conf"] .site-note-field {
+      order: 4;
+    }
+
+    #site-dialog[data-mode="conf"] .site-conf-field {
+      order: 5;
+    }
+
+    .site-conf-workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 250px;
+      gap: 14px;
+      align-items: start;
+    }
+
+    .site-conf-editor-pane,
+    .site-conf-guide {
+      min-width: 0;
+      border: 1px solid #d8e1ec;
+      border-radius: 9px;
+      background: #fff;
+    }
+
+    .site-conf-editor-pane {
+      overflow: hidden;
+    }
+
+    .site-conf-toolbar {
+      min-height: 66px;
+      padding: 10px 12px;
+      border-bottom: 1px solid #d8e1ec;
+      background: #f8fafc;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }
+
+    .site-conf-toolbar-copy {
+      min-width: 150px;
+    }
+
+    .site-conf-toolbar-copy label,
+    .site-conf-toolbar-copy span {
+      display: block;
+    }
+
+    .site-conf-toolbar-copy span {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .site-conf-template-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .site-conf-template-actions .select {
+      width: 178px;
+    }
+
+    .site-conf-template-actions .button {
+      white-space: nowrap;
+    }
+
+    .code-editor.site-conf-editor {
+      min-height: 440px;
+      border: 0;
+      border-radius: 0;
+      resize: vertical;
+    }
+
+    .code-editor.site-conf-editor:focus {
+      box-shadow: inset 0 0 0 2px rgba(25, 103, 210, .45);
+    }
+
+    .site-conf-guide {
+      padding: 16px;
+      background: #f8fafc;
+    }
+
+    .site-conf-guide h3 {
+      margin: 0;
+      color: #1c2940;
+      font-size: 14px;
+    }
+
+    .site-conf-guide p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .site-conf-guide ul {
+      margin: 14px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 10px;
+    }
+
+    .site-conf-guide li {
+      position: relative;
+      padding-left: 18px;
+      color: #4a586d;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .site-conf-guide li::before {
+      content: "";
+      position: absolute;
+      top: 7px;
+      left: 2px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #258b72;
+    }
+
+    .site-conf-template-summary {
+      margin-top: 16px;
+      padding: 9px 10px;
+      border: 1px solid #d7e4df;
+      border-radius: 7px;
+      background: #f1f8f5;
+      color: #356859;
+      font-size: 11px;
+      line-height: 1.5;
     }
 
     .form-field label,
@@ -2738,6 +2959,20 @@
       }
     }
 
+    @media (max-width: 900px) {
+      .site-conf-workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .site-conf-guide {
+        padding: 13px 14px;
+      }
+
+      .site-conf-guide ul {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
     @media (max-width: 760px) {
       .shell {
         display: block;
@@ -2852,6 +3087,37 @@
         grid-template-columns: 1fr;
       }
 
+      .site-mode-switch {
+        grid-template-columns: 1fr;
+      }
+
+      .site-conf-toolbar {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .site-conf-template-actions {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .site-conf-template-actions .select,
+      .site-conf-template-actions .button {
+        width: 100%;
+      }
+
+      .code-editor.site-conf-editor {
+        min-height: 320px;
+      }
+
+      .site-conf-guide ul {
+        grid-template-columns: 1fr;
+      }
+
+      #site-dialog[data-mode="conf"] .site-environment-field {
+        grid-column: auto;
+      }
+
       .form-field.span-2 {
         grid-column: auto;
       }
@@ -2947,43 +3213,53 @@
     </main>
   </div>
 
-  <dialog id="site-dialog">
+  <dialog id="site-dialog" data-mode="guided">
     <form class="dialog-shell" id="site-form">
       <header class="dialog-head">
         <div>
           <h2>新增站点</h2>
-          <p>创建配置并选择要托管的 Agent 节点</p>
+          <p id="site-dialog-subtitle">填写站点信息，平台自动生成基础 Nginx 配置</p>
         </div>
         <button class="icon-button" type="button" data-close-dialog="site-dialog" aria-label="关闭">×</button>
       </header>
       <div class="dialog-body">
+        <div class="site-mode-switch" role="group" aria-label="创建方式">
+          <button class="site-mode-button active" type="button" aria-pressed="true" data-site-create-mode="guided">
+            <b>向导模式</b>
+            <span>填写域名与上游，自动生成基础配置</span>
+          </button>
+          <button class="site-mode-button" type="button" aria-pressed="false" data-site-create-mode="conf">
+            <b>Conf 模式</b>
+            <span>直接编辑站点级 Nginx Conf</span>
+          </button>
+        </div>
         <div class="form-grid site-form-grid">
-          <div class="form-field span-2">
+          <div class="form-field span-2 site-domain-field">
             <label for="site-domain">域名</label>
             <input class="input" id="site-domain" name="domain" placeholder="api.example.com" required>
           </div>
-          <div class="form-field">
+          <div class="form-field site-guided-field">
             <label for="site-type">站点类型</label>
             <select class="select" id="site-type" name="type">
               <option value="proxy">反向代理</option>
               <option value="static">静态站点</option>
             </select>
           </div>
-          <div class="form-field full">
+          <div class="form-field full site-guided-field">
             <label for="site-target">上游地址或站点目录</label>
             <input class="input" id="site-target" name="target" placeholder="http://192.0.2.21:8080" required>
             <span class="field-help">反向代理填写 upstream；静态站点填写本地目录。</span>
           </div>
-          <div class="form-field full">
+          <div class="form-field full site-nodes-field">
             <span class="fieldset-title">部署节点</span>
             <div class="check-grid" id="site-node-checks"></div>
           </div>
-          <div class="form-field span-2">
+          <div class="form-field span-2 site-cert-field">
             <label for="site-cert">绑定证书</label>
             <select class="select" id="site-cert" name="certificate"></select>
             <span class="field-help" id="site-cert-help">先选择部署节点，只能绑定这些节点上都已存在的证书。</span>
           </div>
-          <div class="form-field">
+          <div class="form-field site-environment-field">
             <label for="site-environment">环境</label>
             <select class="select" id="site-environment" name="environment">
               <option>生产</option>
@@ -2991,15 +3267,49 @@
               <option>测试</option>
             </select>
           </div>
-          <div class="form-field full">
+          <div class="form-field full site-note-field">
             <label for="site-note">配置备注</label>
             <textarea class="textarea" id="site-note" name="note" placeholder="长期说明：这个站点服务什么业务、负责人是谁"></textarea>
+          </div>
+          <div class="form-field full site-conf-field" id="site-conf-field" hidden>
+            <div class="site-conf-workspace">
+              <section class="site-conf-editor-pane">
+                <div class="site-conf-toolbar">
+                  <div class="site-conf-toolbar-copy">
+                    <label for="site-conf-editor">Nginx Conf</label>
+                    <span>http include 片段将原样保存为站点草稿</span>
+                  </div>
+                  <div class="site-conf-template-actions">
+                    <label class="sr-only" for="site-conf-template">配置模板</label>
+                    <select class="select" id="site-conf-template">
+                      <option value="proxy-http">HTTP 反向代理</option>
+                      <option value="proxy-https">HTTPS 反向代理</option>
+                      <option value="static">静态站点</option>
+                      <option value="websocket">WebSocket 反向代理</option>
+                    </select>
+                    <button class="button" id="site-conf-template-button" type="button">应用模板</button>
+                  </div>
+                </div>
+                <textarea class="code-editor site-conf-editor" id="site-conf-editor" name="custom_config" spellcheck="false" aria-label="Nginx Conf 编辑器"></textarea>
+              </section>
+              <aside class="site-conf-guide">
+                <h3>直接托管 Conf</h3>
+                <p>适合已有 server / upstream 配置或需要细调指令的场景。</p>
+                <ul>
+                  <li>正文不做格式重写，保存为可编辑草稿。</li>
+                  <li>发布前仍会在每个目标 Agent 执行 nginx -t。</li>
+                  <li>仅允许 Agent 安全白名单内的 http-context 指令。</li>
+                  <li>已绑定证书的路径会按目标节点自动适配。</li>
+                </ul>
+                <div class="site-conf-template-summary" id="site-conf-template-summary" aria-live="polite">HTTP 反向代理模板 · 监听 80 端口</div>
+              </aside>
+            </div>
           </div>
         </div>
       </div>
       <footer class="dialog-foot">
         <button class="button" type="button" data-close-dialog="site-dialog">取消</button>
-        <button class="button primary" type="submit">创建草稿</button>
+        <button class="button primary" id="site-submit-button" type="submit">创建草稿</button>
       </footer>
     </form>
   </dialog>
@@ -3341,6 +3651,7 @@
       var siteQuery = '';
       var siteFilter = 'all';
       var siteNodeFilter = 'all';
+      var siteCreateMode = 'guided';
       var editingSiteId = null;
       var editingCertificateId = null;
       var pendingDeploySiteId = null;
@@ -3936,13 +4247,56 @@
         }).join('\n');
       }
 
-      function nginxDirectiveValues(content, directive) {
+      function nginxStatements(content) {
         var cleaned = stripNginxComments(content);
-        var expression = new RegExp('^\\s*' + directive + '\\s+([^;]+);', 'gmi');
-        var values = [];
-        var matched;
-        while ((matched = expression.exec(cleaned)) !== null) values.push(matched[1].trim());
-        return values;
+        var statements = [];
+        var buffer = '';
+        var quote = '';
+        var escaped = false;
+        for (var index = 0; index < cleaned.length; index += 1) {
+          var character = cleaned.charAt(index);
+          if (escaped) {
+            buffer += character;
+            escaped = false;
+            continue;
+          }
+          if (character === '\\') {
+            buffer += character;
+            escaped = true;
+            continue;
+          }
+          if (quote) {
+            buffer += character;
+            if (character === quote) quote = '';
+            continue;
+          }
+          if (character === '"' || character === "'") {
+            quote = character;
+            buffer += character;
+            continue;
+          }
+          if (character === ';' || character === '{' || character === '}') {
+            var statement = buffer.trim();
+            if (statement) statements.push({ text: statement, terminator: character });
+            buffer = '';
+            continue;
+          }
+          buffer += character;
+        }
+        return statements;
+      }
+
+      function nginxDirectiveValues(content, directive) {
+        var expected = String(directive || '').toLowerCase();
+        return nginxStatements(content).filter(function (statement) {
+          return statement.terminator === ';';
+        }).map(function (statement) {
+          var matched = statement.text.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s+([\s\S]+)$/);
+          if (!matched || matched[1].toLowerCase() !== expected) return null;
+          return matched[2].trim();
+        }).filter(function (value) {
+          return value !== null;
+        });
       }
 
       function inventorySiteMetadata(file) {
@@ -4325,7 +4679,15 @@
       }
 
       function formatSiteType(type) {
-        return type === 'static' ? '静态站点' : '反向代理';
+        if (type === 'static') return '静态站点';
+        if (type === 'custom') return '自定义 Conf';
+        return '反向代理';
+      }
+
+      function siteUsesTls(site) {
+        var content = site && site.config ? site.config : '';
+        return nginxDirectiveValues(content, 'ssl_certificate').length > 0
+          || nginxDirectiveValues(content, 'listen').some(function (value) { return /\bssl\b/i.test(value); });
       }
 
       function siteStatus(site) {
@@ -4459,6 +4821,7 @@
 
         var rows = sites.map(function (site) {
           var cert = getCert(site.certificateId);
+          var confTls = !cert && siteUsesTls(site);
           var status = siteStatus(site);
           var nodes = visibleSiteNodes(site);
           var nodeChips = nodes.slice(0, 2).map(function (node) {
@@ -4469,7 +4832,7 @@
             '<div class="table-row ' + (site.id === selectedSiteId ? 'selected' : '') + '" data-site-select="' + escapeHtml(site.id) + '">',
             '  <div class="table-cell primary" data-label="站点"><button class="site-open" type="button" data-site-select="' + escapeHtml(site.id) + '"><span class="cell-title">' + escapeHtml(site.domain) + '</span><span class="cell-sub">' + escapeHtml(site.note || formatSiteType(site.type)) + '</span></button></div>',
             '  <div class="table-cell" data-label="目标节点"><div class="chips">' + nodeChips + '</div></div>',
-            '  <div class="table-cell" data-label="证书"><span class="cell-title">' + escapeHtml(cert ? cert.domain : '未绑定') + '</span><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天' : '仅 HTTP') + '</span></div>',
+            '  <div class="table-cell" data-label="证书"><span class="cell-title">' + escapeHtml(cert ? cert.domain : (confTls ? 'Conf 内定义' : '未绑定')) + '</span><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天' : (confTls ? 'TLS 路径由配置提供' : '仅 HTTP')) + '</span></div>',
             '  <div class="table-cell" data-label="配置版本"><span class="cell-title">v' + site.version + (site.status === 'draft' ? ' → v' + (site.version + 1) : '') + '</span><span class="cell-sub">' + escapeHtml(site.updatedAt) + '</span></div>',
             '  <div class="table-cell" data-label="状态"><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
             '</div>'
@@ -4489,6 +4852,7 @@
         var site = visibleSites.find(function (item) { return item.id === selectedSiteId; }) || visibleSites[0];
         if (!site) return '<aside class="detail-panel" id="site-detail-slot"><div class="empty"><strong>暂无匹配站点</strong>调整搜索条件或创建新站点。</div></aside>';
         var cert = getCert(site.certificateId);
+        var confTls = !cert && siteUsesTls(site);
         var status = siteStatus(site);
         var nodes = visibleSiteNodes(site);
         var previewNode = selectedPreviewNode(site);
@@ -4545,7 +4909,7 @@
           '    <div class="detail-block"><span class="detail-label">配置预览' + (previewNode ? ' · ' + escapeHtml(previewNode.name) : '') + '</span><div class="config-preview-meta"><span>' + previewSource + ' · SHA-256 ' + escapeHtml(previewHash) + '</span><code>' + escapeHtml(previewPath) + '</code></div><pre class="config-preview">' + escapeHtml(previewConfig) + '</pre></div>',
           '    <div class="detail-block"><span class="detail-label">配置备注</span><div class="detail-value">' + escapeHtml(site.note || '暂无备注') + '</div><span class="cell-sub">最近变更：' + escapeHtml(site.changeNote || '暂无') + '</span></div>',
           '    <div class="detail-block"><span class="detail-label">部署节点</span><div class="node-mini-list">' + nodeRows + '</div></div>',
-          '    <div class="detail-block"><span class="detail-label">证书</span><div class="detail-value">' + (cert ? escapeHtml(cert.domain) + ' · ' + escapeHtml(cert.issuer) : '未绑定证书') + '</div><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天 · ' + escapeHtml(cert.source) : '当前仅 HTTP') + '</span></div>',
+          '    <div class="detail-block"><span class="detail-label">证书</span><div class="detail-value">' + (cert ? escapeHtml(cert.domain) + ' · ' + escapeHtml(cert.issuer) : (confTls ? 'Conf 内已定义 TLS' : '未绑定证书')) + '</div><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天 · ' + escapeHtml(cert.source) : (confTls ? '证书与私钥路径由配置正文提供' : '当前仅 HTTP')) + '</span></div>',
           '    <div class="detail-block"><span class="detail-label">版本记录</span><div class="node-mini-list">' + history + '</div></div>',
           '  </div>',
           '</aside>'
@@ -4758,6 +5122,13 @@
 
       function prepareSiteDialog() {
         document.getElementById('site-form').reset();
+        var confEditor = document.getElementById('site-conf-editor');
+        confEditor.value = '';
+        confEditor.dataset.dirty = 'false';
+        confEditor.dataset.templateKey = 'proxy-http';
+        document.getElementById('site-conf-template').value = 'proxy-http';
+        document.getElementById('site-conf-template-button').textContent = '应用模板';
+        setSiteCreateMode('guided');
         var nodeChecks = document.getElementById('site-node-checks');
         nodeChecks.innerHTML = state.nodes.map(function (node) {
           return '<label class="check-card"><input type="checkbox" name="site-node" value="' + escapeHtml(node.id) + '" ' + (!node.online ? 'disabled' : '') + '><span><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(node.ip) + ' · ' + (node.online ? '在线' : '离线') + '</span></span></label>';
@@ -4788,16 +5159,155 @@
           certSelect.value = '';
         }
         var help = document.getElementById('site-cert-help');
+        var helpText = '';
         if (!selectedNodeIds.length) {
-          help.textContent = '先选择部署节点，只能绑定这些节点上都已存在的证书。';
+          helpText = '先选择部署节点，只能绑定这些节点上都已存在的证书。';
         } else {
           var availableCount = state.certificates.filter(function (cert) {
             return !cert.pendingRemote && certificateMissingNodeIds(cert, selectedNodeIds).length === 0;
           }).length;
-          help.textContent = availableCount
+          helpText = availableCount
             ? '有 ' + availableCount + ' 张证书已完整覆盖所选节点。'
             : '没有证书完整覆盖所选节点；请先到“证书”页面部署。';
         }
+        if (siteCreateMode === 'conf') {
+          helpText += ' Conf 模式下绑定用于资产关联和节点路径适配，实际指令以配置正文为准。';
+        }
+        help.textContent = helpText;
+      }
+
+      function selectedSiteNodeIds() {
+        return Array.from(document.querySelectorAll('input[name="site-node"]:checked')).map(function (input) {
+          return input.value;
+        });
+      }
+
+      function siteConfTemplateSummary(templateKey, pending) {
+        var summaries = {
+          'proxy-http': 'HTTP 反向代理模板 · 监听 80 端口',
+          'proxy-https': 'HTTPS 反向代理模板 · 使用所选节点上的证书路径',
+          'static': '静态站点模板 · root + try_files',
+          'websocket': 'WebSocket 模板 · 包含 Upgrade 与 Connection 头'
+        };
+        return (pending ? '待应用：' : '') + (summaries[templateKey] || summaries['proxy-http']);
+      }
+
+      function siteConfTemplate(templateKey, silent) {
+        var domain = document.getElementById('site-domain').value.trim() || 'api.example.com';
+        var target = document.getElementById('site-target').value.trim() || 'http://127.0.0.1:8080';
+        var lines = ['server {'];
+        if (templateKey === 'proxy-https') {
+          var cert = getCert(document.getElementById('site-cert').value);
+          var selectedNode = getNode(selectedSiteNodeIds()[0]);
+          if (!cert || !selectedNode) {
+            if (!silent) {
+              notify('HTTPS 模板需要先选择部署节点和已覆盖该节点的证书');
+              var focusTarget = cert
+                ? document.querySelector('input[name="site-node"]:not(:disabled)')
+                : document.getElementById('site-cert');
+              if (focusTarget) focusTarget.focus();
+            }
+            return null;
+          }
+          var paths = certificateTargetPaths(cert, selectedNode);
+          lines.push('  listen 443 ssl;');
+          lines.push('  server_name ' + domain + ';');
+          lines.push('');
+          lines.push('  ssl_certificate     ' + paths.certificatePath + ';');
+          lines.push('  ssl_certificate_key ' + paths.keyPath + ';');
+        } else {
+          lines.push('  listen 80;');
+          lines.push('  server_name ' + domain + ';');
+        }
+        lines.push('');
+        if (templateKey === 'static') {
+          var root = target.charAt(0) === '/' ? target : '/srv/www/' + safeResourceName(domain);
+          lines.push('  root ' + root + ';');
+          lines.push('  index index.html;');
+          lines.push('');
+          lines.push('  location / {');
+          lines.push('    try_files $uri $uri/ =404;');
+          lines.push('  }');
+        } else {
+          lines.push('  location / {');
+          lines.push('    proxy_pass ' + target + ';');
+          lines.push('    proxy_http_version 1.1;');
+          lines.push('    proxy_set_header Host $host;');
+          lines.push('    proxy_set_header X-Real-IP $remote_addr;');
+          lines.push('    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;');
+          lines.push('    proxy_set_header X-Forwarded-Proto $scheme;');
+          if (templateKey === 'websocket') {
+            lines.push('    proxy_set_header Upgrade $http_upgrade;');
+            lines.push('    proxy_set_header Connection "upgrade";');
+          }
+          lines.push('  }');
+        }
+        lines.push('}');
+        return lines.join('\n');
+      }
+
+      function applySiteConfTemplate(askBeforeReplace, requestedTemplateKey, silent) {
+        var editor = document.getElementById('site-conf-editor');
+        if (askBeforeReplace && editor.dataset.dirty === 'true' && editor.value.trim()
+            && !window.confirm('应用模板会替换当前 Conf 内容，是否继续？')) return;
+        var templateKey = requestedTemplateKey || document.getElementById('site-conf-template').value;
+        var content = siteConfTemplate(templateKey, silent);
+        if (content === null) return;
+        editor.value = content;
+        editor.dataset.dirty = 'false';
+        editor.dataset.templateKey = templateKey;
+        document.getElementById('site-conf-template-button').textContent = '重新应用模板';
+        document.getElementById('site-conf-template-summary').textContent = siteConfTemplateSummary(templateKey, false);
+      }
+
+      function refreshCleanSiteConfTemplate(pathsChanged) {
+        var editor = document.getElementById('site-conf-editor');
+        var templateSelect = document.getElementById('site-conf-template');
+        var appliedTemplate = editor.dataset.templateKey || 'proxy-http';
+        if (siteCreateMode !== 'conf' || templateSelect.value !== appliedTemplate) return;
+        if (editor.dataset.dirty === 'true') {
+          if (pathsChanged && appliedTemplate === 'proxy-https') {
+            document.getElementById('site-conf-template-summary').textContent = '节点或证书已变化；当前 Conf 有手工修改，请检查证书路径。';
+          }
+          return;
+        }
+        if (pathsChanged && appliedTemplate !== 'proxy-https') return;
+        applySiteConfTemplate(false, appliedTemplate, true);
+        if (pathsChanged && appliedTemplate === 'proxy-https' && !document.getElementById('site-cert').value) {
+          document.getElementById('site-conf-template-summary').textContent = '请重新选择覆盖目标节点的证书，再更新 HTTPS 模板。';
+          document.getElementById('site-conf-template-button').textContent = '更新证书路径';
+        }
+      }
+
+      function setSiteCreateMode(mode) {
+        siteCreateMode = mode === 'conf' ? 'conf' : 'guided';
+        var confMode = siteCreateMode === 'conf';
+        var dialog = document.getElementById('site-dialog');
+        dialog.dataset.mode = siteCreateMode;
+        dialog.querySelectorAll('[data-site-create-mode]').forEach(function (button) {
+          var active = button.dataset.siteCreateMode === siteCreateMode;
+          button.classList.toggle('active', active);
+          button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+        dialog.querySelectorAll('.site-guided-field').forEach(function (field) {
+          field.hidden = confMode;
+          field.querySelectorAll('input, select, textarea').forEach(function (control) {
+            control.disabled = confMode;
+          });
+        });
+        var target = document.getElementById('site-target');
+        target.required = !confMode;
+        var confField = document.getElementById('site-conf-field');
+        var editor = document.getElementById('site-conf-editor');
+        confField.hidden = !confMode;
+        editor.disabled = !confMode;
+        editor.required = confMode;
+        document.getElementById('site-dialog-subtitle').textContent = confMode
+          ? '直接编写站点级 Conf，仍通过 Agent 逐节点校验与发布'
+          : '填写站点信息，平台自动生成基础 Nginx 配置';
+        document.getElementById('site-submit-button').textContent = confMode ? '保存 Conf 草稿' : '创建草稿';
+        if (confMode && !editor.value.trim()) applySiteConfTemplate(false);
+        updateSiteCertificateOptions();
       }
 
       function defaultConfig(domain, type, target, cert) {
@@ -5135,11 +5645,45 @@
       function managedConfigContent(site, node) {
         var certificateRoot = managedCertificateRoot(node);
         var content = String(site.config || '');
+        var cert = getCert(site.certificateId);
+        var exactPathPlaceholders = [];
+        if (cert && node) {
+          var targetPaths = certificateTargetPaths(cert, node);
+          var exactPaths = [];
+          state.nodes.forEach(function (sourceNode) {
+            var sourcePaths = certificateTargetPaths(cert, sourceNode);
+            exactPaths.push({ from: sourcePaths.certificatePath, to: targetPaths.certificatePath });
+            exactPaths.push({ from: sourcePaths.keyPath, to: targetPaths.keyPath });
+          });
+          var seenPaths = {};
+          exactPaths.filter(function (item) {
+            if (!item.from || item.from === item.to || seenPaths[item.from]) return false;
+            seenPaths[item.from] = true;
+            return true;
+          }).sort(function (left, right) {
+            return right.from.length - left.from.length;
+          }).forEach(function (item, index) {
+            var placeholder = '__NGINX_MANAGER_CERT_PATH_' + index + '__';
+            content = content.split(item.from).join(placeholder);
+            exactPathPlaceholders.push({ placeholder: placeholder, value: item.to });
+          });
+        }
+        if (!cert || !node) return content;
         var knownRoots = ['/etc/nginx/ssl/nginx-manager'].concat(state.nodes.map(function (item) {
           return managedCertificateRoot(item);
         }));
-        Array.from(new Set(knownRoots)).sort(function (left, right) { return right.length - left.length; }).forEach(function (root) {
-          content = content.split(String(root).replace(/\/+$/, '') + '/').join(certificateRoot + '/');
+        var rootPlaceholders = [];
+        Array.from(new Set(knownRoots)).sort(function (left, right) { return right.length - left.length; }).forEach(function (root, index) {
+          var normalizedRoot = String(root).replace(/\/+$/, '');
+          var placeholder = '__NGINX_MANAGER_CERT_ROOT_' + index + '__/';
+          content = content.split(normalizedRoot + '/').join(placeholder);
+          rootPlaceholders.push(placeholder);
+        });
+        rootPlaceholders.forEach(function (placeholder) {
+          content = content.split(placeholder).join(certificateRoot + '/');
+        });
+        exactPathPlaceholders.forEach(function (item) {
+          content = content.split(item.placeholder).join(item.value);
         });
         return content;
       }
@@ -5742,8 +6286,28 @@
           notify('该域名已经存在');
           return;
         }
-        var type = String(form.get('type'));
-        var target = String(form.get('target')).trim();
+        var confMode = siteCreateMode === 'conf';
+        var type = confMode ? 'custom' : String(form.get('type'));
+        var target = confMode ? '自定义 Nginx Conf' : String(form.get('target')).trim();
+        var config = '';
+        if (confMode) {
+          config = document.getElementById('site-conf-editor').value;
+          if (!config.trim()) {
+            notify('Conf 配置不能为空');
+            document.getElementById('site-conf-editor').focus();
+            return;
+          }
+          var serverNames = nginxDirectiveValues(config, 'server_name').join(' ').split(/\s+/).map(function (name) {
+            return name.replace(/^["']|["']$/g, '');
+          }).filter(Boolean);
+          if (!serverNames.includes(domain)) {
+            notify('Conf 中需要包含 server_name ' + domain + ';');
+            document.getElementById('site-conf-editor').focus();
+            return;
+          }
+          var metadata = inventorySiteMetadata({ path: domain + '.conf', content: config });
+          if (metadata.target && metadata.target !== '现有 Nginx 配置') target = metadata.target;
+        }
         var certId = String(form.get('certificate') || '');
         if (certId) {
           var selectedCertificate = getCert(certId);
@@ -5761,6 +6325,7 @@
           id: uid('site'),
           domain: domain,
           type: type,
+          configMode: siteCreateMode,
           target: target,
           environment: String(form.get('environment')),
           nodeIds: nodeIds,
@@ -5770,11 +6335,15 @@
           note: String(form.get('note') || '').trim(),
           changeNote: '草稿：创建站点',
           updatedAt: '刚刚',
-          config: defaultConfig(domain, type, target, getCert(certId)),
+          config: confMode ? config : defaultConfig(domain, type, target, getCert(certId)),
           nodeConfigs: {},
           history: []
         };
         state.sites.unshift(site);
+        if (selectedCertificate) {
+          selectedCertificate.siteIds = Array.isArray(selectedCertificate.siteIds) ? selectedCertificate.siteIds : [];
+          if (!selectedCertificate.siteIds.includes(site.id)) selectedCertificate.siteIds.push(site.id);
+        }
         nodeIds.map(getNode).filter(Boolean).forEach(function (node) {
           node.sites += 1;
         });
@@ -5789,7 +6358,36 @@
       document.getElementById('config-note').addEventListener('input', updateDiffBadge);
 
       document.getElementById('site-node-checks').addEventListener('change', function (event) {
-        if (event.target && event.target.name === 'site-node') updateSiteCertificateOptions();
+        if (event.target && event.target.name === 'site-node') {
+          updateSiteCertificateOptions();
+          refreshCleanSiteConfTemplate(true);
+        }
+      });
+
+      document.getElementById('site-domain').addEventListener('input', function () {
+        refreshCleanSiteConfTemplate(false);
+      });
+
+      document.getElementById('site-cert').addEventListener('change', function () {
+        refreshCleanSiteConfTemplate(true);
+      });
+
+      document.querySelector('.site-mode-switch').addEventListener('click', function (event) {
+        var button = event.target.closest('[data-site-create-mode]');
+        if (button) setSiteCreateMode(button.dataset.siteCreateMode);
+      });
+
+      document.getElementById('site-conf-template-button').addEventListener('click', function () {
+        applySiteConfTemplate(true);
+      });
+
+      document.getElementById('site-conf-template').addEventListener('change', function (event) {
+        document.getElementById('site-conf-template-summary').textContent = siteConfTemplateSummary(event.target.value, true);
+      });
+
+      document.getElementById('site-conf-editor').addEventListener('input', function (event) {
+        event.target.dataset.dirty = 'true';
+        document.getElementById('site-conf-template-button').textContent = '替换为所选模板';
       });
 
       document.getElementById('config-form').addEventListener('submit', function (event) {
