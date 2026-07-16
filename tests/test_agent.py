@@ -339,7 +339,48 @@ class AgentTestCase(unittest.TestCase):
         )
         self.assertEqual("failed", response["status"])
         self.assertIn("restored", response["error"])
+        self.assertIn("phase testing", response["error"])
+        self.assertEqual("nginx_config_test_failed", response["failure_code"])
+        self.assertEqual("nginx_test", response["failure_stage"])
+        self.assertEqual("restored", response["rollback_status"])
         self.assertEqual(old, target.read_bytes())
+
+        mapped = agent._to_server_result(response)
+        self.assertEqual("failed", mapped["status"])
+        self.assertEqual("nginx_config_test_failed", mapped["details"]["failure_code"])
+        self.assertEqual("nginx_test", mapped["details"]["failure_stage"])
+        self.assertEqual("restored", mapped["details"]["rollback_status"])
+
+    def test_failed_reload_is_distinct_from_nginx_test_failure(self):
+        target = self.config_root / "reload-failure.conf"
+        old = b"server { listen 8080; }\n"
+        target.write_bytes(old)
+        self.executor._reload_only.side_effect = agent.CommandError("nginx reload command failed")
+        self.executor._nginx_is_running = mock.Mock(return_value=False)
+
+        response = self.executor.execute(
+            self.job(
+                "job-reload-failure",
+                "config_apply",
+                {
+                    "path": str(target),
+                    "content": "server { listen 8081; }\n",
+                    "expected_sha256": self.sha(old),
+                    "reload": True,
+                },
+            )
+        )
+
+        self.assertEqual("failed", response["status"])
+        self.assertEqual("nginx_reload_failed", response["failure_code"])
+        self.assertEqual("reload", response["failure_stage"])
+        self.assertEqual("restored", response["rollback_status"])
+        self.assertEqual(old, target.read_bytes())
+
+        mapped = agent._to_server_result(response)
+        self.assertEqual("nginx_reload_failed", mapped["details"]["failure_code"])
+        self.assertEqual("reload", mapped["details"]["failure_stage"])
+        self.assertEqual("restored", mapped["details"]["rollback_status"])
 
     def test_power_loss_between_certificate_replaces_recovers_both_files(self):
         self.executor._verify_certificate_pair = mock.Mock(return_value="AA:BB:CC")
@@ -700,7 +741,9 @@ class AgentTestCase(unittest.TestCase):
 
         expired = dict(local, status="expired", error="job expired")
         mapped_expired = agent._to_server_result(expired)
-        self.assertEqual("failed", mapped_expired["status"])
+        self.assertEqual("expired", mapped_expired["status"])
+        self.assertEqual("job_expired", mapped_expired["details"]["failure_code"])
+        self.assertEqual("queue", mapped_expired["details"]["failure_stage"])
 
     def test_interrupted_job_is_not_replayed(self):
         self.store.begin("job-crashed", "nginx_reload")

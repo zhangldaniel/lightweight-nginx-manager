@@ -61,6 +61,37 @@ JOB_ACTIONS = {
 TERMINAL_JOB_STATES = {"succeeded", "failed", "expired"}
 ACTIVE_JOB_STATES = {"queued", "running"}
 WEB_ROLES = {"admin", "operator", "auditor"}
+FAILURE_CODES = {
+    "job_expired",
+    "agent_interrupted",
+    "helper_unavailable",
+    "permission_denied",
+    "path_rejected",
+    "concurrent_change",
+    "config_policy_rejected",
+    "certificate_validation_failed",
+    "nginx_config_test_failed",
+    "nginx_reload_failed",
+    "health_check_failed",
+    "rollback_failed",
+    "command_timeout",
+    "internal_error",
+    "publish_failed",
+    "job_failed",
+}
+FAILURE_STAGES = {
+    "queue",
+    "agent",
+    "precheck",
+    "prepare",
+    "write",
+    "nginx_test",
+    "reload",
+    "health_check",
+    "recovery",
+    "unknown",
+}
+ROLLBACK_STATUSES = {"restored", "unverified"}
 SENSITIVE_KEY_FRAGMENTS = {
     "private_key",
     "privatekey",
@@ -356,6 +387,19 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
         if isinstance(value, str):
             value = value[:256]
         result[key] = value
+
+    # Persist only bounded enums that are safe to expose to Web administrators.
+    # The arbitrary error/output text below remains digest-only.
+    if request.status in {"failed", "expired"}:
+        failure_code = (request.details or {}).get("failure_code")
+        failure_stage = (request.details or {}).get("failure_stage")
+        rollback_status = (request.details or {}).get("rollback_status")
+        if isinstance(failure_code, str) and failure_code in FAILURE_CODES:
+            result["failure_code"] = failure_code
+        if isinstance(failure_stage, str) and failure_stage in FAILURE_STAGES:
+            result["failure_stage"] = failure_stage
+        if isinstance(rollback_status, str) and rollback_status in ROLLBACK_STATUSES:
+            result["rollback_status"] = rollback_status
 
     if request.action == "config_inventory":
         inventory = _safe_config_inventory(request.details)
@@ -1049,11 +1093,14 @@ class Database:
         if not rows:
             return 0
         redacted = _canonical_json({"redacted": True, "reason": "expired"})
+        expired_result = _canonical_json(
+            {"failure_code": "job_expired", "failure_stage": "queue"}
+        )
         connection.execute(
             """UPDATE jobs
-               SET status = 'expired', completed_at = ?, payload_json = ?
+               SET status = 'expired', completed_at = ?, payload_json = ?, result_meta_json = ?
                WHERE status IN ('queued', 'running') AND expires_at <= ?""",
-            (now, redacted, now),
+            (now, redacted, expired_result, now),
         )
         Database.audit(
             connection,

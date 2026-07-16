@@ -384,6 +384,127 @@ class ServerTestCase(unittest.TestCase):
         self.assertNotIn("output", jobs[0]["result"])
         self.assertIn("output_sha256", jobs[0]["result"])
 
+    def test_failed_jobs_expose_only_safe_failure_metadata(self):
+        enrolled = self.enroll()
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+
+        def create_claim_and_fail(details, error, output):
+            created = self.client.post(
+                "/api/v1/admin/jobs",
+                headers=self.admin_headers,
+                json={
+                    "node_ids": [enrolled["agent_id"]],
+                    "action": "config_apply",
+                    "payload": {
+                        "path": "/etc/nginx/nginx-manager.d/failure-test.conf",
+                        "content": "server { listen 8080; }\n",
+                        "expected_sha256": "missing",
+                    },
+                    "ttl_seconds": 60,
+                },
+            )
+            self.assertEqual(201, created.status_code, created.text)
+            job_id = created.json()["jobs"][0]["id"]
+            polled = self.client.post(
+                "/api/v1/agent/poll", headers=agent_headers, json={"limit": 1}
+            )
+            self.assertEqual(job_id, polled.json()["jobs"][0]["id"])
+            failed = self.client.post(
+                "/api/v1/agent/jobs/{}/result".format(job_id),
+                headers=agent_headers,
+                json={
+                    "status": "failed",
+                    "job_id": job_id,
+                    "action": "config_apply",
+                    "exit_code": 1,
+                    "duration_ms": 37,
+                    "error": error,
+                    "output": output,
+                    "details": details,
+                },
+            )
+            self.assertEqual(200, failed.status_code, failed.text)
+            return job_id
+
+        raw_error = "nginx: [emerg] unknown directive; private-token=must-not-be-returned"
+        raw_output = "raw nginx stderr and configuration content must not be returned"
+        known_id = create_claim_and_fail(
+            {
+                "failure_code": "nginx_config_test_failed",
+                "failure_stage": "nginx_test",
+                "rollback_status": "restored",
+                "syntax_ok": False,
+                "failure_summary": "arbitrary agent supplied text must be discarded",
+            },
+            raw_error,
+            raw_output,
+        )
+        unknown_id = create_claim_and_fail(
+            {
+                "failure_code": "run_arbitrary_command",
+                "failure_stage": "shell",
+                "rollback_status": "maybe",
+                "syntax_ok": False,
+            },
+            "unknown enum failure text",
+            "unknown enum output",
+        )
+
+        jobs = self.client.get("/api/v1/admin/jobs", headers=self.admin_headers).json()["items"]
+        by_id = {job["id"]: job for job in jobs}
+        known = by_id[known_id]
+        self.assertEqual("failed", known["status"])
+        self.assertEqual("nginx_config_test_failed", known["result"]["failure_code"])
+        self.assertEqual("nginx_test", known["result"]["failure_stage"])
+        self.assertEqual("restored", known["result"]["rollback_status"])
+        self.assertFalse(known["result"]["syntax_ok"])
+        self.assertEqual(1, known["result"]["exit_code"])
+        self.assertEqual(len(raw_error.encode("utf-8")), known["result"]["error_bytes"])
+        self.assertEqual(hashlib.sha256(raw_error.encode("utf-8")).hexdigest(), known["result"]["error_sha256"])
+        self.assertNotIn("error", known["result"])
+        self.assertNotIn("output", known["result"])
+        self.assertNotIn("failure_summary", known["result"])
+        serialized = json.dumps(known, ensure_ascii=False)
+        self.assertNotIn(raw_error, serialized)
+        self.assertNotIn(raw_output, serialized)
+        self.assertNotIn("arbitrary agent supplied text", serialized)
+
+        unknown = by_id[unknown_id]
+        self.assertEqual("failed", unknown["status"])
+        self.assertFalse(unknown["result"]["syntax_ok"])
+        self.assertNotIn("failure_code", unknown["result"])
+        self.assertNotIn("failure_stage", unknown["result"])
+        self.assertNotIn("rollback_status", unknown["result"])
+
+    def test_server_expired_job_exposes_safe_queue_failure_metadata(self):
+        enrolled = self.enroll()
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [enrolled["agent_id"]],
+                "action": "nginx_test",
+                "payload": {},
+                "ttl_seconds": 60,
+            },
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        job_id = created.json()["jobs"][0]["id"]
+
+        # Move the deadline into the past without sleeping; listing jobs performs
+        # the same expiry sweep used by polling and snapshot endpoints.
+        with self.client.app.state.database.transaction() as connection:
+            connection.execute("UPDATE jobs SET expires_at = 0 WHERE id = ?", (job_id,))
+
+        response = self.client.get("/api/v1/admin/jobs", headers=self.admin_headers)
+        self.assertEqual(200, response.status_code, response.text)
+        job = next(item for item in response.json()["items"] if item["id"] == job_id)
+        self.assertEqual("expired", job["status"])
+        self.assertEqual(
+            {"failure_code": "job_expired", "failure_stage": "queue"},
+            job["result"],
+        )
+
     def test_config_inventory_result_is_bounded_validated_and_visible_to_web(self):
         enrolled = self.enroll()
         agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}

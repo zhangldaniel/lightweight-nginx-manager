@@ -831,6 +831,10 @@
       grid-column: 1 / -1;
     }
 
+    .detail-actions .failure-notice {
+      grid-column: 1 / -1;
+    }
+
     .notice {
       display: flex;
       gap: 9px;
@@ -2418,6 +2422,75 @@
       border-radius: 7px;
       background: #fff8e9;
       color: #76521d;
+    }
+
+    .failure-notice {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid #f0c8ce;
+      border-radius: 8px;
+      background: var(--red-soft);
+      color: #8e2434;
+    }
+
+    .failure-mark {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: #ffe0e3;
+      color: var(--red);
+      font-weight: 750;
+    }
+
+    .failure-copy {
+      min-width: 0;
+    }
+
+    .failure-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .failure-title-row strong {
+      color: #7f1d2d;
+      font-size: 13px;
+    }
+
+    .failure-reason {
+      margin-top: 4px;
+      color: #9f2940;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .failure-meta {
+      margin-top: 5px;
+      color: #a95865;
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .failure-link {
+      margin-top: 7px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: #a61f38;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    .failure-link:hover {
+      text-decoration: underline;
     }
 
     .node-grid {
@@ -4070,6 +4143,149 @@
         };
       }
 
+      function jobFailureInfo(job) {
+        var result = job && job.result && typeof job.result === 'object' ? job.result : {};
+        var code = typeof result.failure_code === 'string' ? result.failure_code : '';
+        var stage = typeof result.failure_stage === 'string' ? result.failure_stage : '';
+        var reasons = {
+          job_expired: '任务已过期，Agent 未在有效期内完成',
+          agent_interrupted: 'Agent 上次执行被中断，任务没有自动重放',
+          helper_unavailable: 'Agent 的提权 Helper 不可用',
+          permission_denied: 'Agent 对目标文件或目录权限不足',
+          path_rejected: '目标路径不在 Agent 允许的托管目录内',
+          concurrent_change: '节点文件已被其他操作修改，Hash 校验冲突',
+          config_policy_rejected: 'Conf 格式不完整或包含不允许托管的指令',
+          certificate_validation_failed: '证书格式、私钥匹配或有效性校验失败',
+          nginx_config_test_failed: 'Nginx 配置校验未通过',
+          nginx_reload_failed: '配置已完成校验，但 Nginx reload 未成功',
+          health_check_failed: '发布后的健康检查未通过',
+          rollback_failed: '发布失败且自动恢复未能确认，请立即检查节点',
+          command_timeout: '节点命令执行超时',
+          internal_error: 'Agent 内部异常，任务未完成',
+          publish_failed: '配置写入、校验或 reload 阶段未完成',
+          job_failed: 'Agent 未完成该任务',
+          submission_failed: '控制端未能为全部目标节点创建任务'
+        };
+        var stageLabels = {
+          queue: '任务队列',
+          agent: 'Agent 执行',
+          precheck: '发布前检查',
+          prepare: '文件准备',
+          write: '文件替换',
+          nginx_test: 'nginx -t',
+          reload: 'Nginx reload',
+          health_check: '健康检查',
+          recovery: '自动恢复',
+          unknown: '节点执行'
+        };
+        var reason = reasons[code] || '';
+        if (!reason && job && job.status === 'expired') {
+          code = 'job_expired';
+          stage = stage || 'queue';
+          reason = reasons.job_expired;
+        }
+        if (!reason && job && job.action === 'nginx_test') {
+          reason = 'Nginx 配置校验未通过';
+          stage = stage || 'nginx_test';
+        }
+        if (!reason && job && job.action === 'nginx_reload') {
+          reason = 'Nginx reload 未成功';
+          stage = stage || 'reload';
+        }
+        if (!reason && ['config_apply', 'config_delete'].includes(job && job.action)) {
+          if (result.syntax_ok === true && result.reloaded === false) {
+            reason = '配置校验已通过，但 reload 未成功';
+            stage = stage || 'reload';
+          } else {
+            reason = '配置写入或 Nginx 校验未完成';
+            stage = stage || 'precheck';
+          }
+        }
+        if (!reason && job && job.action === 'certificate_apply') {
+          reason = result.syntax_ok === true && result.reloaded === false
+            ? '证书已写入，但 reload 未成功'
+            : '证书校验、写入或 Nginx 校验未完成';
+          stage = stage || (result.syntax_ok === true ? 'reload' : 'precheck');
+        }
+        if (!reason && Number(result.error_bytes || 0) > 0) {
+          reason = 'Agent 返回执行错误；原始输出已安全脱敏';
+        }
+        if (!reason) reason = '节点任务未成功完成，旧记录未保存可读原因';
+        var rollback = result.rollback_status === 'restored'
+          ? '原文件已自动恢复'
+          : (result.rollback_status === 'unverified' ? '自动恢复结果未确认' : '');
+        return {
+          code: code || 'job_failed',
+          stage: stage || 'unknown',
+          stageLabel: stageLabels[stage] || stageLabels.unknown,
+          reason: reason,
+          rollback: rollback
+        };
+      }
+
+      function buildSiteFailure(jobs, pending) {
+        var pendingById = {};
+        (pending.jobs || []).forEach(function (item) { pendingById[item.id] = item; });
+        var items = jobs.filter(function (job) {
+          return job.status !== 'succeeded';
+        }).map(function (job) {
+          var pendingItem = pendingById[job.id] || {};
+          var node = getNode(pendingItem.nodeId || job.node_id);
+          var failure = jobFailureInfo(job);
+          return {
+            jobId: job.id,
+            nodeId: pendingItem.nodeId || job.node_id || '',
+            nodeName: job.node_name || (node ? node.name : pendingItem.nodeId || job.node_id || '未知节点'),
+            code: failure.code,
+            stage: failure.stage,
+            stageLabel: failure.stageLabel,
+            reason: failure.reason,
+            rollback: failure.rollback,
+            completedAt: job.completed_at || job.created_at || ''
+          };
+        }).slice(0, 8);
+        var distinctReasons = Array.from(new Set(items.map(function (item) { return item.reason; })));
+        var summary = items.length === 1
+          ? items[0].reason
+          : (distinctReasons.length === 1
+            ? items.length + ' 个节点均失败：' + distinctReasons[0]
+            : items.length + ' 个节点失败，首个原因：' + (items[0] ? items[0].reason : '节点任务未完成'));
+        if (items.length && items.length < jobs.length) summary = '部分节点未完成：' + summary;
+        return {
+          summary: summary || '节点任务未成功完成',
+          items: items,
+          jobIds: items.map(function (item) { return item.jobId; }),
+          failedAt: items[0] && items[0].completedAt ? items[0].completedAt : new Date().toISOString()
+        };
+      }
+
+      function buildSubmissionFailure(queued, error, operation) {
+        var text = String(error && error.message || '');
+        var reason = '控制端未能为全部目标节点创建任务';
+        if (text.indexOf('缺少当前配置 Hash') >= 0) reason = '节点缺少当前配置 Hash，请先重新扫描或导入节点配置';
+        else if (text.indexOf('需要升级到 Agent') >= 0) reason = '目标节点 Agent 版本过低，需要先升级';
+        else if (text.indexOf('没有创建任何') >= 0) reason = '控制端没有创建目标任务，请确认节点状态和选择范围';
+        var items = (queued || []).map(function (item) {
+          var node = getNode(item.nodeId);
+          return {
+            jobId: item.id,
+            nodeId: item.nodeId,
+            nodeName: node ? node.name : item.nodeId,
+            code: 'submission_failed',
+            stage: 'queue',
+            stageLabel: '任务队列',
+            reason: reason,
+            rollback: ''
+          };
+        });
+        return {
+          summary: (operation || '发布') + '任务提交未完成：' + reason,
+          items: items,
+          jobIds: items.map(function (item) { return item.jobId; }),
+          failedAt: new Date().toISOString()
+        };
+      }
+
       function mapRemoteJob(job) {
         var labels = {
           inspect: '节点探测',
@@ -4087,6 +4303,12 @@
         var log = Object.keys(result).map(function (key) {
           return key + ': ' + String(result[key]);
         });
+        var failure = job.status === 'succeeded' ? null : jobFailureInfo(job);
+        if (failure) {
+          log.unshift('失败原因：' + failure.reason
+            + (failure.stageLabel ? ' · 阶段：' + failure.stageLabel : '')
+            + (failure.rollback ? ' · ' + failure.rollback : ''));
+        }
         return {
           id: job.id,
           type: labels[job.action] || job.action,
@@ -4096,7 +4318,10 @@
           time: job.created_at ? new Date(job.created_at).toLocaleString('zh-CN', { hour12: false }) : '刚刚',
           duration: result.duration_ms != null ? (Number(result.duration_ms) / 1000).toFixed(1) + 's' : '—',
           user: '控制端',
-          note: '任务 ' + job.id.slice(0, 8) + ' · ' + job.status,
+          note: failure ? failure.reason : '任务 ' + job.id.slice(0, 8) + ' · ' + job.status,
+          failureReason: failure ? failure.reason : '',
+          failureStage: failure ? failure.stageLabel : '',
+          rollbackStatus: failure ? failure.rollback : '',
           log: log.length ? log : ['详细输出仅保留摘要和校验值，避免泄露敏感配置。']
         };
       }
@@ -4113,6 +4338,8 @@
           var terminal = related.every(function (job) { return ['succeeded', 'failed', 'expired'].includes(job.status); });
           if (!terminal) return;
           var failed = related.some(function (job) { return job.status !== 'succeeded'; });
+          if (failed) site.lastFailure = buildSiteFailure(related, pending);
+          else delete site.lastFailure;
           if (pending.deleteConfig) {
             site.nodeHashes = site.nodeHashes || {};
             site.nodeConfigPaths = site.nodeConfigPaths || {};
@@ -4847,6 +5074,43 @@
         ].join('');
       }
 
+      function renderSiteFailure(site) {
+        if (!site || site.status !== 'failed') return '';
+        var failure = site.lastFailure && typeof site.lastFailure === 'object' ? site.lastFailure : null;
+        var items = failure && Array.isArray(failure.items) ? failure.items : [];
+        var summary = failure && failure.summary
+          ? String(failure.summary)
+          : '该失败记录产生于升级前，控制端没有保存可读原因。请查看 Agent 本地记录或重新发布。';
+        var nodeNames = Array.from(new Set(items.map(function (item) {
+          return String(item.nodeName || item.nodeId || '').trim();
+        }).filter(Boolean)));
+        var first = items[0] || {};
+        var meta = [];
+        if (nodeNames.length) {
+          meta.push('节点：' + nodeNames.slice(0, 3).join('、') + (nodeNames.length > 3 ? ' 等 ' + nodeNames.length + ' 个节点' : ''));
+        }
+        if (first.stageLabel) meta.push('阶段：' + first.stageLabel);
+        if (first.rollback) meta.push(first.rollback);
+        if (failure && failure.failedAt) {
+          var failedDate = new Date(failure.failedAt);
+          if (!Number.isNaN(failedDate.getTime())) {
+            meta.push(failedDate.toLocaleString('zh-CN', { hour12: false }));
+          }
+        }
+        if (!meta.length) meta.push('旧失败记录 · 原始错误已安全脱敏');
+        return [
+          '<div class="failure-notice" role="alert">',
+          '  <span class="failure-mark" aria-hidden="true">!</span>',
+          '  <div class="failure-copy">',
+          '    <div class="failure-title-row"><strong>发布未完成</strong><span class="status-pill danger">需处理</span></div>',
+          '    <div class="failure-reason">' + escapeHtml(summary) + '</div>',
+          '    <div class="failure-meta">' + escapeHtml(meta.join(' · ')) + '</div>',
+          '    <button class="failure-link" type="button" data-action="open-site-failure" data-site-id="' + escapeHtml(site.id) + '">查看失败记录</button>',
+          '  </div>',
+          '</div>'
+        ].join('');
+      }
+
       function renderSiteDetail() {
         var visibleSites = filteredSites();
         var site = visibleSites.find(function (item) { return item.id === selectedSiteId; }) || visibleSites[0];
@@ -4887,6 +5151,7 @@
         } else if (site.status === 'drift') {
           warning = '<div class="notice"><span>!</span><div>所选节点与平台配置一致，但该站点的其他节点仍有配置漂移。</div></div>';
         }
+        var failureNotice = renderSiteFailure(site);
 
         return [
           '<aside class="detail-panel" id="site-detail-slot">',
@@ -4896,6 +5161,7 @@
           '      <p>' + escapeHtml(site.environment) + ' · ' + formatSiteType(site.type) + ' · 配置 v' + site.version + '</p>',
           '    </div>',
           '    <div class="detail-actions">',
+          failureNotice,
           '      <button class="button" type="button" data-action="edit-config" data-site-id="' + escapeHtml(site.id) + '">编辑配置</button>',
           '      <button class="button" type="button" data-action="transfer-config" data-site-id="' + escapeHtml(site.id) + '">复制到其他节点</button>',
           '      <button class="button" type="button" data-action="validate-site" data-site-id="' + escapeHtml(site.id) + '">逐节点校验</button>',
@@ -5728,6 +5994,7 @@
           }
           if (willPublish && !queued.length && unchangedNodes.length === targets.length) {
             delete site.pendingRemote;
+            delete site.lastFailure;
             site.status = 'published';
             saveState();
             notify('所选节点配置内容已完全一致，无需重复发布或 reload');
@@ -5735,6 +6002,7 @@
             return;
           }
           if (!queued.length) throw new Error('控制端没有创建任何目标任务');
+          delete site.lastFailure;
           site.pendingRemote = { jobs: queued, publish: Boolean(willPublish) };
           site.status = willPublish ? 'publishing' : 'draft';
           saveState();
@@ -5747,10 +6015,12 @@
         } catch (error) {
           if (queued.length) {
             site.pendingRemote = { jobs: queued, publish: Boolean(willPublish) };
-            site.status = 'failed';
-            saveState();
           }
+          site.lastFailure = buildSubmissionFailure(queued, error, willPublish ? '发布' : '校验');
+          site.status = 'failed';
+          saveState();
           notify('任务提交失败：' + error.message);
+          render();
         }
       }
 
@@ -5781,6 +6051,7 @@
             });
           }
           if (!queued.length) throw new Error('控制端没有创建任何目标任务');
+          delete site.lastFailure;
           site.pendingRemote = {
             jobs: queued,
             publish: false,
@@ -5802,9 +6073,10 @@
               transferMode: mode,
               targetNodeIds: queued.map(function (item) { return item.nodeId; })
             };
-            site.status = 'failed';
-            saveState();
           }
+          site.lastFailure = buildSubmissionFailure(queued, error, '配置复制');
+          site.status = 'failed';
+          saveState();
           notify('配置复制任务提交失败：' + error.message);
           render();
         }
@@ -5838,6 +6110,7 @@
             });
           }
           if (!queued.length) throw new Error('控制端没有创建任何删除任务');
+          delete site.lastFailure;
           site.pendingRemote = {
             jobs: queued,
             publish: false,
@@ -5857,9 +6130,10 @@
               deleteConfig: true,
               targetNodeIds: queued.map(function (item) { return item.nodeId; })
             };
-            site.status = 'failed';
-            saveState();
           }
+          site.lastFailure = buildSubmissionFailure(queued, error, '配置移除');
+          site.status = 'failed';
+          saveState();
           notify('配置移除任务提交失败：' + error.message);
           render();
         }
@@ -5992,6 +6266,7 @@
             run.status = 'success';
             run.duration = (1.2 + nodes.length * (willPublish ? 1.3 : .5)).toFixed(1) + 's';
             run.log = document.getElementById('run-log').textContent.split('\n');
+            delete site.lastFailure;
             if (willPublish) {
               site.version += 1;
               site.status = 'published';
@@ -6024,7 +6299,10 @@
         document.getElementById('run-progress-bar').style.width = '100%';
         document.getElementById('run-node-list').innerHTML = nodes.map(function (node) {
           var ok = run.status === 'success';
-          return '<div class="run-node"><span class="step-mark ' + (ok ? 'success' : 'failed') + '">' + (ok ? '✓' : '!') + '</span><div><b>' + escapeHtml(node.name) + '</b><span>' + (ok ? '任务完成' : '任务失败或未执行') + '</span></div><span>' + escapeHtml(run.duration) + '</span></div>';
+          var outcome = ok
+            ? '任务完成'
+            : (run.failureReason || '任务失败或未执行；旧记录未保存可读原因');
+          return '<div class="run-node"><span class="step-mark ' + (ok ? 'success' : 'failed') + '">' + (ok ? '✓' : '!') + '</span><div><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(outcome) + '</span></div><span>' + escapeHtml(run.duration) + '</span></div>';
         }).join('');
         document.getElementById('run-log').textContent = (run.log || []).join('\n');
         openDialog('run-dialog');
@@ -6145,6 +6423,15 @@
           if (validateSite) startRun(validateSite, '配置校验', false);
         }
         else if (action === 'view-runs') switchView('runs');
+        else if (action === 'open-site-failure') {
+          var failedSite = getSite(siteId);
+          var failureJobIds = failedSite && failedSite.lastFailure && Array.isArray(failedSite.lastFailure.jobIds)
+            ? failedSite.lastFailure.jobIds
+            : [];
+          var failedRun = state.runs.find(function (run) { return failureJobIds.includes(run.id); });
+          if (failedRun) showHistoricalRun(failedRun);
+          else switchView('runs');
+        }
         else if (action === 'rollback') {
           var rollbackSite = getSite(siteId);
           var version = Number(actionTarget.getAttribute('data-version'));

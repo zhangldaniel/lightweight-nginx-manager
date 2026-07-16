@@ -59,7 +59,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -88,14 +88,63 @@ NGINX_TOKEN_RE = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{};]|[^\s{}
 LOG = logging.getLogger("nginx-manager-agent")
 _THREAD_LOCK = threading.RLock()
 
+FAILURE_CODES = {
+    "job_expired",
+    "agent_interrupted",
+    "helper_unavailable",
+    "permission_denied",
+    "path_rejected",
+    "concurrent_change",
+    "config_policy_rejected",
+    "certificate_validation_failed",
+    "nginx_config_test_failed",
+    "nginx_reload_failed",
+    "health_check_failed",
+    "rollback_failed",
+    "command_timeout",
+    "internal_error",
+    "publish_failed",
+    "job_failed",
+}
+FAILURE_STAGES = {
+    "queue",
+    "agent",
+    "precheck",
+    "prepare",
+    "write",
+    "nginx_test",
+    "reload",
+    "health_check",
+    "recovery",
+    "unknown",
+}
+ROLLBACK_STATUSES = {"restored", "unverified"}
+
 
 class AgentError(Exception):
-    """An expected and safe-to-return agent error."""
+    """An expected error with optional bounded, public failure metadata."""
+
+    def __init__(self, message: str, failure_code: Optional[str] = None,
+                 failure_stage: Optional[str] = None, rollback_status: Optional[str] = None):
+        super().__init__(message)
+        self.failure_code = (
+            failure_code if isinstance(failure_code, str) and failure_code in FAILURE_CODES else None
+        )
+        self.failure_stage = (
+            failure_stage if isinstance(failure_stage, str) and failure_stage in FAILURE_STAGES else None
+        )
+        self.rollback_status = (
+            rollback_status
+            if isinstance(rollback_status, str) and rollback_status in ROLLBACK_STATUSES
+            else None
+        )
 
 
 class ApiError(AgentError):
-    def __init__(self, message: str, status_code: Optional[int] = None):
-        super().__init__(message)
+    def __init__(self, message: str, status_code: Optional[int] = None,
+                 failure_code: Optional[str] = None, failure_stage: Optional[str] = None,
+                 rollback_status: Optional[str] = None):
+        super().__init__(message, failure_code, failure_stage, rollback_status)
         self.status_code = status_code
 
 
@@ -105,6 +154,149 @@ class ActionError(AgentError):
 
 class CommandError(ActionError):
     pass
+
+
+def _failure_metadata(error: Any, action: str = "", status: str = "failed",
+                      failure_code: Optional[str] = None, failure_stage: Optional[str] = None,
+                      rollback_status: Optional[str] = None) -> Dict[str, str]:
+    """Return only fixed failure enums; arbitrary error text never leaves this classifier."""
+    text = str(error or "").lower()
+    code = failure_code if isinstance(failure_code, str) and failure_code in FAILURE_CODES else None
+    if code is None:
+        candidate_code = getattr(error, "failure_code", None)
+        code = candidate_code if isinstance(candidate_code, str) and candidate_code in FAILURE_CODES else None
+    stage = failure_stage if isinstance(failure_stage, str) and failure_stage in FAILURE_STAGES else None
+    if stage is None:
+        candidate_stage = getattr(error, "failure_stage", None)
+        stage = candidate_stage if isinstance(candidate_stage, str) and candidate_stage in FAILURE_STAGES else None
+    rollback = (
+        rollback_status
+        if isinstance(rollback_status, str) and rollback_status in ROLLBACK_STATUSES
+        else None
+    )
+    if rollback is None:
+        candidate_rollback = getattr(error, "rollback_status", None)
+        rollback = (
+            candidate_rollback
+            if isinstance(candidate_rollback, str) and candidate_rollback in ROLLBACK_STATUSES
+            else None
+        )
+
+    if status == "expired" or "job expired" in text:
+        code = "job_expired"
+        stage = "queue"
+    elif code is None:
+        if "previous execution was interrupted" in text:
+            code = "agent_interrupted"
+        elif "privileged helper unavailable" in text or "helper returned an invalid response" in text:
+            code = "helper_unavailable"
+        elif "timed out" in text or "timeout" in text:
+            code = "command_timeout"
+        elif (
+            "automatic recovery could not be verified" in text
+            or "automatic recovery is incomplete" in text
+            or "recovery failed" in text
+        ):
+            code = "rollback_failed"
+            rollback = "unverified"
+        elif "permission denied" in text or "operation not permitted" in text or "access denied" in text:
+            code = "permission_denied"
+        elif (
+            "concurrent change" in text
+            or "expected_sha256" in text
+            or "expected an existing file" in text
+            or "expected a missing file" in text
+            or "exact current sha-256" in text
+            or "target changed" in text
+        ):
+            code = "concurrent_change"
+        elif (
+            "path must" in text
+            or "paths must" in text
+            or "path parent" in text
+            or "outside allowed_" in text
+            or "outside all managed roots" in text
+            or "symbolic-link" in text
+            or "hard-linked" in text
+            or "escaped the target directory" in text
+            or "must contain absolute paths" in text
+            or "must be strict subdirectories" in text
+        ):
+            code = "path_rejected"
+        elif (
+            "managed configuration" in text
+            or "directive '" in text
+            or "invalid directive" in text
+            or "configuration cannot be empty" in text
+            or "unterminated quoted string" in text
+            or "unbalanced braces" in text
+        ):
+            code = "config_policy_rejected"
+        elif (
+            "certificate validation" in text
+            or "certificate does not match private key" in text
+            or "does not contain a pem certificate" in text
+            or "does not contain a pem private key" in text
+            or "cannot decode certificate" in text
+            or "invalid pem certificate" in text
+            or "invalid certificate notafter" in text
+            or "certificate does not contain notafter" in text
+        ):
+            code = "certificate_validation_failed"
+        elif "health check failed" in text:
+            code = "health_check_failed"
+        elif stage == "nginx_test" or action == "nginx_test":
+            code = "nginx_config_test_failed"
+        elif stage == "reload" or action == "nginx_reload":
+            code = "nginx_reload_failed"
+        elif text.startswith("publish ") or "publication committed" in text:
+            code = "publish_failed"
+        elif "unexpected internal" in text:
+            code = "internal_error"
+        else:
+            code = "job_failed"
+
+    if stage not in FAILURE_STAGES:
+        if code == "job_expired":
+            stage = "queue"
+        elif code in {"agent_interrupted", "helper_unavailable", "internal_error"}:
+            stage = "agent"
+        elif code in {
+            "permission_denied", "path_rejected", "concurrent_change",
+            "config_policy_rejected", "certificate_validation_failed",
+        }:
+            stage = "precheck"
+        elif code == "nginx_config_test_failed":
+            stage = "nginx_test"
+        elif code == "nginx_reload_failed":
+            stage = "reload"
+        elif code == "health_check_failed":
+            stage = "health_check"
+        elif code == "rollback_failed":
+            stage = "recovery"
+        else:
+            stage = "unknown"
+
+    metadata = {"failure_code": code, "failure_stage": stage}
+    if rollback in ROLLBACK_STATUSES:
+        metadata["rollback_status"] = rollback
+    return metadata
+
+
+def _transaction_failure_stage(phase: Any) -> str:
+    if phase in {"prepared"}:
+        return "prepare"
+    if phase in {"replacing", "replaced", "committed"}:
+        return "write"
+    if phase in {"testing", "validated"}:
+        return "nginx_test"
+    if phase in {"reloading", "reloaded"}:
+        return "reload"
+    if phase in {"health_checking", "health_checked"}:
+        return "health_check"
+    if phase in {"rolling_back", "recovering", "recovery_failed", "recovered"}:
+        return "recovery"
+    return "prepare"
 
 
 class Settings:
@@ -575,10 +767,26 @@ class JobExecutor:
                 result = handler(payload, job_id)
             response = self._response(job_id, action, "succeeded", result=result, started_at=started)
         except AgentError as exc:
-            response = self._response(job_id, action, "failed", error=str(exc), started_at=started)
+            failure = _failure_metadata(exc, action=action)
+            response = self._response(
+                job_id,
+                action,
+                "failed",
+                error=str(exc),
+                started_at=started,
+                **failure
+            )
         except Exception:
             LOG.exception("unexpected failure in job %s action %s", job_id, action)
-            response = self._response(job_id, action, "failed", error="unexpected internal agent error", started_at=started)
+            response = self._response(
+                job_id,
+                action,
+                "failed",
+                error="unexpected internal agent error",
+                started_at=started,
+                failure_code="internal_error",
+                failure_stage="agent",
+            )
         self.store.complete(job_id, action, response)
         return response
 
@@ -608,7 +816,9 @@ class JobExecutor:
 
     @staticmethod
     def _response(job_id: str, action: str, status: str, result: Optional[Dict[str, Any]] = None,
-                  error: Optional[str] = None, started_at: Optional[str] = None) -> Dict[str, Any]:
+                  error: Optional[str] = None, started_at: Optional[str] = None,
+                  failure_code: Optional[str] = None, failure_stage: Optional[str] = None,
+                  rollback_status: Optional[str] = None) -> Dict[str, Any]:
         response: Dict[str, Any] = {
             "job_id": job_id,
             "action": action,
@@ -620,6 +830,17 @@ class JobExecutor:
             response["result"] = result
         if error:
             response["error"] = error
+        if status != "succeeded":
+            response.update(
+                _failure_metadata(
+                    error,
+                    action=action,
+                    status=status,
+                    failure_code=failure_code,
+                    failure_stage=failure_stage,
+                    rollback_status=rollback_status,
+                )
+            )
         return response
 
     def _allowed_path(self, raw: Any, roots: List[Path], kind: str) -> Path:
@@ -828,7 +1049,10 @@ class JobExecutor:
                 shell=False,
             )
         except subprocess.TimeoutExpired:
-            raise CommandError("command timed out after {:.1f}s".format(self.settings.command_timeout))
+            raise CommandError(
+                "command timed out after {:.1f}s".format(self.settings.command_timeout),
+                failure_code="command_timeout",
+            )
         except OSError as exc:
             raise CommandError("cannot execute configured nginx binary: {}".format(exc))
         stdout = completed.stdout.decode("utf-8", errors="replace")[-self.settings.max_command_output_bytes :]
@@ -840,10 +1064,18 @@ class JobExecutor:
         return result
 
     def _nginx_test(self) -> Dict[str, Any]:
-        return self._run([self.settings.nginx_binary, "-t", "-c", self.settings.nginx_config])
+        try:
+            return self._run([self.settings.nginx_binary, "-t", "-c", self.settings.nginx_config])
+        except CommandError as exc:
+            failure = _failure_metadata(exc, action="nginx_test", failure_stage="nginx_test")
+            raise CommandError(str(exc), **failure)
 
     def _reload_only(self) -> Dict[str, Any]:
-        return self._run([self.settings.nginx_binary, "-s", "reload", "-c", self.settings.nginx_config])
+        try:
+            return self._run([self.settings.nginx_binary, "-s", "reload", "-c", self.settings.nginx_config])
+        except CommandError as exc:
+            failure = _failure_metadata(exc, action="nginx_reload", failure_stage="reload")
+            raise CommandError(str(exc), **failure)
 
     def _nginx_is_running(self) -> bool:
         """Best-effort Linux check used only to decide recovery reload behavior."""
@@ -1491,8 +1723,18 @@ class JobExecutor:
                 result["health"] = health_result
             return result
         except Exception as exc:
+            failure_phase = manifest.get("phase") if isinstance(manifest, dict) else "preparing"
+            failure_stage = _transaction_failure_stage(failure_phase)
+            failure = _failure_metadata(exc, failure_stage=failure_stage)
+            if failure["failure_code"] == "job_failed":
+                failure["failure_code"] = "publish_failed"
             if committed:
-                raise ActionError("publication committed but result finalization failed; do not replay this job: {}".format(exc))
+                raise ActionError(
+                    "publication committed but result finalization failed at phase {}; do not replay this job: {}".format(
+                        failure_phase, exc
+                    ),
+                    **failure
+                )
             if manifest is None or not manifest_durable:
                 for artifact in artifacts:
                     with contextlib.suppress(OSError):
@@ -1500,7 +1742,10 @@ class JobExecutor:
                 for item in items:
                     with contextlib.suppress(OSError):
                         _fsync_dir(item["path"].parent)
-                raise ActionError("publish preparation failed before replacement: {}".format(exc))
+                raise ActionError(
+                    "publish preparation failed before replacement at phase {}: {}".format(failure_phase, exc),
+                    **failure
+                )
             try:
                 self._recover_manifest(manifest_path, verify_after=True)
             except Exception as recovery_error:
@@ -1510,11 +1755,19 @@ class JobExecutor:
                     recovery_error,
                 )
                 raise ActionError(
-                    "publish failed and automatic recovery could not be verified; helper must not continue: {}; recovery: {}".format(
-                        exc, recovery_error
-                    )
+                    "publish failed at phase {} and automatic recovery could not be verified; helper must not continue: {}; recovery: {}".format(
+                        failure_phase, exc, recovery_error
+                    ),
+                    failure_code="rollback_failed",
+                    failure_stage="recovery",
+                    rollback_status="unverified",
                 )
-            raise ActionError("publish failed and previous files were restored: {}".format(exc))
+            raise ActionError(
+                "publish failed at phase {} and previous files were restored: {}".format(failure_phase, exc),
+                failure_code=failure["failure_code"],
+                failure_stage=failure_stage,
+                rollback_status="restored",
+            )
 
     def _transaction_target_kind(self, path: Path) -> Tuple[str, Path]:
         if any(_is_relative_to(path, root) for root in self._allowed_config_roots):
@@ -2136,7 +2389,13 @@ class AgentService:
                     try:
                         result = executor.execute(job)
                     except AgentError as exc:
-                        result = JobExecutor._response(job_id, action, "failed", error=str(exc))
+                        result = JobExecutor._response(
+                            job_id,
+                            action,
+                            "failed",
+                            error=str(exc),
+                            **_failure_metadata(exc, action=action)
+                        )
                     server_result = _to_server_result(result)
                     self.api.post("/api/v1/agent/jobs/{}/result".format(urllib.parse.quote(job_id, safe="")), server_result, identity["machine_credential"])
                 failures = 0
@@ -2204,7 +2463,9 @@ class AgentService:
 def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
     """Map the helper-internal record to the small control-plane result schema."""
     action = str(local.get("action", ""))
-    succeeded = local.get("status") == "succeeded"
+    local_status = str(local.get("status", "failed"))
+    server_status = local_status if local_status in {"succeeded", "failed", "expired"} else "failed"
+    succeeded = server_status == "succeeded"
     raw = local.get("result") if isinstance(local.get("result"), dict) else {}
     details: Dict[str, Any] = {}
     output = ""
@@ -2292,8 +2553,20 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
         tested = raw.get("test") if isinstance(raw.get("test"), dict) else {}
         output = str(tested.get("stderr") or tested.get("stdout") or "")
 
+    if not succeeded:
+        details.update(
+            _failure_metadata(
+                local.get("error"),
+                action=action,
+                status=server_status,
+                failure_code=local.get("failure_code"),
+                failure_stage=local.get("failure_stage"),
+                rollback_status=local.get("rollback_status"),
+            )
+        )
+
     response: Dict[str, Any] = {
-        "status": "succeeded" if succeeded else "failed",
+        "status": server_status,
         "job_id": str(local.get("job_id", ""))[:200],
         "action": action[:64],
         "details": {key: value for key, value in details.items() if value is not None},
