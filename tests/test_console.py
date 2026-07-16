@@ -21,6 +21,7 @@ eval(take("function safeResourceName", "function managedConfigFilename"));
 eval(take("function managedCertificateRoot", "function certificateTargetPaths"));
 eval(take("function certificateTargetPaths", "function renderCertificateNodeChoices"));
 eval(take("function certificateCoversDomain", "function getSite"));
+eval(take("function normalizeProxyTarget", "function defaultConfig"));
 eval(take("function defaultConfig", "function configCertificateState"));
 eval(take("function rewriteConfigCertificatePaths", "function openConfigEditor"));
 eval(take("function managedConfigContent", "async function startRemoteConfigRun"));
@@ -48,6 +49,36 @@ const state = { nodes: [node] };
 let activeCertificate = wrongWildcard;
 function getCert() { return activeCertificate; }
 
+if (normalizeProxyTarget("10.165.0.29:8080") !== "http://10.165.0.29:8080") {
+  throw new Error("a bare guided proxy target did not receive the HTTP scheme");
+}
+if (normalizeProxyTarget("https://backend.example:8443/api/") !== "https://backend.example:8443/api/") {
+  throw new Error("an explicit HTTPS target was changed");
+}
+if (normalizeProxyTarget("$backend") !== "$backend" || normalizeProxyTarget("unix:/run/nginx.sock") !== "unix:/run/nginx.sock") {
+  throw new Error("an advanced proxy target was silently rewritten");
+}
+const guidedSite = {
+  configMode: "guided",
+  type: "proxy",
+  target: "10.165.0.29:8080",
+  config: "server {\n  location / {\n    proxy_pass 10.165.0.29:8080;\n  }\n}"
+};
+if (!normalizeGuidedSiteConfig(guidedSite)
+    || guidedSite.target !== "http://10.165.0.29:8080"
+    || !guidedSite.config.includes("proxy_pass http://10.165.0.29:8080;")) {
+  throw new Error("an existing guided draft was not repaired");
+}
+const customSite = {
+  configMode: "conf",
+  type: "proxy",
+  target: "10.165.0.29:8080",
+  config: "proxy_pass 10.165.0.29:8080;"
+};
+if (normalizeGuidedSiteConfig(customSite) || customSite.config.includes("http://")) {
+  throw new Error("custom Conf content was silently rewritten");
+}
+
 if (certificateCoversDomain(wrongWildcard, "test.int.hypergryph.com")) {
   throw new Error("a wildcard matched across more than one DNS label");
 }
@@ -56,10 +87,13 @@ if (!certificateCoversDomain(correctWildcard, "test.int.hypergryph.com")) {
 }
 
 const fresh = defaultConfig(
-  "test.int.hypergryph.com", "proxy", "http://127.0.0.1:8080", wrongWildcard, node
+  "test.int.hypergryph.com", "proxy", "127.0.0.1:8080", wrongWildcard, node
 );
 if (!fresh.includes("/apps/nginx/cert/itbkcmdb.crt")) {
   throw new Error("a new guided config ignored the scanned node certificate path");
+}
+if (!fresh.includes("proxy_pass http://127.0.0.1:8080;")) {
+  throw new Error("a new guided config retained an invalid bare proxy target");
 }
 
 const oldSite = {

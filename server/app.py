@@ -104,6 +104,7 @@ NGINX_ERROR_CODES = {
     "brace_mismatch",
     "duplicate_listen",
     "certificate_key_mismatch",
+    "invalid_url_prefix",
 }
 SENSITIVE_KEY_FRAGMENTS = {
     "private_key",

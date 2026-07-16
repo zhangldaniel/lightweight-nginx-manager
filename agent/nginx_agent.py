@@ -59,7 +59,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -131,6 +131,7 @@ NGINX_ERROR_CODES = {
     "brace_mismatch",
     "duplicate_listen",
     "certificate_key_mismatch",
+    "invalid_url_prefix",
 }
 
 
@@ -330,6 +331,8 @@ def _nginx_error_metadata(error: Any) -> Dict[str, Any]:
         code = "duplicate_upstream"
     elif "duplicate listen" in text or "a duplicate listen" in text:
         code = "duplicate_listen"
+    elif "invalid url prefix" in text:
+        code = "invalid_url_prefix"
     elif "invalid number of arguments" in text:
         code = "invalid_arguments"
     elif "is not terminated by \";\"" in text or "unexpected end of parameter" in text:

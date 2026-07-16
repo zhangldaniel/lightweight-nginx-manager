@@ -3411,7 +3411,7 @@
             <div class="form-field">
               <label for="change-note">本次变更说明</label>
               <textarea class="textarea" id="change-note" placeholder="例如：将上传限制从 10m 调整为 50m"></textarea>
-              <span class="field-help">保存草稿可以留空；校验和发布必须填写。</span>
+              <span class="field-help">可以留空；系统会按本次操作自动记录说明。</span>
             </div>
             <div class="form-field">
               <span class="fieldset-title">目标节点</span>
@@ -4194,7 +4194,8 @@
           missing_semicolon: '配置中可能缺少分号',
           brace_mismatch: '配置中的大括号可能不匹配',
           duplicate_listen: '配置中存在重复或冲突的 listen 定义',
-          certificate_key_mismatch: '证书与私钥不匹配'
+          certificate_key_mismatch: '证书与私钥不匹配',
+          invalid_url_prefix: 'proxy_pass 上游地址缺少 http:// 或 https:// 协议，或 URL 格式无效'
         };
         var reason = reasons[code] || '';
         if (!reason && job && job.status === 'expired') {
@@ -5512,6 +5513,7 @@
       function siteConfTemplate(templateKey, silent) {
         var domain = document.getElementById('site-domain').value.trim() || 'api.example.com';
         var target = document.getElementById('site-target').value.trim() || 'http://127.0.0.1:8080';
+        if (templateKey !== 'static') target = normalizeProxyTarget(target);
         var lines = ['server {'];
         if (templateKey === 'proxy-https') {
           var cert = getCert(document.getElementById('site-cert').value);
@@ -5627,6 +5629,35 @@
         updateSiteCertificateOptions();
       }
 
+      function normalizeProxyTarget(value) {
+        var target = String(value || '').trim();
+        if (!target || /^(?:https?:\/\/|\$)/i.test(target)) return target;
+        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target) || /^unix:/i.test(target)) return target;
+        if (/^(?:[a-z0-9._-]+|\[[0-9a-f:.]+\])(?::\d{1,5})?(?:\/[^\s;{}#"']*)?$/i.test(target)) {
+          return 'http://' + target;
+        }
+        return target;
+      }
+
+      function normalizeProxyPassDirectives(content) {
+        return String(content || '').replace(
+          /^([ \t]*proxy_pass[ \t]+)([^;\r\n]+)(;[ \t]*(?:#.*)?$)/gmi,
+          function (_match, prefix, target, suffix) {
+            return prefix + normalizeProxyTarget(target) + suffix;
+          }
+        );
+      }
+
+      function normalizeGuidedSiteConfig(site) {
+        if (!site || site.configMode !== 'guided' || site.type !== 'proxy') return false;
+        var nextConfig = normalizeProxyPassDirectives(site.config);
+        var nextTarget = normalizeProxyTarget(site.target);
+        if (nextConfig === site.config && nextTarget === site.target) return false;
+        site.config = nextConfig;
+        site.target = nextTarget;
+        return true;
+      }
+
       function defaultConfig(domain, type, target, cert, node) {
         var lines = ['server {'];
         if (cert) {
@@ -5648,7 +5679,7 @@
           lines.push('  }');
         } else {
           lines.push('  location / {');
-          lines.push('    proxy_pass ' + target + ';');
+          lines.push('    proxy_pass ' + normalizeProxyTarget(target) + ';');
           lines.push('    proxy_set_header Host $host;');
           lines.push('    proxy_set_header X-Real-IP $remote_addr;');
           lines.push('  }');
@@ -5783,7 +5814,10 @@
         if (!site) return;
         var editor = document.getElementById('config-editor');
         var noteInput = document.getElementById('config-note');
-        var nextConfig = editor.value;
+        var nextConfig = site.configMode === 'guided' && site.type === 'proxy'
+          ? normalizeProxyPassDirectives(editor.value)
+          : editor.value;
+        if (nextConfig !== editor.value) editor.value = nextConfig;
         var nextNote = noteInput.value.trim();
         var configChanged = nextConfig !== (editor.dataset.original || '');
         var noteChanged = nextNote !== (noteInput.dataset.original || '');
@@ -5820,11 +5854,6 @@
           return;
         }
         var changeNote = document.getElementById('change-note').value.trim();
-        if (mode !== 'draft' && !changeNote) {
-          document.getElementById('change-note').focus();
-          notify('校验或发布前，请填写本次变更说明');
-          return;
-        }
         var previousCertificate = getCert(site.certificateId);
         if (certificateChanged && previousCertificate && Array.isArray(previousCertificate.siteIds)) {
           previousCertificate.siteIds = previousCertificate.siteIds.filter(function (siteId) { return siteId !== site.id; });
@@ -5835,8 +5864,13 @@
         }
         site.certificateId = nextCertificateId;
         site.config = nextConfig;
+        if (site.configMode === 'guided' && site.type === 'proxy') {
+          site.target = normalizeProxyTarget(site.target);
+        }
         site.note = nextNote;
-        site.changeNote = changeNote ? (mode === 'draft' ? '草稿：' + changeNote : changeNote) : '草稿未填写变更说明';
+        site.changeNote = changeNote
+          ? (mode === 'draft' ? '草稿：' + changeNote : changeNote)
+          : (mode === 'validate' ? '配置校验' : (mode === 'publish' ? '配置发布' : '草稿未填写变更说明'));
         site.status = 'draft';
         site.updatedAt = '刚刚';
         saveState();
@@ -6060,7 +6094,9 @@
 
       function managedConfigContent(site, node) {
         var certificateRoot = managedCertificateRoot(node);
-        var content = String(site.config || '');
+        var content = site.configMode === 'guided' && site.type === 'proxy'
+          ? normalizeProxyPassDirectives(site.config)
+          : String(site.config || '');
         var cert = getCert(site.certificateId);
         var exactPathPlaceholders = [];
         if (cert && node) {
@@ -6370,6 +6406,7 @@
       }
 
       function startRun(site, type, willPublish, nodeIds) {
+        if (normalizeGuidedSiteConfig(site)) saveState();
         if (remoteConnected) {
           startRemoteConfigRun(site, willPublish, nodeIds);
           return;
@@ -6740,7 +6777,7 @@
         }
         var confMode = siteCreateMode === 'conf';
         var type = confMode ? 'custom' : String(form.get('type'));
-        var target = confMode ? '自定义 Nginx Conf' : String(form.get('target')).trim();
+        var target = confMode ? '自定义 Nginx Conf' : normalizeProxyTarget(form.get('target'));
         var config = '';
         if (confMode) {
           config = document.getElementById('site-conf-editor').value;

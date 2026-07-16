@@ -769,6 +769,13 @@ class AgentTestCase(unittest.TestCase):
         self.assertNotIn("private-site", json.dumps(details))
         self.assertEqual({}, agent._nginx_error_metadata("unclassified secret output"))
 
+        invalid_url = agent._nginx_error_metadata(
+            "nginx: [emerg] invalid URL prefix in /apps/nginx/conf/conf.d/private-site.conf:23"
+        )
+        self.assertEqual("invalid_url_prefix", invalid_url["nginx_error_code"])
+        self.assertEqual(23, invalid_url["nginx_error_line"])
+        self.assertNotIn("private-site", json.dumps(invalid_url))
+
     def test_interrupted_job_is_not_replayed(self):
         self.store.begin("job-crashed", "nginx_reload")
         response = self.executor.execute(self.job("job-crashed", "nginx_reload", {}))
