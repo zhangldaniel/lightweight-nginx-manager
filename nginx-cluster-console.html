@@ -104,7 +104,7 @@
     }
 
     .brand-name {
-      font-weight: 750;
+      font-weight: 700;
       letter-spacing: -.01em;
     }
 
@@ -275,7 +275,7 @@
       background: var(--panel-soft);
       color: var(--muted);
       font-size: 10px;
-      font-weight: 750;
+      font-weight: 600;
       white-space: nowrap;
     }
 
@@ -409,7 +409,7 @@
 
     .summary-value {
       font-size: 28px;
-      font-weight: 750;
+      font-weight: 700;
       letter-spacing: -.03em;
     }
 
@@ -589,7 +589,7 @@
       overflow: hidden;
       color: var(--text);
       font-size: 14px;
-      font-weight: 750;
+      font-weight: 600;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
@@ -663,7 +663,7 @@
       background: var(--green-soft);
       color: var(--green);
       font-size: 11px;
-      font-weight: 750;
+      font-weight: 600;
       white-space: nowrap;
     }
 
@@ -925,7 +925,7 @@
       margin-top: 2px;
       overflow: hidden;
       font-size: 11px;
-      font-weight: 650;
+      font-weight: 600;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
@@ -986,35 +986,65 @@
 
     .cert-location-list {
       display: grid;
-      gap: 5px;
+      gap: 0;
     }
 
     .cert-location {
-      display: grid;
-      grid-template-columns: minmax(74px, .45fr) minmax(0, 1fr);
-      gap: 7px;
-      align-items: center;
       min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(104px, 132px) minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+      padding: 8px 0;
+    }
+
+    .cert-location + .cert-location {
+      border-top: 1px dashed #e2e8f0;
     }
 
     .cert-location-node {
       overflow: hidden;
-      color: #31524a;
-      font-size: 10px;
-      font-weight: 750;
+      padding-top: 5px;
+      color: #334155;
+      font-size: 12px;
+      font-weight: 600;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
-    .cert-location-path {
-      display: block;
+    .cert-location-files {
       min-width: 0;
-      padding: 3px 6px;
+      display: grid;
+      gap: 5px;
+    }
+
+    .cert-location-path {
+      min-width: 0;
+      min-height: 28px;
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
       overflow: hidden;
-      border-radius: 5px;
-      background: #f1f5f4;
-      color: #52645e;
-      font: 10px/1.35 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      border: 1px solid #e6ebf1;
+      border-radius: 6px;
+      background: #f6f8fb;
+      color: #475569;
+    }
+
+    .cert-location-path span {
+      border-right: 1px solid #dce3ec;
+      color: #64748b;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.4;
+    }
+
+    .cert-location-path code {
+      min-width: 0;
+      overflow: hidden;
+      font: 11px/1.45 "Cascadia Mono", SFMono-Regular, Consolas, "Liberation Mono", monospace;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
@@ -1038,7 +1068,7 @@
       background: #f5f8fe;
       color: var(--primary);
       font-size: 10px;
-      font-weight: 750;
+      font-weight: 600;
       white-space: nowrap;
     }
 
@@ -1604,7 +1634,11 @@
       }
 
       .cert-location {
-        grid-template-columns: minmax(80px, .42fr) minmax(0, 1fr);
+        grid-template-columns: minmax(100px, 130px) minmax(0, 1fr);
+      }
+
+      .cert-table .table-cell:nth-child(2) {
+        grid-column: 1 / -1;
       }
 
       .table-row .table-cell.primary {
@@ -1616,8 +1650,8 @@
         display: block;
         margin-bottom: 2px;
         color: var(--muted-2);
-        font-size: 9px;
-        font-weight: 700;
+        font-size: 11px;
+        font-weight: 600;
       }
 
       .cell-title,
@@ -1713,22 +1747,22 @@
 
     /* Theme A · professional operations console */
     :root {
-      --bg: #f3f6fa;
+      --bg: #f4f7fb;
       --panel: #ffffff;
-      --panel-soft: #f7f9fc;
-      --line: #dce3ec;
-      --line-strong: #c8d2df;
-      --text: #172033;
-      --muted: #637086;
-      --muted-2: #8b97aa;
-      --primary: #1463df;
-      --primary-soft: #eaf2ff;
-      --green: #0d8b68;
-      --green-soft: #e8f7f1;
-      --amber: #b66b00;
-      --amber-soft: #fff4df;
-      --red: #d33f49;
-      --red-soft: #fff0f1;
+      --panel-soft: #f8fafc;
+      --line: #e2e8f0;
+      --line-strong: #cbd5e1;
+      --text: #1e293b;
+      --muted: #526176;
+      --muted-2: #64748b;
+      --primary: #2563eb;
+      --primary-soft: #eff6ff;
+      --green: #047857;
+      --green-soft: #ecfdf5;
+      --amber: #b45309;
+      --amber-soft: #fffbeb;
+      --red: #be123c;
+      --red-soft: #fff1f2;
       --ink: #0b1728;
       --code-bg: #0d1a2b;
       --code-text: #dce7f5;
@@ -1746,10 +1780,8 @@
     body {
       background: var(--bg);
       color: var(--text);
-      font: 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-      font-feature-settings: "tnum" 1, "cv02" 1, "cv03" 1;
-      -webkit-font-smoothing: antialiased;
-      text-rendering: optimizeLegibility;
+      font: 14px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      font-variant-numeric: tabular-nums;
     }
 
     button,
@@ -1806,13 +1838,13 @@
 
     .brand-sub {
       margin-top: 2px;
-      font-size: 9px;
+      font-size: 10px;
       letter-spacing: .14em;
     }
 
     .nav-label {
       padding: 13px 12px 8px;
-      font-size: 9px;
+      font-size: 10px;
       letter-spacing: .15em;
     }
 
@@ -1826,7 +1858,7 @@
       padding: 0 12px;
       border-radius: 8px;
       color: #aebbc9;
-      font-weight: 550;
+      font-weight: 500;
       transition: color .16s ease, background .16s ease, transform .16s ease;
     }
 
@@ -1851,7 +1883,7 @@
     .nav-button.active {
       background: #123d73;
       color: #ffffff;
-      font-weight: 650;
+      font-weight: 600;
       box-shadow: inset 0 0 0 1px rgba(103, 159, 241, .12);
     }
 
@@ -1888,7 +1920,7 @@
       padding: 1px 7px;
       background: rgba(255, 255, 255, .08);
       color: #8fa1b6;
-      font-size: 10px;
+      font-size: 11px;
     }
 
     .nav-button.active .nav-count {
@@ -1911,6 +1943,7 @@
 
     .agent-card p {
       color: #91a2b6;
+      font-size: 12px;
       line-height: 1.55;
     }
 
@@ -1934,12 +1967,12 @@
 
     .breadcrumb {
       color: #7b879a;
-      font-size: 12px;
+      font-size: 13px;
     }
 
     .breadcrumb strong {
       color: #253147;
-      font-weight: 650;
+      font-weight: 600;
     }
 
     .connection-pill {
@@ -1948,14 +1981,14 @@
       border-radius: 7px;
       background: #f0faf6;
       color: #08775a;
-      font-size: 11px;
+      font-size: 12px;
     }
 
     .session-role {
       min-height: 30px;
       border-radius: 7px;
       background: #f7f9fc;
-      font-size: 10px;
+      font-size: 11px;
     }
 
     .content {
@@ -1970,15 +2003,16 @@
 
     .page-head h1 {
       margin-bottom: 4px;
-      color: #111a2c;
-      font-size: 26px;
+      color: #0f172a;
+      font-size: 28px;
+      line-height: 1.25;
       font-weight: 700;
       letter-spacing: -.02em;
     }
 
     .page-head p {
-      color: #748095;
-      font-size: 12px;
+      color: var(--muted);
+      font-size: 13px;
     }
 
     .page-actions {
@@ -1999,13 +2033,14 @@
 
     .ghost-button,
     .button {
-      min-height: 38px;
-      padding: 0 14px;
+      min-height: 40px;
+      padding: 0 15px;
+      font-size: 13px;
     }
 
     .ghost-button {
-      min-height: 34px;
-      font-size: 11px;
+      min-height: 36px;
+      font-size: 12px;
     }
 
     .button:hover,
@@ -2047,8 +2082,8 @@
     }
 
     .summary-card {
-      min-height: 104px;
-      padding: 18px;
+      min-height: 112px;
+      padding: 19px 20px;
       display: flex;
       align-items: center;
       gap: 14px;
@@ -2059,9 +2094,14 @@
     }
 
     .summary-card:hover {
+      border-color: var(--line);
+      box-shadow: 0 1px 2px rgba(18, 36, 64, .035);
+      transform: none;
+    }
+
+    .summary-card:has(button):hover {
       border-color: #c5d0df;
-      box-shadow: 0 8px 22px rgba(18, 36, 64, .075);
-      transform: translateY(-1px);
+      box-shadow: 0 7px 20px rgba(18, 36, 64, .07);
     }
 
     .summary-card button {
@@ -2077,9 +2117,17 @@
       display: grid;
       place-items: center;
       border-radius: 9px;
-      font-size: 17px;
-      font-weight: 800;
       flex: none;
+    }
+
+    .summary-icon svg {
+      width: 20px;
+      height: 20px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 1.8;
     }
 
     .summary-icon.blue {
@@ -2110,8 +2158,9 @@
     }
 
     .summary-label {
-      color: #6c788d;
-      font-size: 11px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
     }
 
     .summary-value {
@@ -2122,17 +2171,17 @@
     }
 
     .summary-hint {
-      color: #909bad;
-      font-size: 10px;
+      color: var(--muted-2);
+      font-size: 12px;
     }
 
     .workspace {
-      grid-template-columns: minmax(0, 1fr) clamp(390px, 25vw, 440px);
+      grid-template-columns: minmax(0, 1fr) clamp(410px, 26vw, 470px);
       gap: 18px;
     }
 
     .toolbar {
-      min-height: 58px;
+      min-height: 64px;
       gap: 10px;
       padding: 9px;
       border-color: var(--line);
@@ -2142,7 +2191,15 @@
 
     .search-wrap span {
       color: #8793a7;
-      font-size: 16px;
+    }
+
+    .search-wrap svg {
+      width: 17px;
+      height: 17px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-width: 1.8;
     }
 
     .input,
@@ -2156,7 +2213,13 @@
 
     .input,
     .select {
-      min-height: 40px;
+      min-height: 44px;
+      font-size: 14px;
+    }
+
+    .select {
+      padding-right: 38px;
+      text-overflow: ellipsis;
     }
 
     .input::placeholder,
@@ -2191,16 +2254,16 @@
     }
 
     .table-head {
-      min-height: 44px;
+      min-height: 46px;
       background: #f7f9fc;
-      color: #7c8799;
-      font-size: 10px;
-      font-weight: 650;
-      letter-spacing: .03em;
+      color: var(--muted-2);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .01em;
     }
 
     .table-row {
-      min-height: 80px;
+      min-height: 88px;
       border-color: #e8edf3;
       transition: background .14s ease, box-shadow .14s ease;
     }
@@ -2216,30 +2279,32 @@
 
     .cell-title {
       color: #1b263a;
-      font-size: 13px;
-      font-weight: 650;
+      font-size: 14px;
+      line-height: 1.45;
+      font-weight: 600;
     }
 
     .cell-sub {
-      color: #6d798d;
-      font-size: 11px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
     }
 
     .chip {
-      min-height: 23px;
-      padding: 2px 7px;
-      border-radius: 6px;
-      background: #eef2f7;
-      color: #516076;
-      font-size: 10px;
-    }
-
-    .status-pill {
       min-height: 25px;
       padding: 3px 8px;
       border-radius: 6px;
-      font-size: 10px;
-      font-weight: 700;
+      background: #eef2f7;
+      color: #516076;
+      font-size: 11px;
+    }
+
+    .status-pill {
+      min-height: 27px;
+      padding: 4px 9px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
     }
 
     .detail-panel {
@@ -2270,35 +2335,36 @@
     }
 
     .detail-header {
-      padding: 18px;
+      padding: 20px;
       background: #fff;
     }
 
     .detail-title-row h2 {
       color: #131d30;
-      font-size: 18px;
+      font-size: 19px;
+      line-height: 1.35;
       font-weight: 700;
     }
 
     .detail-header p {
-      color: #778398;
-      font-size: 11px;
+      color: var(--muted);
+      font-size: 12px;
     }
 
     .detail-actions {
       gap: 8px;
-      padding: 12px 18px 14px;
+      padding: 14px 20px 16px;
       background: #fff;
     }
 
     .detail-actions .button {
-      min-height: 36px;
-      font-size: 11px;
+      min-height: 40px;
+      font-size: 12px;
     }
 
     .detail-body {
-      gap: 17px;
-      padding: 17px 18px 20px;
+      gap: 19px;
+      padding: 19px 20px 22px;
     }
 
     .detail-block {
@@ -2311,15 +2377,16 @@
     }
 
     .detail-label {
-      color: #768297;
-      font-size: 10px;
-      font-weight: 650;
-      letter-spacing: .04em;
+      color: var(--muted-2);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .02em;
     }
 
     .detail-value {
       color: #2a3549;
-      font-size: 12px;
+      font-size: 13px;
+      line-height: 1.55;
     }
 
     .config-preview {
@@ -2329,18 +2396,18 @@
       border-radius: 7px;
       background: #0d1a2b;
       color: #dce7f5;
-      font-size: 11px;
+      font: 12px/1.65 "Cascadia Mono", SFMono-Regular, Consolas, "Liberation Mono", monospace;
       line-height: 1.65;
     }
 
     .config-preview-meta,
     .config-preview-meta code {
-      color: #718096;
-      font-size: 10px;
+      color: var(--muted);
+      font-size: 11px;
     }
 
     .node-mini {
-      padding: 9px 10px;
+      padding: 10px 11px;
       border-color: #dce3ec;
       border-radius: 7px;
       background: #f8fafc;
@@ -2362,6 +2429,22 @@
       gap: 14px;
     }
 
+    .node-card h3 {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .node-card-head p,
+    .fact label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .fact strong {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
     .node-avatar {
       border-radius: 8px;
     }
@@ -2374,14 +2457,79 @@
       color: #3e4c63;
     }
 
+    .node-actions button {
+      min-height: 36px;
+      padding-inline: 11px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .cert-table .table-head,
+    .cert-table .table-row {
+      min-width: 1072px;
+      grid-template-columns: minmax(245px, 1.1fr) minmax(440px, 2fr) 125px 82px 104px;
+      column-gap: 18px;
+    }
+
+    .cert-table .table-row {
+      min-height: 118px;
+      align-items: start;
+      padding-block: 16px;
+    }
+
+    .cert-table .table-cell:nth-child(n + 3) {
+      align-self: center;
+    }
+
+    .cert-location-list {
+      margin: -8px 0;
+    }
+
+    .cert-location-node {
+      color: #334155;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .cert-location-path {
+      border-color: #e2e8f0;
+      background: #f8fafc;
+    }
+
+    .cert-location-path code {
+      color: #475569;
+      font-size: 11px;
+    }
+
+    .cert-progress {
+      gap: 10px;
+    }
+
+    .progress-track {
+      width: 86px;
+      height: 6px;
+    }
+
+    .cert-action {
+      min-height: 36px;
+      padding: 0 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
     dialog {
+      width: min(760px, calc(100vw - 32px));
       border-color: #d5deea;
       border-radius: 12px;
       box-shadow: 0 28px 80px rgba(7, 24, 47, .3);
     }
 
     dialog.wide {
-      width: min(1040px, calc(100vw - 32px));
+      width: min(1080px, calc(100vw - 32px));
+    }
+
+    #site-dialog {
+      width: min(820px, calc(100vw - 32px));
     }
 
     dialog::backdrop {
@@ -2391,34 +2539,79 @@
 
     .dialog-head,
     .dialog-foot {
-      padding: 15px 18px;
+      padding: 17px 22px;
       background: #f8fafc;
     }
 
     .dialog-head h2 {
       color: #182338;
-      font-size: 16px;
+      font-size: 18px;
       font-weight: 700;
     }
 
     .dialog-head p {
-      color: #748095;
-      font-size: 10px;
+      color: var(--muted);
+      font-size: 12px;
     }
 
     .dialog-body {
-      padding: 18px;
+      padding: 22px;
+    }
+
+    .dialog-foot {
+      min-height: 70px;
+    }
+
+    .form-grid {
+      column-gap: 18px;
+      row-gap: 20px;
+    }
+
+    .site-form-grid {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(160px, .8fr);
+    }
+
+    .form-field.span-2 {
+      grid-column: span 2;
+    }
+
+    .form-field {
+      gap: 8px;
     }
 
     .form-field label,
     .fieldset-title {
       color: #3c4960;
-      font-size: 11px;
-      font-weight: 650;
+      font-size: 13px;
+      font-weight: 600;
     }
 
     .field-help {
-      color: #8995a8;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    #site-node-checks {
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+
+    .check-card {
+      min-height: 54px;
+      padding: 11px 12px;
+    }
+
+    .check-card b {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .check-card span {
+      font-size: 12px;
+    }
+
+    #site-note {
+      min-height: 108px;
     }
 
     .check-card,
@@ -2441,19 +2634,38 @@
       border-radius: 8px;
       background: #0d1a2b;
       color: #dce7f5;
-      font-size: 12px;
+      font: 12px/1.65 "Cascadia Mono", SFMono-Regular, Consolas, "Liberation Mono", monospace;
       line-height: 1.65;
     }
 
     .diff-badge {
+      font-size: 12px;
       border-radius: 6px;
-      font-weight: 650;
+      font-weight: 600;
     }
 
     .command-box,
     .log-box {
       border-radius: 7px;
       background: #0d1a2b;
+      font: 12px/1.6 "Cascadia Mono", SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    .transfer-source span,
+    .deploy-step span,
+    .run-node span,
+    .private-note {
+      font-size: 12px;
+    }
+
+    .deploy-step b,
+    .run-node b {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .transfer-path {
+      font: 11px/1.5 "Cascadia Mono", SFMono-Regular, Consolas, "Liberation Mono", monospace;
     }
 
     .toast {
@@ -2467,11 +2679,12 @@
     }
 
     .view-note {
-      color: #8a96a9;
-      font-size: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
     }
 
-    @media (max-width: 1180px) {
+    @media (max-width: 1420px) {
       .shell {
         grid-template-columns: 78px minmax(0, 1fr);
       }
@@ -2505,7 +2718,7 @@
       }
     }
 
-    @media (max-width: 980px) {
+    @media (max-width: 1260px) {
       .workspace {
         grid-template-columns: 1fr;
       }
@@ -2585,6 +2798,7 @@
       }
 
       .topbar {
+        position: static;
         height: 52px;
         padding: 0 14px;
       }
@@ -2628,10 +2842,18 @@
         padding-block: 13px;
       }
 
+      .cert-table .table-row {
+        min-width: 0;
+      }
+
       .editor-layout,
       .form-grid,
       .check-grid {
         grid-template-columns: 1fr;
+      }
+
+      .form-field.span-2 {
+        grid-column: auto;
       }
 
       .dialog-foot {
@@ -2644,9 +2866,9 @@
       }
     }
 
-    @media (max-width: 480px) {
+    @media (max-width: 560px) {
       .summary-grid {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: 1fr;
         gap: 10px;
       }
 
@@ -2680,22 +2902,22 @@
 
       <div class="nav-label">托管资源</div>
       <nav class="nav" aria-label="主导航">
-        <button class="nav-button active" type="button" data-nav="sites">
+        <button class="nav-button active" type="button" data-nav="sites" aria-label="站点与配置" title="站点与配置">
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"></rect><rect x="4" y="14" width="16" height="6" rx="1.5"></rect><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"></path></svg></span>
           <span class="nav-text">站点与配置</span>
           <span class="nav-count" id="nav-site-count">0</span>
         </button>
-        <button class="nav-button" type="button" data-nav="certificates">
+        <button class="nav-button" type="button" data-nav="certificates" aria-label="证书" title="证书">
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 19 7v5c0 4.6-2.9 7.3-7 9-4.1-1.7-7-4.4-7-9V7l7-4Z"></path><path d="m9.5 12 1.6 1.6 3.7-4"></path></svg></span>
           <span class="nav-text">证书</span>
           <span class="nav-count" id="nav-cert-count">0</span>
         </button>
-        <button class="nav-button" type="button" data-nav="nodes">
+        <button class="nav-button" type="button" data-nav="nodes" aria-label="节点 Agent" title="节点 Agent">
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"></rect><rect x="3.5" y="14" width="17" height="6" rx="1.5"></rect><path d="M7.5 7h.01M7.5 17h.01M11 7h6M11 17h6"></path></svg></span>
           <span class="nav-text">节点 Agent</span>
           <span class="nav-count" id="nav-node-count">0</span>
         </button>
-        <button class="nav-button" type="button" data-nav="runs">
+        <button class="nav-button" type="button" data-nav="runs" aria-label="执行记录" title="执行记录">
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7v5l3.3 2"></path></svg></span>
           <span class="nav-text">执行记录</span>
           <span class="nav-count" id="nav-run-count">0</span>
@@ -2735,8 +2957,8 @@
         <button class="icon-button" type="button" data-close-dialog="site-dialog" aria-label="关闭">×</button>
       </header>
       <div class="dialog-body">
-        <div class="form-grid">
-          <div class="form-field">
+        <div class="form-grid site-form-grid">
+          <div class="form-field span-2">
             <label for="site-domain">域名</label>
             <input class="input" id="site-domain" name="domain" placeholder="api.example.com" required>
           </div>
@@ -2756,7 +2978,7 @@
             <span class="fieldset-title">部署节点</span>
             <div class="check-grid" id="site-node-checks"></div>
           </div>
-          <div class="form-field">
+          <div class="form-field span-2">
             <label for="site-cert">绑定证书</label>
             <select class="select" id="site-cert" name="certificate"></select>
             <span class="field-help" id="site-cert-help">先选择部署节点，只能绑定这些节点上都已存在的证书。</span>
@@ -4182,10 +4404,10 @@
         var drift = state.sites.filter(function (site) { return site.status === 'drift' || site.status === 'failed'; }).length;
         return [
           '<div class="summary-grid">',
-          '  <div class="summary-card"><span class="summary-icon blue" aria-hidden="true">▤</span><span class="summary-copy"><span class="summary-label">托管站点</span><strong class="summary-value">' + state.sites.length + '</strong><span class="summary-hint">配置、证书统一管理</span></span></div>',
-          '  <div class="summary-card"><button type="button" data-nav-jump="nodes"><span class="summary-icon green" aria-hidden="true">◉</span><span class="summary-copy"><span class="summary-label">在线 Agent</span><strong class="summary-value">' + onlineNodes().length + ' / ' + state.nodes.length + '</strong><span class="summary-hint">主动出站连接</span></span></button></div>',
-          '  <div class="summary-card"><button type="button" data-nav-jump="certificates"><span class="summary-icon amber" aria-hidden="true">◇</span><span class="summary-copy"><span class="summary-label">即将到期证书</span><strong class="summary-value">' + expiring + '</strong><span class="summary-hint ' + (expiring ? 'warn' : '') + '">' + (expiring ? '需要处理' : '暂无风险') + '</span></span></button></div>',
-          '  <div class="summary-card"><button type="button" data-site-filter="attention"><span class="summary-icon red" aria-hidden="true">!</span><span class="summary-copy"><span class="summary-label">漂移 / 失败</span><strong class="summary-value">' + drift + '</strong><span class="summary-hint ' + (drift ? 'danger' : '') + '">' + (drift ? '点击查看异常站点' : '全部一致') + '</span></span></button></div>',
+          '  <div class="summary-card"><span class="summary-icon blue" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"></rect><rect x="4" y="14" width="16" height="6" rx="1.5"></rect><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"></path></svg></span><span class="summary-copy"><span class="summary-label">托管站点</span><strong class="summary-value">' + state.sites.length + '</strong><span class="summary-hint">配置、证书统一管理</span></span></div>',
+          '  <div class="summary-card"><button type="button" data-nav-jump="nodes"><span class="summary-icon green" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"></rect><rect x="3.5" y="14" width="17" height="6" rx="1.5"></rect><path d="M7.5 7h.01M7.5 17h.01M11 7h6M11 17h6"></path></svg></span><span class="summary-copy"><span class="summary-label">在线 Agent</span><strong class="summary-value">' + onlineNodes().length + ' / ' + state.nodes.length + '</strong><span class="summary-hint">主动出站连接</span></span></button></div>',
+          '  <div class="summary-card"><button type="button" data-nav-jump="certificates"><span class="summary-icon amber" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 19 7v5c0 4.6-2.9 7.3-7 9-4.1-1.7-7-4.4-7-9V7l7-4Z"></path><path d="M12 8v5M12 16.5h.01"></path></svg></span><span class="summary-copy"><span class="summary-label">即将到期证书</span><strong class="summary-value">' + expiring + '</strong><span class="summary-hint ' + (expiring ? 'warn' : '') + '">' + (expiring ? '需要处理' : '暂无风险') + '</span></span></button></div>',
+          '  <div class="summary-card"><button type="button" data-site-filter="attention"><span class="summary-icon red" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3L12 3.5Z"></path><path d="M12 9v4M12 16.5h.01"></path></svg></span><span class="summary-copy"><span class="summary-label">漂移 / 失败</span><strong class="summary-value">' + drift + '</strong><span class="summary-hint ' + (drift ? 'danger' : '') + '">' + (drift ? '点击查看异常站点' : '全部一致') + '</span></span></button></div>',
           '</div>'
         ].join('');
       }
@@ -4339,7 +4561,7 @@
         })).join('');
         var toolbar = [
           '<div class="toolbar">',
-          '  <div class="search-wrap"><span>⌕</span><input class="input" id="site-search" placeholder="搜索域名、配置备注或变更说明" value="' + escapeHtml(siteQuery) + '"></div>',
+          '  <div class="search-wrap"><span aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4 4"></path></svg></span><input class="input" id="site-search" placeholder="搜索域名、配置备注或变更说明" value="' + escapeHtml(siteQuery) + '"></div>',
           '  <select class="select" id="site-node-filter" aria-label="Agent 节点">' + nodeOptions + '</select>',
           '  <select class="select" id="site-status-filter" aria-label="站点状态">',
           '    <option value="all"' + (siteFilter === 'all' ? ' selected' : '') + '>全部状态</option>',
@@ -4374,7 +4596,7 @@
             var node = getNode(nodeId);
             if (!node) return '';
             var paths = certificateTargetPaths(cert, node);
-            return '<div class="cert-location"><span class="cert-location-node" title="' + escapeHtml(node.name) + '">' + escapeHtml(node.name) + '</span><code class="cert-location-path" title="' + escapeHtml(paths.certificatePath) + '">证书：' + escapeHtml(paths.certificatePath) + '</code><code class="cert-location-path" title="' + escapeHtml(paths.keyPath) + '">私钥：' + escapeHtml(paths.keyPath) + '</code></div>';
+            return '<div class="cert-location"><span class="cert-location-node" title="' + escapeHtml(node.name) + '">' + escapeHtml(node.name) + '</span><div class="cert-location-files"><div class="cert-location-path" title="' + escapeHtml(paths.certificatePath) + '"><span>证书</span><code>' + escapeHtml(paths.certificatePath) + '</code></div><div class="cert-location-path" title="' + escapeHtml(paths.keyPath) + '"><span>私钥</span><code>' + escapeHtml(paths.keyPath) + '</code></div></div></div>';
           }).filter(Boolean).join('');
           return [
             '<div class="table-row">',
