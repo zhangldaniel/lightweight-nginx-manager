@@ -59,7 +59,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -119,6 +119,19 @@ FAILURE_STAGES = {
     "unknown",
 }
 ROLLBACK_STATUSES = {"restored", "unverified"}
+NGINX_ERROR_CODES = {
+    "certificate_file_missing",
+    "private_key_file_missing",
+    "referenced_file_missing",
+    "unknown_directive",
+    "duplicate_upstream",
+    "permission_denied",
+    "invalid_arguments",
+    "missing_semicolon",
+    "brace_mismatch",
+    "duplicate_listen",
+    "certificate_key_mismatch",
+}
 
 
 class AgentError(Exception):
@@ -297,6 +310,44 @@ def _transaction_failure_stage(phase: Any) -> str:
     if phase in {"rolling_back", "recovering", "recovery_failed", "recovered"}:
         return "recovery"
     return "prepare"
+
+
+def _nginx_error_metadata(error: Any) -> Dict[str, Any]:
+    """Classify nginx -t output without returning paths, directive values, or stderr text."""
+    text = str(error or "").lower()
+    code: Optional[str] = None
+    if "permission denied" in text or "(13: permission denied)" in text:
+        code = "permission_denied"
+    elif "key values mismatch" in text:
+        code = "certificate_key_mismatch"
+    elif "cannot load certificate key" in text or "ssl_ctx_use_privatekey_file" in text:
+        code = "private_key_file_missing"
+    elif "cannot load certificate" in text or "bio_new_file" in text:
+        code = "certificate_file_missing"
+    elif "unknown directive" in text:
+        code = "unknown_directive"
+    elif "duplicate upstream" in text or "duplicate \"upstream\"" in text:
+        code = "duplicate_upstream"
+    elif "duplicate listen" in text or "a duplicate listen" in text:
+        code = "duplicate_listen"
+    elif "invalid number of arguments" in text:
+        code = "invalid_arguments"
+    elif "is not terminated by \";\"" in text or "unexpected end of parameter" in text:
+        code = "missing_semicolon"
+    elif "unexpected end of file" in text or "expecting \"}\"" in text or "unexpected \"}\"" in text:
+        code = "brace_mismatch"
+    elif "no such file or directory" in text:
+        code = "referenced_file_missing"
+
+    result: Dict[str, Any] = {}
+    if code in NGINX_ERROR_CODES:
+        result["nginx_error_code"] = code
+    line_matches = re.findall(r"\bin\s+[^\r\n]+:(\d+)(?:\s|$)", text)
+    if line_matches:
+        line = int(line_matches[-1])
+        if 1 <= line <= 1000000:
+            result["nginx_error_line"] = line
+    return result
 
 
 class Settings:
@@ -2564,6 +2615,11 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
                 rollback_status=local.get("rollback_status"),
             )
         )
+        if (
+            details.get("failure_code") == "nginx_config_test_failed"
+            and details.get("failure_stage") == "nginx_test"
+        ):
+            details.update(_nginx_error_metadata(local.get("error")))
 
     response: Dict[str, Any] = {
         "status": server_status,

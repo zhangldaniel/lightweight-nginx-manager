@@ -433,6 +433,8 @@ class ServerTestCase(unittest.TestCase):
                 "failure_code": "nginx_config_test_failed",
                 "failure_stage": "nginx_test",
                 "rollback_status": "restored",
+                "nginx_error_code": "certificate_file_missing",
+                "nginx_error_line": 17,
                 "syntax_ok": False,
                 "failure_summary": "arbitrary agent supplied text must be discarded",
             },
@@ -449,6 +451,17 @@ class ServerTestCase(unittest.TestCase):
             "unknown enum failure text",
             "unknown enum output",
         )
+        invalid_diagnostic_id = create_claim_and_fail(
+            {
+                "failure_code": "nginx_config_test_failed",
+                "failure_stage": "nginx_test",
+                "nginx_error_code": "return_raw_stderr",
+                "nginx_error_line": "17",
+                "syntax_ok": False,
+            },
+            "diagnostic enum must remain bounded",
+            "diagnostic output must remain digest-only",
+        )
 
         jobs = self.client.get("/api/v1/admin/jobs", headers=self.admin_headers).json()["items"]
         by_id = {job["id"]: job for job in jobs}
@@ -457,6 +470,8 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual("nginx_config_test_failed", known["result"]["failure_code"])
         self.assertEqual("nginx_test", known["result"]["failure_stage"])
         self.assertEqual("restored", known["result"]["rollback_status"])
+        self.assertEqual("certificate_file_missing", known["result"]["nginx_error_code"])
+        self.assertEqual(17, known["result"]["nginx_error_line"])
         self.assertFalse(known["result"]["syntax_ok"])
         self.assertEqual(1, known["result"]["exit_code"])
         self.assertEqual(len(raw_error.encode("utf-8")), known["result"]["error_bytes"])
@@ -475,6 +490,12 @@ class ServerTestCase(unittest.TestCase):
         self.assertNotIn("failure_code", unknown["result"])
         self.assertNotIn("failure_stage", unknown["result"])
         self.assertNotIn("rollback_status", unknown["result"])
+
+        invalid_diagnostic = by_id[invalid_diagnostic_id]
+        self.assertEqual("nginx_config_test_failed", invalid_diagnostic["result"]["failure_code"])
+        self.assertEqual("nginx_test", invalid_diagnostic["result"]["failure_stage"])
+        self.assertNotIn("nginx_error_code", invalid_diagnostic["result"])
+        self.assertNotIn("nginx_error_line", invalid_diagnostic["result"])
 
     def test_server_expired_job_exposes_safe_queue_failure_metadata(self):
         enrolled = self.enroll()

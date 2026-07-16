@@ -3404,6 +3404,11 @@
               <textarea class="textarea" id="config-note" placeholder="长期说明这个配置的用途"></textarea>
             </div>
             <div class="form-field">
+              <label for="config-certificate">绑定证书</label>
+              <select class="select" id="config-certificate"></select>
+              <span class="field-help" id="config-certificate-help">只显示同时覆盖站点域名和全部目标节点的证书。</span>
+            </div>
+            <div class="form-field">
               <label for="change-note">本次变更说明</label>
               <textarea class="textarea" id="change-note" placeholder="例如：将上传限制从 10m 调整为 50m"></textarea>
               <span class="field-help">保存草稿可以留空；校验和发布必须填写。</span>
@@ -4178,6 +4183,19 @@
           recovery: '自动恢复',
           unknown: '节点执行'
         };
+        var nginxReasons = {
+          certificate_file_missing: '配置引用的证书文件在目标节点不存在或无法加载',
+          private_key_file_missing: '配置引用的私钥文件在目标节点不存在或无法加载',
+          referenced_file_missing: '配置引用的文件在目标节点不存在',
+          unknown_directive: '配置中包含当前 Nginx 不认识的指令',
+          duplicate_upstream: '配置中存在重复的 upstream 名称',
+          permission_denied: 'Nginx 校验时无权读取所需文件或目录',
+          invalid_arguments: '某条 Nginx 指令的参数数量不正确',
+          missing_semicolon: '配置中可能缺少分号',
+          brace_mismatch: '配置中的大括号可能不匹配',
+          duplicate_listen: '配置中存在重复或冲突的 listen 定义',
+          certificate_key_mismatch: '证书与私钥不匹配'
+        };
         var reason = reasons[code] || '';
         if (!reason && job && job.status === 'expired') {
           code = 'job_expired';
@@ -4209,6 +4227,13 @@
         }
         if (!reason && Number(result.error_bytes || 0) > 0) {
           reason = 'Agent 返回执行错误；原始输出已安全脱敏';
+        }
+        if (code === 'nginx_config_test_failed' && nginxReasons[result.nginx_error_code]) {
+          reason = nginxReasons[result.nginx_error_code];
+          var nginxErrorLine = Number(result.nginx_error_line || 0);
+          if (Number.isInteger(nginxErrorLine) && nginxErrorLine > 0) {
+            reason += '（Nginx 报告第 ' + nginxErrorLine + ' 行附近）';
+          }
         }
         if (!reason) reason = '节点任务未成功完成，旧记录未保存可读原因';
         var rollback = result.rollback_status === 'restored'
@@ -4680,6 +4705,7 @@
             id: uid('cert'),
             name: domain,
             domain: domain,
+            domains: domains.length ? domains.slice() : [domain],
             issuer: item.issuer || '未知签发者',
             days: Number(item.days_remaining || 0),
             source: '节点导入',
@@ -4697,6 +4723,7 @@
         } else {
           certificate.name = certificate.name || domain;
           certificate.domain = domain;
+          certificate.domains = domains.length ? domains.slice() : (certificate.domains || [domain]);
           certificate.issuer = item.issuer || certificate.issuer || '未知签发者';
           certificate.days = Number(item.days_remaining || 0);
           certificate.source = certificate.source || '节点导入';
@@ -4898,6 +4925,23 @@
       function certificateMissingNodeIds(cert, nodeIds) {
         return (nodeIds || []).filter(function (nodeId) {
           return !certificateAvailableOnNode(cert, nodeId);
+        });
+      }
+
+      function certificateCoversDomain(cert, domain) {
+        var hostname = String(domain || '').trim().toLowerCase().replace(/\.$/, '');
+        if (!cert || !hostname) return false;
+        var names = Array.isArray(cert.domains) && cert.domains.length
+          ? cert.domains
+          : [cert.domain];
+        return names.some(function (name) {
+          var pattern = String(name || '').trim().toLowerCase().replace(/\.$/, '');
+          if (!pattern) return false;
+          if (pattern === hostname) return true;
+          if (pattern.indexOf('*.') !== 0) return false;
+          var suffix = pattern.slice(2);
+          if (!hostname.endsWith('.' + suffix)) return false;
+          return hostname.split('.').length === suffix.split('.').length + 1;
         });
       }
 
@@ -5116,6 +5160,7 @@
         var site = visibleSites.find(function (item) { return item.id === selectedSiteId; }) || visibleSites[0];
         if (!site) return '<aside class="detail-panel" id="site-detail-slot"><div class="empty"><strong>暂无匹配站点</strong>调整搜索条件或创建新站点。</div></aside>';
         var cert = getCert(site.certificateId);
+        var certificateDomainMismatch = Boolean(cert && !certificateCoversDomain(cert, site.domain));
         var confTls = !cert && siteUsesTls(site);
         var status = siteStatus(site);
         var nodes = visibleSiteNodes(site);
@@ -5175,7 +5220,7 @@
           '    <div class="detail-block"><span class="detail-label">配置预览' + (previewNode ? ' · ' + escapeHtml(previewNode.name) : '') + '</span><div class="config-preview-meta"><span>' + previewSource + ' · SHA-256 ' + escapeHtml(previewHash) + '</span><code>' + escapeHtml(previewPath) + '</code></div><pre class="config-preview">' + escapeHtml(previewConfig) + '</pre></div>',
           '    <div class="detail-block"><span class="detail-label">配置备注</span><div class="detail-value">' + escapeHtml(site.note || '暂无备注') + '</div><span class="cell-sub">最近变更：' + escapeHtml(site.changeNote || '暂无') + '</span></div>',
           '    <div class="detail-block"><span class="detail-label">部署节点</span><div class="node-mini-list">' + nodeRows + '</div></div>',
-          '    <div class="detail-block"><span class="detail-label">证书</span><div class="detail-value">' + (cert ? escapeHtml(cert.domain) + ' · ' + escapeHtml(cert.issuer) : (confTls ? 'Conf 内已定义 TLS' : '未绑定证书')) + '</div><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天 · ' + escapeHtml(cert.source) : (confTls ? '证书与私钥路径由配置正文提供' : '当前仅 HTTP')) + '</span></div>',
+          '    <div class="detail-block"><span class="detail-label">证书</span><div class="detail-value">' + (cert ? escapeHtml(cert.domain) + ' · ' + escapeHtml(cert.issuer) : (confTls ? 'Conf 内已定义 TLS' : '未绑定证书')) + (certificateDomainMismatch ? ' <span class="status-pill danger">域名不匹配</span>' : '') + '</div><span class="cell-sub">' + (cert ? (certificateDomainMismatch ? '该证书不覆盖 ' + escapeHtml(site.domain) + '，请在编辑配置中更换' : '剩余 ' + cert.days + ' 天 · ' + escapeHtml(cert.source)) : (confTls ? '证书与私钥路径由配置正文提供' : '当前仅 HTTP')) + '</span></div>',
           '    <div class="detail-block"><span class="detail-label">版本记录</span><div class="node-mini-list">' + history + '</div></div>',
           '  </div>',
           '</aside>'
@@ -5406,20 +5451,25 @@
       function updateSiteCertificateOptions() {
         var certSelect = document.getElementById('site-cert');
         var selectedNodeIds = Array.from(document.querySelectorAll('input[name="site-node"]:checked')).map(function (input) { return input.value; });
+        var domain = document.getElementById('site-domain').value.trim();
         var previousValue = certSelect.value;
         certSelect.innerHTML = '<option value="">暂不绑定</option>' + state.certificates.map(function (cert) {
           var missingNodeIds = selectedNodeIds.length ? certificateMissingNodeIds(cert, selectedNodeIds) : [];
           var missingNames = missingNodeIds.map(getNode).filter(Boolean).map(function (node) { return node.name; });
-          var available = selectedNodeIds.length > 0 && missingNodeIds.length === 0 && !cert.pendingRemote;
+          var coversDomain = !domain || certificateCoversDomain(cert, domain);
+          var available = selectedNodeIds.length > 0 && missingNodeIds.length === 0 && !cert.pendingRemote && coversDomain;
           var suffix = !selectedNodeIds.length
             ? ' · 请先选择节点'
-            : (cert.pendingRemote
+            : (!coversDomain
+              ? ' · 不覆盖 ' + domain
+              : (cert.pendingRemote
               ? ' · 仍在部署中'
-              : (available ? ' · 已覆盖所选节点' : ' · 缺少：' + missingNames.join('、')));
+              : (available ? ' · 域名和节点均匹配' : ' · 缺少：' + missingNames.join('、'))));
           return '<option value="' + escapeHtml(cert.id) + '"' + (available ? '' : ' disabled') + '>' + escapeHtml(cert.domain) + ' · 剩余 ' + cert.days + ' 天' + escapeHtml(suffix) + '</option>';
         }).join('');
         var previousCert = previousValue ? getCert(previousValue) : null;
-        if (previousCert && selectedNodeIds.length && !certificateMissingNodeIds(previousCert, selectedNodeIds).length && !previousCert.pendingRemote) {
+        if (previousCert && selectedNodeIds.length && !certificateMissingNodeIds(previousCert, selectedNodeIds).length
+            && !previousCert.pendingRemote && (!domain || certificateCoversDomain(previousCert, domain))) {
           certSelect.value = previousValue;
         } else {
           certSelect.value = '';
@@ -5430,11 +5480,12 @@
           helpText = '先选择部署节点，只能绑定这些节点上都已存在的证书。';
         } else {
           var availableCount = state.certificates.filter(function (cert) {
-            return !cert.pendingRemote && certificateMissingNodeIds(cert, selectedNodeIds).length === 0;
+            return !cert.pendingRemote && certificateMissingNodeIds(cert, selectedNodeIds).length === 0
+              && (!domain || certificateCoversDomain(cert, domain));
           }).length;
           helpText = availableCount
-            ? '有 ' + availableCount + ' 张证书已完整覆盖所选节点。'
-            : '没有证书完整覆盖所选节点；请先到“证书”页面部署。';
+            ? '有 ' + availableCount + ' 张证书同时覆盖该域名和所选节点。'
+            : '没有证书同时覆盖该域名和所选节点；请检查通配符层级或先部署正确证书。';
         }
         if (siteCreateMode === 'conf') {
           helpText += ' Conf 模式下绑定用于资产关联和节点路径适配，实际指令以配置正文为准。';
@@ -5576,14 +5627,15 @@
         updateSiteCertificateOptions();
       }
 
-      function defaultConfig(domain, type, target, cert) {
+      function defaultConfig(domain, type, target, cert, node) {
         var lines = ['server {'];
         if (cert) {
+          var targetPaths = node ? certificateTargetPaths(cert, node) : null;
           var safeCertificateName = safeResourceName(cert.domain || domain);
           lines.push('  listen 443 ssl;');
           lines.push('  server_name ' + domain + ';');
-          lines.push('  ssl_certificate     /etc/nginx/ssl/nginx-manager/' + safeCertificateName + '.crt;');
-          lines.push('  ssl_certificate_key /etc/nginx/ssl/nginx-manager/' + safeCertificateName + '.key;');
+          lines.push('  ssl_certificate     ' + (targetPaths ? targetPaths.certificatePath : '/etc/nginx/ssl/nginx-manager/' + safeCertificateName + '.crt') + ';');
+          lines.push('  ssl_certificate_key ' + (targetPaths ? targetPaths.keyPath : '/etc/nginx/ssl/nginx-manager/' + safeCertificateName + '.key') + ';');
         } else {
           lines.push('  listen 80;');
           lines.push('  server_name ' + domain + ';');
@@ -5605,6 +5657,66 @@
         return lines.join('\n');
       }
 
+      function configCertificateState(cert, site) {
+        var missingNodeIds = cert ? certificateMissingNodeIds(cert, site.nodeIds) : site.nodeIds.slice();
+        return {
+          coversDomain: Boolean(cert && certificateCoversDomain(cert, site.domain)),
+          missingNodeIds: missingNodeIds,
+          available: Boolean(cert && !cert.pendingRemote && !missingNodeIds.length && certificateCoversDomain(cert, site.domain))
+        };
+      }
+
+      function populateConfigCertificateOptions(site) {
+        var select = document.getElementById('config-certificate');
+        var currentId = site.certificateId || '';
+        select.innerHTML = '<option value="">暂不绑定（保留 Conf 内现有路径）</option>' + state.certificates.map(function (cert) {
+          var certState = configCertificateState(cert, site);
+          var current = cert.id === currentId;
+          var suffix = certState.available
+            ? ' · 域名和节点均匹配'
+            : (!certState.coversDomain
+              ? ' · 不覆盖 ' + site.domain
+              : (cert.pendingRemote ? ' · 仍在部署中' : ' · 部分节点缺少'));
+          return '<option value="' + escapeHtml(cert.id) + '"' + ((!certState.available && !current) ? ' disabled' : '') + '>'
+            + escapeHtml(cert.domain) + ' · 剩余 ' + cert.days + ' 天' + escapeHtml(suffix) + '</option>';
+        }).join('');
+        select.value = currentId;
+        select.dataset.original = currentId;
+        select.dataset.current = currentId;
+        updateConfigCertificateHelp(site);
+      }
+
+      function updateConfigCertificateHelp(site) {
+        var select = document.getElementById('config-certificate');
+        var cert = getCert(select.value);
+        var help = document.getElementById('config-certificate-help');
+        if (!cert) {
+          help.textContent = '当前不做证书资产绑定；Conf 内已有证书路径不会自动删除。';
+          return;
+        }
+        var certState = configCertificateState(cert, site);
+        if (!certState.coversDomain) {
+          help.textContent = '此证书不覆盖 ' + site.domain + '，请更换后再发布。';
+        } else if (certState.missingNodeIds.length) {
+          help.textContent = '此证书尚未覆盖全部目标节点，请先完成证书部署。';
+        } else {
+          help.textContent = '证书域名和目标节点均匹配；切换时会同步更新 Conf 中的证书与私钥路径。';
+        }
+      }
+
+      function rewriteConfigCertificatePaths(content, cert, node) {
+        if (!cert || !node) return content;
+        var paths = certificateTargetPaths(cert, node);
+        var rewritten = String(content || '');
+        rewritten = rewritten.replace(/(^[ \t]*ssl_certificate[ \t]+)([^;\r\n]+)(;)/gmi, function (_match, prefix, _value, suffix) {
+          return prefix + paths.certificatePath + suffix;
+        });
+        rewritten = rewritten.replace(/(^[ \t]*ssl_certificate_key[ \t]+)([^;\r\n]+)(;)/gmi, function (_match, prefix, _value, suffix) {
+          return prefix + paths.keyPath + suffix;
+        });
+        return rewritten;
+      }
+
       function openConfigEditor(siteId) {
         var site = getSite(siteId);
         if (!site) return;
@@ -5613,6 +5725,7 @@
         document.getElementById('config-dialog-subtitle').textContent = '当前发布版本 v' + site.version + ' · ' + site.nodeIds.length + ' 个目标节点';
         document.getElementById('config-note').value = site.note || '';
         document.getElementById('config-note').dataset.original = site.note || '';
+        populateConfigCertificateOptions(site);
         document.getElementById('change-note').value = site.status === 'draft' ? site.changeNote.replace(/^草稿：/, '') : '';
         document.getElementById('config-editor').value = site.config;
         document.getElementById('config-editor').dataset.original = site.config;
@@ -5631,7 +5744,9 @@
         var site = getSite(editingSiteId);
         var note = document.getElementById('config-note');
         var noteChanged = note.value.trim() !== (note.dataset.original || '');
-        var metadataOnly = Boolean(current === original && noteChanged && site);
+        var certSelect = document.getElementById('config-certificate');
+        var certificateChanged = certSelect.value !== (certSelect.dataset.original || '');
+        var metadataOnly = Boolean(current === original && noteChanged && !certificateChanged && site);
         var badge = document.getElementById('config-diff-badge');
         var draftButton = document.getElementById('config-draft-button');
         var validateButton = document.getElementById('config-validate-button');
@@ -5647,7 +5762,7 @@
           badge.textContent = '仅修改备注 · 不下发 Agent';
           return;
         }
-        if (current === original) {
+        if (current === original && !certificateChanged) {
           badge.textContent = '与当前版本一致';
           return;
         }
@@ -5658,7 +5773,9 @@
         for (var i = 0; i < max; i += 1) {
           if (oldLines[i] !== newLines[i]) changed += 1;
         }
-        badge.textContent = '相对当前版本约 ' + Math.max(1, changed) + ' 行变化';
+        badge.textContent = certificateChanged && current === original
+          ? '绑定证书已变化'
+          : '相对当前版本约 ' + Math.max(1, changed) + ' 行变化' + (certificateChanged ? ' · 证书已更换' : '');
       }
 
       function saveConfig(mode) {
@@ -5670,8 +5787,25 @@
         var nextNote = noteInput.value.trim();
         var configChanged = nextConfig !== (editor.dataset.original || '');
         var noteChanged = nextNote !== (noteInput.dataset.original || '');
+        var certificateSelect = document.getElementById('config-certificate');
+        var nextCertificateId = certificateSelect.value;
+        var certificateChanged = nextCertificateId !== (certificateSelect.dataset.original || '');
+        var nextCertificate = getCert(nextCertificateId);
+        if (nextCertificate) {
+          var nextCertificateState = configCertificateState(nextCertificate, site);
+          if (!nextCertificateState.coversDomain) {
+            certificateSelect.focus();
+            notify('证书 ' + nextCertificate.domain + ' 不覆盖站点域名 ' + site.domain);
+            return;
+          }
+          if (!nextCertificateState.available) {
+            certificateSelect.focus();
+            notify('所选证书尚未覆盖全部目标节点，请先完成证书部署');
+            return;
+          }
+        }
         var stableSite = !['draft', 'failed', 'publishing'].includes(site.status);
-        if (!configChanged && noteChanged) {
+        if (!configChanged && noteChanged && !certificateChanged) {
           site.note = nextNote;
           site.updatedAt = '刚刚';
           saveState();
@@ -5681,7 +5815,7 @@
           render();
           return;
         }
-        if (!configChanged && !noteChanged && stableSite) {
+        if (!configChanged && !noteChanged && !certificateChanged && stableSite) {
           notify('配置和备注都没有变化');
           return;
         }
@@ -5691,6 +5825,15 @@
           notify('校验或发布前，请填写本次变更说明');
           return;
         }
+        var previousCertificate = getCert(site.certificateId);
+        if (certificateChanged && previousCertificate && Array.isArray(previousCertificate.siteIds)) {
+          previousCertificate.siteIds = previousCertificate.siteIds.filter(function (siteId) { return siteId !== site.id; });
+        }
+        if (certificateChanged && nextCertificate) {
+          nextCertificate.siteIds = Array.isArray(nextCertificate.siteIds) ? nextCertificate.siteIds : [];
+          if (!nextCertificate.siteIds.includes(site.id)) nextCertificate.siteIds.push(site.id);
+        }
+        site.certificateId = nextCertificateId;
         site.config = nextConfig;
         site.note = nextNote;
         site.changeNote = changeNote ? (mode === 'draft' ? '草稿：' + changeNote : changeNote) : '草稿未填写变更说明';
@@ -5712,6 +5855,13 @@
       function openDeployDialog(siteId) {
         var site = getSite(siteId);
         if (!site) return;
+        var boundCertificate = getCert(site.certificateId);
+        if (boundCertificate && !certificateCoversDomain(boundCertificate, site.domain)) {
+          notify('当前绑定证书 ' + boundCertificate.domain + ' 不覆盖 ' + site.domain + '，请先在编辑配置中更换证书');
+          openConfigEditor(site.id);
+          setTimeout(function () { document.getElementById('config-certificate').focus(); }, 0);
+          return;
+        }
         pendingDeploySiteId = site.id;
         document.getElementById('deploy-title').textContent = '发布 ' + site.domain + ' 配置';
         document.getElementById('deploy-subtitle').textContent = '候选版本 v' + (site.version + 1) + ' · ' + escapeHtml(site.changeNote || '未填写变更说明');
@@ -5916,6 +6066,21 @@
         if (cert && node) {
           var targetPaths = certificateTargetPaths(cert, node);
           var exactPaths = [];
+          var generatedCertificateName = safeResourceName(cert.domain || site.domain || 'certificate');
+          var generatedRoots = ['/etc/nginx/ssl/nginx-manager'].concat(state.nodes.map(function (knownNode) {
+            return managedCertificateRoot(knownNode);
+          }));
+          Array.from(new Set(generatedRoots)).forEach(function (root) {
+            var normalizedRoot = String(root).replace(/\/+$/, '');
+            exactPaths.push({
+              from: normalizedRoot + '/' + generatedCertificateName + '.crt',
+              to: targetPaths.certificatePath
+            });
+            exactPaths.push({
+              from: normalizedRoot + '/' + generatedCertificateName + '.key',
+              to: targetPaths.keyPath
+            });
+          });
           state.nodes.forEach(function (sourceNode) {
             var sourcePaths = certificateTargetPaths(cert, sourceNode);
             exactPaths.push({ from: sourcePaths.certificatePath, to: targetPaths.certificatePath });
@@ -6599,6 +6764,11 @@
         if (certId) {
           var selectedCertificate = getCert(certId);
           var missingCertificateNodeIds = selectedCertificate ? certificateMissingNodeIds(selectedCertificate, nodeIds) : nodeIds.slice();
+          if (selectedCertificate && !certificateCoversDomain(selectedCertificate, domain)) {
+            notify('证书 ' + selectedCertificate.domain + ' 不覆盖站点域名 ' + domain + '，请检查通配符层级');
+            document.getElementById('site-cert').focus();
+            return;
+          }
           if (!selectedCertificate || selectedCertificate.pendingRemote || missingCertificateNodeIds.length) {
             var missingCertificateNodes = missingCertificateNodeIds.map(getNode).filter(Boolean).map(function (node) { return node.name; });
             notify(selectedCertificate && selectedCertificate.pendingRemote
@@ -6622,7 +6792,7 @@
           note: String(form.get('note') || '').trim(),
           changeNote: '草稿：创建站点',
           updatedAt: '刚刚',
-          config: confMode ? config : defaultConfig(domain, type, target, getCert(certId)),
+          config: confMode ? config : defaultConfig(domain, type, target, getCert(certId), getNode(nodeIds[0])),
           nodeConfigs: {},
           history: []
         };
@@ -6643,6 +6813,24 @@
 
       document.getElementById('config-editor').addEventListener('input', updateDiffBadge);
       document.getElementById('config-note').addEventListener('input', updateDiffBadge);
+      document.getElementById('config-certificate').addEventListener('change', function (event) {
+        var site = getSite(editingSiteId);
+        if (!site) return;
+        var cert = getCert(event.target.value);
+        var editor = document.getElementById('config-editor');
+        if (cert) {
+          var previewNode = site.nodeIds.map(getNode).filter(Boolean)[0];
+          var rewritten = rewriteConfigCertificatePaths(editor.value, cert, previewNode);
+          if (rewritten === editor.value && !nginxDirectiveValues(editor.value, 'ssl_certificate').length) {
+            notify('当前 Conf 没有 ssl_certificate 指令；请先补充 HTTPS 配置');
+          } else {
+            editor.value = rewritten;
+          }
+        }
+        event.target.dataset.current = event.target.value;
+        updateConfigCertificateHelp(site);
+        updateDiffBadge();
+      });
 
       document.getElementById('site-node-checks').addEventListener('change', function (event) {
         if (event.target && event.target.name === 'site-node') {
@@ -6652,6 +6840,7 @@
       });
 
       document.getElementById('site-domain').addEventListener('input', function () {
+        updateSiteCertificateOptions();
         refreshCleanSiteConfTemplate(false);
       });
 

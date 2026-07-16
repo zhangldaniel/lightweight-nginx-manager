@@ -92,6 +92,19 @@ FAILURE_STAGES = {
     "unknown",
 }
 ROLLBACK_STATUSES = {"restored", "unverified"}
+NGINX_ERROR_CODES = {
+    "certificate_file_missing",
+    "private_key_file_missing",
+    "referenced_file_missing",
+    "unknown_directive",
+    "duplicate_upstream",
+    "permission_denied",
+    "invalid_arguments",
+    "missing_semicolon",
+    "brace_mismatch",
+    "duplicate_listen",
+    "certificate_key_mismatch",
+}
 SENSITIVE_KEY_FRAGMENTS = {
     "private_key",
     "privatekey",
@@ -400,6 +413,21 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
             result["failure_stage"] = failure_stage
         if isinstance(rollback_status, str) and rollback_status in ROLLBACK_STATUSES:
             result["rollback_status"] = rollback_status
+        nginx_error_code = (request.details or {}).get("nginx_error_code")
+        nginx_error_line = (request.details or {}).get("nginx_error_line")
+        if (
+            failure_code == "nginx_config_test_failed"
+            and failure_stage == "nginx_test"
+            and request.action in {"nginx_test", "config_apply", "config_delete", "certificate_apply"}
+        ):
+            if isinstance(nginx_error_code, str) and nginx_error_code in NGINX_ERROR_CODES:
+                result["nginx_error_code"] = nginx_error_code
+            if (
+                isinstance(nginx_error_line, int)
+                and not isinstance(nginx_error_line, bool)
+                and 1 <= nginx_error_line <= 1000000
+            ):
+                result["nginx_error_line"] = nginx_error_line
 
     if request.action == "config_inventory":
         inventory = _safe_config_inventory(request.details)

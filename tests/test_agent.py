@@ -745,6 +745,30 @@ class AgentTestCase(unittest.TestCase):
         self.assertEqual("job_expired", mapped_expired["details"]["failure_code"])
         self.assertEqual("queue", mapped_expired["details"]["failure_stage"])
 
+    def test_nginx_failure_mapping_returns_only_fixed_diagnostic_and_line(self):
+        sensitive_path = "/apps/nginx/cert/customer-secret-name.pem"
+        local = {
+            "job_id": "failed-nginx-test",
+            "action": "config_apply",
+            "status": "failed",
+            "error": (
+                "publish failed at phase testing and previous files were restored: "
+                "nginx: [emerg] cannot load certificate \"{}\": BIO_new_file() failed "
+                "in /apps/nginx/conf/conf.d/private-site.conf:17"
+            ).format(sensitive_path),
+            "failure_code": "nginx_config_test_failed",
+            "failure_stage": "nginx_test",
+            "rollback_status": "restored",
+        }
+
+        mapped = agent._to_server_result(local)
+        details = mapped["details"]
+        self.assertEqual("certificate_file_missing", details["nginx_error_code"])
+        self.assertEqual(17, details["nginx_error_line"])
+        self.assertNotIn(sensitive_path, json.dumps(details))
+        self.assertNotIn("private-site", json.dumps(details))
+        self.assertEqual({}, agent._nginx_error_metadata("unclassified secret output"))
+
     def test_interrupted_job_is_not_replayed(self):
         self.store.begin("job-crashed", "nginx_reload")
         response = self.executor.execute(self.job("job-crashed", "nginx_reload", {}))
