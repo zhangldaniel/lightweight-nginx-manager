@@ -1009,6 +1009,17 @@ class AgentTestCase(unittest.TestCase):
         self.assertIn('if [[ -e "${MANAGED_CONFIG_DIR}" ]]', installer)
         self.assertIn('if [[ -e "${MANAGED_CERT_DIR}" ]]', installer)
 
+    def test_privileged_units_allow_custom_nginx_test_to_bind_low_ports(self):
+        root = AGENT_DIR.parent
+        installer = (root / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        helper = (AGENT_DIR / "nginx-manager-agent-helper.service").read_text(encoding="utf-8")
+        recovery = (AGENT_DIR / "nginx-manager-agent-recover.service").read_text(encoding="utf-8")
+        self.assertGreaterEqual(installer.count("CAP_NET_BIND_SERVICE"), 2)
+        self.assertIn("CAP_NET_BIND_SERVICE", helper)
+        self.assertIn("CAP_NET_BIND_SERVICE", recovery)
+        self.assertIn("recover_existing_transactions\nbegin_install_transaction", installer)
+        self.assertIn('journalctl -u "${APP_NAME}-recover.service"', installer)
+
     def test_agent_uninstaller_preserves_managed_nginx_files(self):
         root = AGENT_DIR.parent
         bootstrap = (root / "uninstall-agent.sh").read_text(encoding="utf-8")

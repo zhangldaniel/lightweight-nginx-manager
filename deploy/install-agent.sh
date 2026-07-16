@@ -445,6 +445,18 @@ prepare_managed_directories() {
   fi
 }
 
+recover_existing_transactions() {
+  if [[ ! -x "${APP_DIR}/nginx_agent.py" || ! -f "${CONFIG_FILE}" ]]; then
+    return
+  fi
+  log "安装前检查并恢复未完成的发布事务"
+  if ! "${PYTHON_BIN}" "${APP_DIR}/nginx_agent.py" --config "${CONFIG_FILE}" recover; then
+    echo "错误：现有 Agent 存在无法自动恢复的发布事务；安装尚未修改任何文件" >&2
+    echo "请先执行：${PYTHON_BIN} ${APP_DIR}/nginx_agent.py --config ${CONFIG_FILE} recover" >&2
+    exit 1
+  fi
+}
+
 validate_server_url() {
   local scheme
   scheme="$("${PYTHON_BIN}" - "${SERVER_URL}" <<'PY'
@@ -605,7 +617,7 @@ ProtectSystem=${protect_system}
 ProtectHome=true
 ${modern_hardening}
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL CAP_NET_BIND_SERVICE
 ${write_access_key}=${MANAGED_CONFIG_DIR} ${MANAGED_CERT_DIR} ${HELPER_STATE_DIR}${nginx_write_paths}
 UMask=0077
 EOF
@@ -631,7 +643,7 @@ ProtectSystem=${protect_system}
 ProtectHome=true
 ${modern_hardening}
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL CAP_NET_BIND_SERVICE
 ${write_access_key}=${MANAGED_CONFIG_DIR} ${MANAGED_CERT_DIR} ${HELPER_STATE_DIR} /run/${APP_NAME}${nginx_write_paths}
 RuntimeDirectory=${APP_NAME}
 RuntimeDirectoryMode=0750
@@ -756,6 +768,7 @@ systemctl cat "${NGINX_SERVICE}" >/dev/null 2>&1 || die "找不到 ${NGINX_SERVI
 [[ -f "${AGENT_SOURCE}" ]] || die "找不到 agent/nginx_agent.py，请从完整发布包内运行"
 
 ensure_identity_user
+recover_existing_transactions
 begin_install_transaction
 prepare_managed_directories
 systemctl stop "${APP_NAME}.service" "${APP_NAME}-helper.service" >/dev/null 2>&1 || true
@@ -769,8 +782,15 @@ run_as_agent "${PYTHON_BIN}" "${APP_DIR}/nginx_agent.py" --config "${CONFIG_FILE
 write_services
 systemctl enable "${APP_NAME}-helper.service" "${APP_NAME}.service"
 enroll_if_needed
-systemctl restart "${APP_NAME}-helper.service"
-systemctl restart "${APP_NAME}.service"
+systemctl reset-failed "${APP_NAME}-recover.service" "${APP_NAME}-helper.service" "${APP_NAME}.service" >/dev/null 2>&1 || true
+if ! systemctl restart "${APP_NAME}-helper.service"; then
+  journalctl -u "${APP_NAME}-recover.service" -u "${APP_NAME}-helper.service" -n 120 --no-pager >&2 || true
+  die "root helper 或其恢复依赖启动失败"
+fi
+if ! systemctl restart "${APP_NAME}.service"; then
+  journalctl -u "${APP_NAME}.service" -n 120 --no-pager >&2 || true
+  die "Agent 启动失败"
+fi
 sleep 2
 systemctl is-active --quiet "${APP_NAME}-helper.service" || {
   journalctl -u "${APP_NAME}-helper.service" -n 80 --no-pager >&2 || true
