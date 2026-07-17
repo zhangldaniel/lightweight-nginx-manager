@@ -2993,6 +2993,912 @@
       line-height: 1.55;
     }
 
+    /* Operations dashboard visual system */
+    :root {
+      --bg: #f5f7fa;
+      --panel: #ffffff;
+      --panel-soft: #f8fafc;
+      --line: #e5eaf0;
+      --line-strong: #d4dce6;
+      --text: #182230;
+      --muted: #5f6f82;
+      --muted-2: #7b8999;
+      --primary: #1689f5;
+      --primary-soft: #eaf5ff;
+      --green: #16a077;
+      --green-soft: #eaf8f3;
+      --amber: #d08a19;
+      --amber-soft: #fff7e7;
+      --red: #e3535d;
+      --red-soft: #fff1f2;
+      --ink: #152236;
+      --code-bg: #12243a;
+      --code-text: #e7f0f9;
+      --shadow: 0 8px 24px rgba(28, 46, 72, .06);
+      --radius: 8px;
+    }
+
+    body {
+      background:
+        linear-gradient(rgba(255, 255, 255, .36), rgba(255, 255, 255, .36)),
+        var(--bg);
+      color: var(--text);
+      font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    .shell {
+      grid-template-columns: 204px minmax(0, 1fr);
+    }
+
+    .sidebar {
+      padding: 14px 12px 16px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 255, 255, .98);
+      color: var(--text);
+      box-shadow: none;
+    }
+
+    .brand {
+      gap: 10px;
+      min-height: 50px;
+      padding: 0 5px 13px;
+      border-bottom: 1px solid #f0f2f5;
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border: 1px solid #79c9ff;
+      border-radius: 8px;
+      background: #f2faff;
+      color: #1291e9;
+      box-shadow: inset 0 0 0 3px #fff;
+      font-size: 13px;
+    }
+
+    .brand-name {
+      color: #182230;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .brand-sub {
+      color: #97a3b2;
+      font-size: 9px;
+      letter-spacing: .12em;
+    }
+
+    .nav-label {
+      padding: 17px 10px 7px;
+      color: #a0a9b5;
+      font-size: 10px;
+      letter-spacing: .08em;
+    }
+
+    .nav {
+      gap: 3px;
+    }
+
+    .nav-button {
+      min-height: 40px;
+      padding: 0 10px;
+      border-radius: 7px;
+      color: #536171;
+      font-size: 12px;
+      font-weight: 500;
+      transition: color .15s ease, background .15s ease;
+    }
+
+    .nav-button::before {
+      inset: 8px auto 8px -12px;
+      width: 2px;
+      background: #1689f5;
+    }
+
+    .nav-button:hover {
+      background: #f5f8fb;
+      color: #263447;
+      transform: none;
+    }
+
+    .nav-button.active {
+      background: #edf6ff;
+      color: #087fdc;
+      box-shadow: none;
+      font-weight: 650;
+    }
+
+    .nav-icon,
+    .nav-button:hover .nav-icon,
+    .nav-button.active .nav-icon {
+      color: currentColor;
+    }
+
+    .nav-icon svg {
+      width: 17px;
+      height: 17px;
+      stroke-width: 1.65;
+    }
+
+    .nav-count {
+      min-width: 21px;
+      padding: 1px 6px;
+      background: #f0f3f6;
+      color: #7c8998;
+      font-size: 10px;
+    }
+
+    .nav-button.active .nav-count {
+      background: #dceeff;
+      color: #087fdc;
+    }
+
+    .agent-card {
+      padding: 12px;
+      border-color: #cfe9df;
+      border-radius: 8px;
+      background: #f2fbf7;
+      box-shadow: none;
+    }
+
+    .agent-card-head {
+      color: #1f5f4c;
+      font-size: 11px;
+    }
+
+    .agent-card p {
+      color: #678075;
+      font-size: 10px;
+      line-height: 1.5;
+    }
+
+    .agent-card button {
+      color: #0c8b66;
+      font-size: 10px;
+    }
+
+    .topbar {
+      height: 54px;
+      padding: 0 22px;
+      border-color: var(--line);
+      background: rgba(255, 255, 255, .97);
+      box-shadow: none;
+    }
+
+    .breadcrumb {
+      color: #8995a5;
+      font-size: 12px;
+    }
+
+    .breadcrumb strong {
+      color: #344154;
+      font-weight: 600;
+    }
+
+    .connection-pill {
+      min-height: 30px;
+      padding: 0 10px;
+      border-color: #cfe7dd;
+      border-radius: 6px;
+      background: #f3faf7;
+      color: #178060;
+      font-size: 11px;
+    }
+
+    .session-role {
+      min-height: 28px;
+      border-radius: 6px;
+      background: #f5f7fa;
+      font-size: 10px;
+    }
+
+    .content {
+      max-width: 1920px;
+      padding: 23px clamp(22px, 2vw, 34px) 46px;
+    }
+
+    .page-head {
+      min-height: 55px;
+      align-items: flex-start;
+      margin-bottom: 16px;
+    }
+
+    .page-head h1 {
+      margin-bottom: 3px;
+      color: #172131;
+      font-size: 24px;
+      line-height: 1.25;
+      font-weight: 700;
+      letter-spacing: -.015em;
+    }
+
+    .page-head p {
+      color: #687789;
+      font-size: 12px;
+    }
+
+    .page-actions {
+      gap: 8px;
+    }
+
+    .ghost-button,
+    .button,
+    .icon-button {
+      border-color: #d9e0e8;
+      border-radius: 6px;
+      color: #354255;
+      box-shadow: none;
+      font-weight: 600;
+    }
+
+    .ghost-button,
+    .button {
+      min-height: 36px;
+      padding: 0 14px;
+      font-size: 12px;
+    }
+
+    .ghost-button {
+      min-height: 30px;
+      font-size: 11px;
+    }
+
+    .button:hover,
+    .ghost-button:hover,
+    .icon-button:hover {
+      border-color: #aebdcd;
+      background: #f9fbfd;
+      color: #1b2b40;
+      box-shadow: none;
+      transform: none;
+    }
+
+    .button.primary {
+      border-color: #1689f5;
+      background: #1689f5;
+      box-shadow: 0 4px 10px rgba(22, 137, 245, .16);
+    }
+
+    .button.primary:hover {
+      border-color: #087bdc;
+      background: #087bdc;
+    }
+
+    .summary-grid {
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .summary-card {
+      position: relative;
+      min-height: 96px;
+      padding: 16px 17px;
+      gap: 12px;
+      overflow: hidden;
+      border-color: #e2e7ed;
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(31, 49, 73, .035);
+    }
+
+    .summary-card::after {
+      position: absolute;
+      inset: auto 0 0;
+      height: 2px;
+      background: #dfeafb;
+      content: "";
+    }
+
+    .summary-card--nodes {
+      border-color: #cfe9df;
+      background: linear-gradient(135deg, #f6fcf9, #fff 72%);
+    }
+
+    .summary-card--nodes::after {
+      background: #38b58c;
+    }
+
+    .summary-card--certificates {
+      border-color: #f0dfbb;
+      background: linear-gradient(135deg, #fffaf0, #fff 72%);
+    }
+
+    .summary-card--certificates::after {
+      background: #e0a33f;
+    }
+
+    .summary-card button {
+      gap: 12px;
+    }
+
+    .summary-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+    }
+
+    .summary-icon svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    .summary-label {
+      color: #687789;
+      font-size: 11px;
+    }
+
+    .summary-value {
+      color: #172131;
+      font-size: 24px;
+    }
+
+    .summary-hint {
+      color: #8290a0;
+      font-size: 10px;
+    }
+
+    .workspace {
+      grid-template-columns: minmax(0, 1fr) clamp(390px, 27vw, 450px);
+      gap: 14px;
+    }
+
+    .toolbar {
+      min-height: 56px;
+      gap: 8px;
+      padding: 7px;
+      border-color: var(--line);
+      border-radius: 8px 8px 0 0;
+      box-shadow: none;
+    }
+
+    .input,
+    .select,
+    .textarea {
+      border-color: #dbe2e9;
+      border-radius: 6px;
+      color: #263447;
+      font-size: 13px;
+    }
+
+    .input,
+    .select {
+      min-height: 40px;
+    }
+
+    .input:focus,
+    .select:focus,
+    .textarea:focus {
+      border-color: #63b5f4;
+      box-shadow: 0 0 0 3px rgba(22, 137, 245, .09);
+    }
+
+    .list-panel,
+    .detail-panel,
+    .panel,
+    .node-card {
+      border-color: var(--line);
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(31, 49, 73, .035);
+    }
+
+    .list-panel {
+      border-radius: 0 0 8px 8px;
+    }
+
+    .table-head {
+      min-height: 42px;
+      background: #f8fafc;
+      color: #748296;
+      font-size: 11px;
+    }
+
+    .table-row {
+      min-height: 76px;
+      border-color: #edf0f4;
+    }
+
+    .table-row:hover {
+      background: #f9fbfd;
+    }
+
+    .table-row.selected {
+      background: #eff7ff;
+      box-shadow: inset 2px 0 0 #1689f5;
+    }
+
+    .cell-title {
+      color: #1c293a;
+      font-size: 13px;
+    }
+
+    .cell-sub {
+      color: #6e7d8f;
+      font-size: 11px;
+    }
+
+    .chip {
+      min-height: 23px;
+      border-radius: 5px;
+      background: #eef2f5;
+      color: #59687a;
+      font-size: 10px;
+    }
+
+    .status-pill {
+      min-height: 24px;
+      padding: 3px 8px;
+      border-radius: 5px;
+      font-size: 10px;
+      font-weight: 650;
+    }
+
+    .detail-panel {
+      top: 66px;
+      max-height: calc(100vh - 78px);
+    }
+
+    .detail-sticky-top {
+      background: #fff;
+      box-shadow: 0 1px 0 var(--line);
+    }
+
+    .detail-header {
+      padding: 17px 18px;
+    }
+
+    .detail-title-row h2 {
+      font-size: 17px;
+    }
+
+    .detail-actions {
+      gap: 7px;
+      padding: 11px 18px 14px;
+    }
+
+    .detail-actions .button {
+      min-height: 36px;
+      font-size: 11px;
+    }
+
+    .detail-body {
+      gap: 16px;
+      padding: 17px 18px 20px;
+    }
+
+    .config-preview {
+      border-radius: 6px;
+      background: #12243a;
+      color: #e7f0f9;
+      font-size: 11px;
+    }
+
+    .node-mini {
+      border-radius: 6px;
+      background: #f8fafc;
+    }
+
+    .section-head {
+      margin-bottom: 10px;
+    }
+
+    .section-head h2 {
+      color: #223044;
+      font-size: 15px;
+      font-weight: 650;
+    }
+
+    .section-head p {
+      color: #748296;
+      font-size: 11px;
+    }
+
+    .node-grid {
+      grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+      gap: 12px;
+    }
+
+    .node-card {
+      position: relative;
+      padding: 16px;
+      gap: 13px;
+      overflow: hidden;
+      border-color: #dfe5ec;
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 3px 12px rgba(31, 49, 73, .045);
+    }
+
+    .node-card::before {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 3px;
+      background: #97a6b6;
+      content: "";
+    }
+
+    .node-card--online {
+      border-color: #cfe8df;
+      background: linear-gradient(135deg, #f7fcfa 0, #fff 42%);
+    }
+
+    .node-card--online::before {
+      background: #1ea77c;
+    }
+
+    .node-card--warn,
+    .node-card--pending {
+      border-color: #efdfbd;
+      background: linear-gradient(135deg, #fffaf0 0, #fff 42%);
+    }
+
+    .node-card--warn::before,
+    .node-card--pending::before {
+      background: #daa13a;
+    }
+
+    .node-card--offline {
+      border-color: #efcfd2;
+      background: linear-gradient(135deg, #fff7f7 0, #fff 42%);
+    }
+
+    .node-card--offline::before {
+      background: #e45a63;
+    }
+
+    .node-avatar {
+      width: 40px;
+      height: 40px;
+      border: 1px solid #cce5fb;
+      border-radius: 7px;
+      background: #eef8ff;
+      color: #1689f5;
+      font-size: 12px;
+    }
+
+    .node-card--online .node-avatar {
+      border-color: #c8e8dd;
+      background: #ebf8f3;
+      color: #158866;
+    }
+
+    .node-card--warn .node-avatar,
+    .node-card--pending .node-avatar {
+      border-color: #efdfb9;
+      background: #fff6e4;
+      color: #b97811;
+    }
+
+    .node-card--offline .node-avatar {
+      border-color: #f0d0d3;
+      background: #fff0f1;
+      color: #cc4450;
+    }
+
+    .node-card h3 {
+      color: #1a283a;
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .node-card-head p,
+    .fact label {
+      color: #788697;
+      font-size: 10px;
+    }
+
+    .node-facts {
+      gap: 7px;
+    }
+
+    .fact {
+      padding: 9px 10px;
+      border: 1px solid #edf0f3;
+      border-radius: 6px;
+      background: rgba(248, 250, 252, .78);
+    }
+
+    .fact strong {
+      margin-top: 3px;
+      color: #334155;
+      font-size: 11px;
+    }
+
+    .node-actions {
+      gap: 6px;
+      border-color: #edf0f3;
+    }
+
+    .node-actions button {
+      min-height: 33px;
+      border-color: #dce3ea;
+      border-radius: 5px;
+      background: #fff;
+      color: #465568;
+      font-size: 11px;
+    }
+
+    .node-actions button:hover:not(:disabled) {
+      border-color: #98c9ef;
+      background: #f3f9ff;
+      color: #0879d2;
+    }
+
+    .certificate-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+      gap: 12px;
+    }
+
+    .certificate-card {
+      position: relative;
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid #dfe5ec;
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 3px 12px rgba(31, 49, 73, .045);
+    }
+
+    .certificate-card::before {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 3px;
+      background: #1ea77c;
+      content: "";
+    }
+
+    .certificate-card--ok {
+      border-color: #cfe8df;
+    }
+
+    .certificate-card--warn {
+      border-color: #efdfbd;
+      background: linear-gradient(135deg, #fffaf1 0, #fff 35%);
+    }
+
+    .certificate-card--warn::before {
+      background: #dca038;
+    }
+
+    .certificate-card--danger {
+      border-color: #efcdd1;
+      background: linear-gradient(135deg, #fff5f6 0, #fff 35%);
+    }
+
+    .certificate-card--danger::before {
+      background: #e3535d;
+    }
+
+    .certificate-card-head {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 16px 17px 12px;
+    }
+
+    .certificate-icon {
+      width: 40px;
+      height: 40px;
+      display: grid;
+      place-items: center;
+      flex: none;
+      border: 1px solid #cbe8dd;
+      border-radius: 8px;
+      background: #edf9f4;
+      color: #16946e;
+    }
+
+    .certificate-card--warn .certificate-icon {
+      border-color: #f0dfba;
+      background: #fff6e3;
+      color: #bd7a11;
+    }
+
+    .certificate-card--danger .certificate-icon {
+      border-color: #f1cfd2;
+      background: #fff0f1;
+      color: #d44752;
+    }
+
+    .certificate-icon svg {
+      width: 20px;
+      height: 20px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 1.7;
+    }
+
+    .certificate-title {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .certificate-title h2 {
+      margin: 0;
+      overflow: hidden;
+      color: #1b293b;
+      font-size: 14px;
+      line-height: 1.4;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .certificate-title p {
+      margin: 2px 0 0;
+      overflow: hidden;
+      color: #687789;
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .certificate-meta {
+      display: flex;
+      gap: 8px 16px;
+      padding: 0 17px 12px 68px;
+      color: #758396;
+      font-size: 10px;
+      flex-wrap: wrap;
+    }
+
+    .certificate-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      margin: 0 17px;
+      border: 1px solid #edf0f3;
+      border-radius: 7px;
+      background: #f9fafc;
+    }
+
+    .certificate-metrics div {
+      min-width: 0;
+      padding: 9px 11px;
+    }
+
+    .certificate-metrics div + div {
+      border-left: 1px solid #e8edf2;
+    }
+
+    .certificate-metrics span {
+      display: block;
+      color: #7a8797;
+      font-size: 10px;
+    }
+
+    .certificate-metrics strong {
+      display: block;
+      margin-top: 1px;
+      color: #233146;
+      font-size: 18px;
+      line-height: 1.3;
+      font-weight: 700;
+    }
+
+    .certificate-metrics small {
+      color: #738194;
+      font-size: 10px;
+      font-weight: 500;
+    }
+
+    .certificate-progress {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 17px 13px;
+      color: #718094;
+      font-size: 10px;
+    }
+
+    .certificate-progress .progress-track {
+      width: auto;
+      height: 5px;
+      flex: 1;
+    }
+
+    .certificate-locations {
+      padding: 12px 17px;
+      border-top: 1px solid #edf0f3;
+      border-bottom: 1px solid #edf0f3;
+      background: rgba(248, 250, 252, .72);
+    }
+
+    .certificate-section-title {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 5px;
+      color: #6e7c8e;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .certificate-card .cert-location {
+      grid-template-columns: minmax(82px, 104px) minmax(0, 1fr);
+      gap: 9px;
+      padding: 6px 0;
+    }
+
+    .certificate-card .cert-location-node {
+      color: #3c4b5e;
+      font-size: 10px;
+    }
+
+    .certificate-card .cert-location-path {
+      min-height: 25px;
+      grid-template-columns: 32px minmax(0, 1fr);
+      padding: 3px 7px;
+      border-color: #e2e7ec;
+      border-radius: 5px;
+      background: #fff;
+    }
+
+    .certificate-card .cert-location-path span,
+    .certificate-card .cert-location-path code {
+      font-size: 9px;
+    }
+
+    .certificate-card-foot {
+      min-height: 53px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 17px;
+    }
+
+    .certificate-fingerprint {
+      min-width: 0;
+      overflow: hidden;
+      color: #8995a4;
+      font: 9px/1.4 "Cascadia Mono", Consolas, monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .certificate-card .cert-action {
+      min-height: 32px;
+      padding: 0 12px;
+      border-color: #b9d8f2;
+      border-radius: 5px;
+      background: #f3f9ff;
+      color: #087edb;
+      font-size: 11px;
+    }
+
+    .certificate-card .cert-action:hover {
+      border-color: #78b9ec;
+      background: #eaf5ff;
+    }
+
+    dialog {
+      border-radius: 9px;
+      box-shadow: 0 24px 70px rgba(21, 36, 56, .26);
+    }
+
+    .dialog-head,
+    .dialog-foot {
+      background: #fff;
+    }
+
+    .dialog-head h2 {
+      font-size: 17px;
+    }
+
+    .dialog-body {
+      background: #fbfcfd;
+    }
+
+    @media (max-width: 1100px) {
+      .certificate-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
     @media (max-width: 1420px) {
       .shell {
         grid-template-columns: 78px minmax(0, 1fr);
@@ -5407,9 +6313,9 @@
         var deployedSites = state.sites.filter(function (site) { return (site.nodeIds || []).length > 0; }).length;
         return [
           '<div class="summary-grid">',
-          '  <div class="summary-card"><span class="summary-icon blue" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"></rect><rect x="4" y="14" width="16" height="6" rx="1.5"></rect><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"></path></svg></span><span class="summary-copy"><span class="summary-label">已部署站点</span><strong class="summary-value">' + deployedSites + '</strong><span class="summary-hint">平台记录共 ' + state.sites.length + ' 条</span></span></div>',
-          '  <div class="summary-card"><button type="button" data-nav-jump="nodes"><span class="summary-icon green" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"></rect><rect x="3.5" y="14" width="17" height="6" rx="1.5"></rect><path d="M7.5 7h.01M7.5 17h.01M11 7h6M11 17h6"></path></svg></span><span class="summary-copy"><span class="summary-label">在线 Agent</span><strong class="summary-value">' + onlineNodes().length + ' / ' + state.nodes.length + '</strong><span class="summary-hint">主动出站连接</span></span></button></div>',
-          '  <div class="summary-card"><button type="button" data-nav-jump="certificates"><span class="summary-icon amber" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 19 7v5c0 4.6-2.9 7.3-7 9-4.1-1.7-7-4.4-7-9V7l7-4Z"></path><path d="M12 8v5M12 16.5h.01"></path></svg></span><span class="summary-copy"><span class="summary-label">即将到期证书</span><strong class="summary-value">' + expiring + '</strong><span class="summary-hint ' + (expiring ? 'warn' : '') + '">' + (expiring ? '需要处理' : '暂无风险') + '</span></span></button></div>',
+          '  <div class="summary-card summary-card--sites"><span class="summary-icon blue" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"></rect><rect x="4" y="14" width="16" height="6" rx="1.5"></rect><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"></path></svg></span><span class="summary-copy"><span class="summary-label">已部署站点</span><strong class="summary-value">' + deployedSites + '</strong><span class="summary-hint">平台记录共 ' + state.sites.length + ' 条</span></span></div>',
+          '  <div class="summary-card summary-card--nodes"><button type="button" data-nav-jump="nodes"><span class="summary-icon green" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"></rect><rect x="3.5" y="14" width="17" height="6" rx="1.5"></rect><path d="M7.5 7h.01M7.5 17h.01M11 7h6M11 17h6"></path></svg></span><span class="summary-copy"><span class="summary-label">在线 Agent</span><strong class="summary-value">' + onlineNodes().length + ' / ' + state.nodes.length + '</strong><span class="summary-hint">主动出站连接</span></span></button></div>',
+          '  <div class="summary-card summary-card--certificates"><button type="button" data-nav-jump="certificates"><span class="summary-icon amber" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 19 7v5c0 4.6-2.9 7.3-7 9-4.1-1.7-7-4.4-7-9V7l7-4Z"></path><path d="M12 8v5M12 16.5h.01"></path></svg></span><span class="summary-copy"><span class="summary-label">即将到期证书</span><strong class="summary-value">' + expiring + '</strong><span class="summary-hint ' + (expiring ? 'warn' : '') + '">' + (expiring ? '需要处理' : '暂无风险') + '</span></span></button></div>',
           '  <div class="summary-card"><button type="button" data-site-filter="attention"><span class="summary-icon red" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3L12 3.5Z"></path><path d="M12 9v4M12 16.5h.01"></path></svg></span><span class="summary-copy"><span class="summary-label">漂移 / 失败</span><strong class="summary-value">' + drift + '</strong><span class="summary-hint ' + (drift ? 'danger' : '') + '">' + (drift ? '点击查看异常站点' : '全部一致') + '</span></span></button></div>',
           '</div>'
         ].join('');
@@ -5638,11 +6544,12 @@
       }
 
       function renderCertificates() {
-        var rows = state.certificates.map(function (cert) {
+        var cards = state.certificates.map(function (cert) {
           var status = certStatus(cert);
           var days = certificateDays(cert);
           var width = Math.max(5, Math.min(100, Math.round(days / 90 * 100)));
           var barClass = days <= 7 ? 'danger' : (days <= 30 ? 'warn' : '');
+          var cardClass = days <= 7 ? 'certificate-card--danger' : (days <= 30 ? 'certificate-card--warn' : 'certificate-card--ok');
           var sites = (cert.siteIds || []).map(getSite).filter(Boolean);
           var locations = (cert.nodeIds || []).map(function (nodeId) {
             var node = getNode(nodeId);
@@ -5651,22 +6558,28 @@
             return '<div class="cert-location"><span class="cert-location-node" title="' + escapeHtml(node.name) + '">' + escapeHtml(node.name) + '</span><div class="cert-location-files"><div class="cert-location-path" title="' + escapeHtml(paths.certificatePath) + '"><span>证书</span><code>' + escapeHtml(paths.certificatePath) + '</code></div><div class="cert-location-path" title="' + escapeHtml(paths.keyPath) + '"><span>私钥</span><code>' + escapeHtml(paths.keyPath) + '</code></div></div></div>';
           }).filter(Boolean).join('');
           return [
-            '<div class="table-row">',
-            '  <div class="table-cell primary" data-label="证书"><span class="cell-title">' + escapeHtml(cert.name) + '</span><span class="cell-sub">' + escapeHtml(cert.domain) + '</span><span class="cell-sub">' + escapeHtml(cert.source) + ' · ' + escapeHtml(cert.issuer) + '</span><span class="cell-sub">人工替换 · ' + sites.length + ' 个站点 · ' + (cert.nodeIds || []).length + ' 个节点</span></div>',
-            '  <div class="table-cell" data-label="节点与证书文件">' + (locations ? '<div class="cert-location-list">' + locations + '</div>' : '<span class="cert-location-empty">尚未写入节点</span>') + '</div>',
-            '  <div class="table-cell" data-label="有效期"><div class="cert-progress"><div class="progress-track"><i class="' + barClass + '" style="width:' + width + '%"></i></div><span class="cell-sub">' + days + ' 天</span></div></div>',
-            '  <div class="table-cell" data-label="状态"><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
-            '  <div class="table-cell" data-label="操作"><div class="cert-actions"><button class="cert-action" type="button" data-action="replace-cert" data-cert-id="' + escapeHtml(cert.id) + '">替换证书</button></div></div>',
-            '</div>'
+            '<article class="certificate-card ' + cardClass + '">',
+            '  <header class="certificate-card-head">',
+            '    <span class="certificate-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 19 7v5c0 4.6-2.9 7.3-7 9-4.1-1.7-7-4.4-7-9V7l7-4Z"></path><path d="m9.4 12.1 1.7 1.7 3.8-4"></path></svg></span>',
+            '    <div class="certificate-title"><h2>' + escapeHtml(cert.name) + '</h2><p>' + escapeHtml(cert.domain) + '</p></div>',
+            '    <span class="status-pill ' + status.className + '">' + status.label + '</span>',
+            '  </header>',
+            '  <div class="certificate-meta"><span>' + escapeHtml(cert.issuer) + '</span><span>' + escapeHtml(cert.source) + ' · 人工替换</span></div>',
+            '  <div class="certificate-metrics">',
+            '    <div><span>剩余时间</span><strong>' + days + ' <small>天</small></strong></div>',
+            '    <div><span>部署节点</span><strong>' + (cert.nodeIds || []).length + ' <small>个</small></strong></div>',
+            '    <div><span>关联站点</span><strong>' + sites.length + ' <small>个</small></strong></div>',
+            '  </div>',
+            '  <div class="certificate-progress"><div class="progress-track"><i class="' + barClass + '" style="width:' + width + '%"></i></div><span>' + (days <= 30 ? '请安排替换' : '有效期正常') + '</span></div>',
+            '  <section class="certificate-locations"><div class="certificate-section-title"><span>节点与原路径</span><span>' + (cert.nodeIds || []).length + ' 份</span></div>' + (locations ? '<div class="cert-location-list">' + locations + '</div>' : '<span class="cert-location-empty">尚未写入节点</span>') + '</section>',
+            '  <footer class="certificate-card-foot"><span class="certificate-fingerprint">指纹 ' + escapeHtml(cert.fingerprint || '待探测') + '</span><button class="cert-action" type="button" data-action="replace-cert" data-cert-id="' + escapeHtml(cert.id) + '">替换证书</button></footer>',
+            '</article>'
           ].join('');
         }).join('');
 
         return [
           pageHead('证书', '管理域名证书、到期提醒和多节点原路径替换。', '<button class="button" type="button" data-action="import-certificates">扫描节点证书</button><button class="button primary" type="button" data-action="add-certificate">＋ 添加证书</button>'),
-          '<div class="panel cert-table">',
-          '  <div class="table-head"><span>证书 / 域名</span><span>节点与证书文件</span><span>剩余时间</span><span>状态</span><span>操作</span></div>',
-          rows,
-          '</div>',
+          cards ? '<div class="certificate-grid">' + cards + '</div>' : '<div class="panel empty-state"><strong>暂无托管证书</strong><span>扫描节点证书，或上传证书并写入指定节点。</span></div>',
           '<p class="view-note">替换会写回原证书和私钥路径。私钥不回显；校验或 reload 失败时，Agent 会自动恢复旧文件。</p>'
         ].join('');
       }
@@ -5677,7 +6590,7 @@
             return key + '=' + request.labels[key];
           }).join(' · ');
           return [
-            '<article class="node-card">',
+            '<article class="node-card node-card--pending">',
             '  <div class="node-card-head">',
             '    <div class="node-avatar">?</div>',
             '    <div><h3>' + escapeHtml(request.node_name) + '</h3><p>' + escapeHtml(request.hostname) + (labels ? ' · ' + escapeHtml(labels) : '') + '</p></div>',
@@ -5699,7 +6612,7 @@
           var statusClass = !node.online ? 'danger' : (node.drift ? 'warn' : '');
           var statusText = !node.online ? '离线' : (node.drift ? '配置漂移' : '在线');
           return [
-            '<article class="node-card">',
+            '<article class="node-card ' + (!node.online ? 'node-card--offline' : (node.drift ? 'node-card--warn' : 'node-card--online')) + '">',
             '  <div class="node-card-head">',
             '    <div class="node-avatar">' + escapeHtml(node.name.slice(-2).toUpperCase()) + '</div>',
             '    <div><h3>' + escapeHtml(node.name) + '</h3><p>' + escapeHtml(node.ip) + ' · ' + escapeHtml(node.label) + '</p></div>',

@@ -19,6 +19,12 @@ if (!html.includes('id="toast" role="status" aria-live="polite" popover="manual"
     || !html.includes("toast.showPopover()")) {
   throw new Error("toast is not promoted into the browser top layer");
 }
+if (!html.includes('class="certificate-grid"')
+    || !html.includes('certificate-card--danger')
+    || !html.includes('node-card--online')
+    || !html.includes('summary-card--certificates')) {
+  throw new Error("node and certificate risk cards are missing from the operations dashboard theme");
+}
 if ((html.match(/'delete-config', 'delete-site-record'/g) || []).length < 2) {
   throw new Error("platform record deletion is not protected by both action and visibility permissions");
 }
