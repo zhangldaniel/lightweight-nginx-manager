@@ -827,6 +827,81 @@ class AgentTestCase(unittest.TestCase):
         settings.allow_insecure_http = True
         settings.validate()
 
+    def test_live_log_capability_respects_transport_permission_without_downgrading_https(self):
+        log_root = Path(self.temporary.name) / "logs"
+        log_root.mkdir()
+        https_settings = agent.Settings(
+            "https://manager.example.test",
+            "https-log-node",
+            allowed_log_roots=[str(log_root)],
+            allow_plaintext_log_stream=True,
+        )
+        https_settings.validate()
+        self.assertIn("log_stream_v1", https_settings.reported_capabilities())
+
+        http_settings = agent.Settings(
+            "http://127.0.0.1:8443",
+            "http-log-node",
+            allow_insecure_http=True,
+            allowed_log_roots=[str(log_root)],
+        )
+        http_settings.validate()
+        self.assertNotIn("log_stream_v1", http_settings.reported_capabilities())
+        http_settings.allow_plaintext_log_stream = True
+        self.assertIn("log_stream_v1", http_settings.reported_capabilities())
+
+        with self.assertRaises(agent.AgentError):
+            agent.Settings(
+                "https://manager.example.test",
+                "remote-stub",
+                stub_status_url="http://192.0.2.1/nginx_status",
+            ).validate()
+
+    def test_live_log_reader_is_allowlisted_filtered_and_incremental(self):
+        log_root = Path(self.temporary.name) / "logs"
+        log_root.mkdir()
+        access_log = log_root / "access.log"
+        access_log.write_text(
+            "192.0.2.1 GET /health 200\n"
+            "192.0.2.2 GET /missing 404\n"
+            "192.0.2.3 GET /broken 500\n",
+            encoding="utf-8",
+        )
+        (log_root / "ignored.txt").write_text("not a log", encoding="utf-8")
+        self.settings.allowed_log_roots = [str(log_root)]
+        executor = agent.JobExecutor(self.settings, self.store)
+
+        self.assertEqual([str(access_log.resolve())], executor.log_inventory())
+        first = executor.read_log_chunk({
+            "path": str(access_log),
+            "tail_lines": 20,
+            "preset": "http5xx",
+            "include": "GET",
+        })
+        self.assertIn("/broken 500", first["content"])
+        self.assertNotIn("/missing 404", first["content"])
+        self.assertEqual(1, first["sent_lines"])
+        self.assertEqual(2, first["dropped_lines"])
+
+        with access_log.open("a", encoding="utf-8") as handle:
+            handle.write("192.0.2.4 GET /again 500\n")
+        second = executor.read_log_chunk({
+            "path": str(access_log),
+            "cursor": first["cursor"],
+            "preset": "http5xx",
+        })
+        self.assertEqual("192.0.2.4 GET /again 500\n", second["content"])
+        with self.assertRaises(agent.ActionError):
+            executor.read_log_chunk({"path": str(self.main_config), "preset": "all"})
+        linked_log = log_root / "linked.log"
+        try:
+            linked_log.symlink_to(access_log)
+        except OSError:
+            pass
+        else:
+            with self.assertRaises(agent.ActionError):
+                executor.read_log_chunk({"path": str(linked_log), "preset": "all"})
+
     def test_health_check_rejects_unapproved_host(self):
         with self.assertRaises(agent.ActionError):
             self.executor._health_check({"url": "http://169.254.169.254/latest/meta-data", "attempts": 1})
@@ -1097,6 +1172,9 @@ class AgentTestCase(unittest.TestCase):
             "--managed-config-dir",
             "--managed-cert-dir",
             "--managed-include-file",
+            "--nginx-log-dir",
+            "--stub-status-url",
+            "--allow-plaintext-log-stream",
         ):
             self.assertIn(option, installer)
         self.assertIn('"tls_skip_verify": tls_skip_verify == "1"', installer)
@@ -1110,6 +1188,9 @@ class AgentTestCase(unittest.TestCase):
         self.assertIn('if [[ -e "${MANAGED_CERT_DIR}" ]]', installer)
         self.assertIn('harden_managed_path_chain "${MANAGED_CONFIG_DIR}"', installer)
         self.assertIn('harden_managed_path_chain "${MANAGED_CERT_DIR}"', installer)
+        self.assertIn('"allowed_log_roots"', installer)
+        self.assertIn('"stub_status_url"', installer)
+        self.assertIn('"allow_plaintext_log_stream"', installer)
         bootstrap = (AGENT_DIR.parent / "install-agent.sh").read_text(encoding="utf-8")
         self.assertIn("NGINX_MANAGER_REQUIRE_PINNED_REF", bootstrap)
         self.assertIn("NGINX_MANAGER_ARCHIVE_SHA256", bootstrap)

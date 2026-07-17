@@ -8,6 +8,10 @@ Server 基于 FastAPI、SQLite 和单文件 Web 控制台；Agent 主动连接 S
 
 ![站点与配置界面预览](docs/images/console-overview.png)
 
+| 运行监控 | 实时日志 |
+| --- | --- |
+| ![运行监控界面](docs/images/runtime-monitoring.png) | ![实时日志界面](docs/images/runtime-logs.png) |
+
 ## 快速安装
 
 ### 1. Server（默认 HTTP）
@@ -50,12 +54,32 @@ sudo bash -s -- \
   --managed-config-dir /apps/nginx/conf/conf.d \
   --managed-config-already-included \
   --managed-cert-dir /apps/nginx/cert \
+  --nginx-log-dir /apps/nginx/logs \
+  --stub-status-url http://127.0.0.1:18080/nginx_status \
+  --allow-plaintext-log-stream \
   --nginx-service nginx.service
 ```
 
 安装完成后进入 Web 的“节点 Agent”批准申请，不需要注册令牌。然后分别点击“导入节点现有站点”和证书页的“扫描节点证书”。扫描只读，私钥内容不会离开节点。
 
 “站点与配置”顶部可按 Agent 切换列表；右侧会显示所选节点的实际配置路径、Hash 和配置预览。升级后重新导入一次，可补齐旧站点的节点配置快照。
+
+`--nginx-log-dir` 可重复指定，只允许实时读取目录内的普通 `*.log`；控制端不把日志正文写入 SQLite 或磁盘。HTTP 管理网必须显式添加 `--allow-plaintext-log-stream`，该参数在 HTTPS 下也可以保留，不会关闭 TLS 或改变 Server 地址。
+
+`--stub-status-url` 仅接受本机回环地址。暂时不可访问不会阻断安装，Agent 会继续重试。可在 Nginx 中增加：
+
+```nginx
+server {
+    listen 127.0.0.1:18080;
+    location = /nginx_status {
+        stub_status;
+        allow 127.0.0.1;
+        deny all;
+    }
+}
+```
+
+“运行监控”每 15 秒采集宿主机、Nginx 进程和 Stub Status；原始数据保留 2 小时，分钟级历史保留 24 小时。“实时日志”一次查看一个节点上的一个文件，浏览器最多保留 5,000 行。
 
 ## 最容易踩的坑
 
@@ -69,7 +93,9 @@ sudo bash -s -- \
 | `nginx -t` 报 `bind() to 0.0.0.0:80 failed (13: Permission denied)` | 部分自编译 Nginx 在测试配置时也会绑定低端口；升级 Agent，安装器会为受限 helper/recover 单元保留 `CAP_NET_BIND_SERVICE`。 |
 | `00-nginx-manager.conf has unexpected content` | 旧 include 文件和新托管目录冲突；先检查其内容。直接托管 `conf.d` 时不要再传 `--managed-include-file`。 |
 | 托管 `conf.d` 后出现递归 include | 不要在 `conf.d` 中创建一个再次 include `conf.d/*.conf` 的文件；必须使用 `--managed-config-already-included`。 |
-| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应至少显示 `0.7.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
+| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应至少显示 `0.8.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
+| “实时日志”没有节点或文件 | Agent 至少应为 `0.8.0`，并在安装时传入真实的 `--nginx-log-dir`。HTTP 管理网还要添加 `--allow-plaintext-log-stream`，然后等待一次心跳并刷新页面。 |
+| 监控显示 Stub Status 不可用 | 检查 `curl http://127.0.0.1:18080/nginx_status` 是否返回 Active connections / Reading / Writing / Waiting；采集失败不会影响配置和证书操作。 |
 | `find /apps/nginx/conf/nginx-manager.d` 为空 | 如果托管目录已经改为 `conf.d`，这是正常的；应检查 `/apps/nginx/conf/conf.d`。 |
 | 从节点移除后站点仍在，并显示 `v1 → v2` | “从节点移除配置”只删除 Agent 上的 `.conf`，会保留平台记录；新版会显示“未部署”和原版本 `v1`。确认不再需要后，可在右侧点击“删除站点记录”。 |
 | 点击“逐节点校验”后出现 `v1 → v2` | 升级 Server。逐节点校验是只读操作，新版只显示“校验中/校验失败”，不会创建草稿或增加版本；只有真正编辑配置才会出现候选版本。 |

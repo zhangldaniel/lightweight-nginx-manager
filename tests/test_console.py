@@ -25,6 +25,16 @@ if (!html.includes('class="certificate-grid"')
     || !html.includes('summary-card--certificates')) {
   throw new Error("node and certificate risk cards are missing from the operations dashboard theme");
 }
+if (!html.includes('data-nav="logs"')
+    || !html.includes('data-nav="monitoring"')
+    || !html.includes('id="live-log-output"')
+    || !html.includes('class="monitor-charts"')
+    || !html.includes("logLines.length > 5000")) {
+  throw new Error("the runtime log and monitoring workspaces are incomplete");
+}
+if (html.includes('data-action="download-live-log"')) {
+  throw new Error("the live log workspace must not expose a download action");
+}
 if (!html.includes('data-copy-label="证书路径"')
     || !html.includes("runWithBusyButton(actionTarget")) {
   throw new Error("readable path-copy and button-busy interactions are missing");

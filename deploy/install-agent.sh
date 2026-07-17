@@ -34,6 +34,9 @@ MANAGED_CERT_DIR=""
 MANAGED_INCLUDE_FILE=""
 MANAGED_CONFIG_ALREADY_INCLUDED="0"
 HEALTH_URL=""
+NGINX_LOG_DIRS=()
+STUB_STATUS_URL=""
+ALLOW_PLAINTEXT_LOG_STREAM="0"
 POLL_SECONDS="3"
 INSTALL_NGINX="0"
 FORCE_ENROLL="0"
@@ -88,6 +91,9 @@ usage() {
   --managed-config-already-included 托管目录已由现有 nginx.conf 加载；不创建额外 include 文件
   --nginx-service <单元> Nginx systemd 单元，默认 nginx.service
   --health-url <URL>   发布后的节点本地健康检查 URL
+  --nginx-log-dir <路径> 允许实时查看的 Nginx 日志目录；可重复指定
+  --stub-status-url <URL> 本机 Nginx stub_status 地址，例如 http://127.0.0.1:18080/nginx_status
+  --allow-plaintext-log-stream 允许在 HTTP 管理网传输实时日志；不会改变 HTTPS 连接
   --poll-seconds <秒>  任务轮询周期，默认 3
   --install-nginx      节点未安装 Nginx 时由脚本安装
   --force-enroll       请求管理员批准并替换现有 Agent 身份
@@ -510,6 +516,47 @@ PY
   fi
 }
 
+prepare_monitoring_options() {
+  local candidate parsed_status
+  if [[ "${#NGINX_LOG_DIRS[@]}" -eq 0 ]]; then
+    for candidate in "${NGINX_ROOT}/logs" /var/log/nginx; do
+      if [[ -d "${candidate}" && ! -L "${candidate}" ]]; then
+        NGINX_LOG_DIRS+=("${candidate}")
+      fi
+    done
+  fi
+  for candidate in "${NGINX_LOG_DIRS[@]}"; do
+    [[ "${candidate}" = /* ]] || die "--nginx-log-dir 必须是绝对路径：${candidate}"
+    [[ ! "${candidate}" =~ [[:space:]] ]] || die "日志目录不能包含空白字符：${candidate}"
+    [[ -d "${candidate}" && ! -L "${candidate}" ]] || die "日志目录必须是现有普通目录：${candidate}"
+  done
+  if [[ -n "${STUB_STATUS_URL}" ]]; then
+    "${PYTHON_BIN}" - "${STUB_STATUS_URL}" <<'PY'
+import sys
+from urllib.parse import urlparse
+value = urlparse(sys.argv[1])
+if value.scheme not in ("http", "https") or value.hostname not in ("127.0.0.1", "::1", "localhost"):
+    raise SystemExit("错误：--stub-status-url 必须使用本机回环地址")
+if value.username or value.password or value.fragment:
+    raise SystemExit("错误：--stub-status-url 不能包含凭据或 fragment")
+PY
+    if command -v curl >/dev/null 2>&1 && parsed_status="$(curl -fsS --max-time 5 "${STUB_STATUS_URL}" 2>/dev/null)"; then
+      if grep -Eq 'Active connections:[[:space:]]*[0-9]+' <<<"${parsed_status}"; then
+        log "Stub Status 校验通过：${STUB_STATUS_URL}"
+      else
+        log "警告：Stub Status 返回格式不正确；Agent 将继续自动重试"
+      fi
+    else
+      log "警告：暂时无法访问 Stub Status；不阻断安装，Agent 将继续自动重试"
+    fi
+  fi
+  if [[ "${#NGINX_LOG_DIRS[@]}" -eq 0 ]]; then
+    log "警告：未探测到日志目录；可重新安装并添加 --nginx-log-dir"
+  else
+    log "实时日志白名单：${NGINX_LOG_DIRS[*]}"
+  fi
+}
+
 ensure_identity_user() {
   getent group "${APP_GROUP}" >/dev/null 2>&1 || groupadd --system "${APP_GROUP}"
   if ! id "${APP_USER}" >/dev/null 2>&1; then
@@ -518,7 +565,7 @@ ensure_identity_user() {
 }
 
 write_config() {
-  local ca_target
+  local ca_target log_dirs_text
   ca_target=""
   if [[ "${ALLOW_INSECURE_HTTP}" == "1" ]]; then
     rm -f -- "${ETC_DIR}/ca.crt"
@@ -532,9 +579,10 @@ write_config() {
     ca_target="${ETC_DIR}/ca.crt"
   fi
 
+  printf -v log_dirs_text '%s\n' "${NGINX_LOG_DIRS[@]}"
   "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${LABELS}" \
     "${ca_target}" "${TLS_SKIP_VERIFY}" "${ALLOW_INSECURE_HTTP}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
-    "${MANAGED_CONFIG_DIR}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" <<'PY'
+    "${MANAGED_CONFIG_DIR}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" <<'PY'
 import json
 import os
 import socket
@@ -545,6 +593,7 @@ from urllib.parse import urlparse
     config_path, server_url, node_name, raw_labels, ca_file,
     tls_skip_verify, allow_insecure_http, poll_seconds, nginx_binary, openssl_binary, nginx_config, nginx_root,
     managed_config_dir, managed_cert_dir, state_dir, helper_state_dir, health_url,
+    raw_log_dirs, stub_status_url, allow_plaintext_log_stream,
 ) = sys.argv[1:]
 
 labels = {}
@@ -575,7 +624,7 @@ value = {
     "tls_skip_verify": tls_skip_verify == "1",
     "allow_insecure_http": allow_insecure_http == "1",
     "poll_interval": float(poll_seconds),
-    "heartbeat_interval": 20,
+    "heartbeat_interval": 15,
     "api_timeout": 30,
     "command_timeout": 30,
     "nginx_binary": nginx_binary,
@@ -594,6 +643,9 @@ value = {
     "backup_retention": 20,
     "health_check": health_check,
     "allowed_health_hosts": allowed_health_hosts,
+    "allowed_log_roots": [item for item in raw_log_dirs.splitlines() if item],
+    "stub_status_url": stub_status_url or None,
+    "allow_plaintext_log_stream": allow_plaintext_log_stream == "1",
 }
 
 temporary = config_path + ".tmp"
@@ -763,6 +815,9 @@ while [[ $# -gt 0 ]]; do
     --managed-config-already-included) MANAGED_CONFIG_ALREADY_INCLUDED="1"; shift ;;
     --nginx-service) [[ $# -ge 2 ]] || die "--nginx-service 缺少值"; NGINX_SERVICE="$2"; shift 2 ;;
     --health-url) [[ $# -ge 2 ]] || die "--health-url 缺少值"; HEALTH_URL="$2"; shift 2 ;;
+    --nginx-log-dir) [[ $# -ge 2 ]] || die "--nginx-log-dir 缺少值"; NGINX_LOG_DIRS+=("$2"); shift 2 ;;
+    --stub-status-url) [[ $# -ge 2 ]] || die "--stub-status-url 缺少值"; STUB_STATUS_URL="$2"; shift 2 ;;
+    --allow-plaintext-log-stream) ALLOW_PLAINTEXT_LOG_STREAM="1"; shift ;;
     --poll-seconds) [[ $# -ge 2 ]] || die "--poll-seconds 缺少值"; POLL_SECONDS="$2"; shift 2 ;;
     --install-nginx) INSTALL_NGINX="1"; shift ;;
     --force-enroll) FORCE_ENROLL="1"; shift ;;
@@ -794,6 +849,7 @@ refuse_unresolved_transactions
 install_base_dependencies
 validate_server_url
 install_nginx_if_requested
+prepare_monitoring_options
 systemctl cat "${NGINX_SERVICE}" >/dev/null 2>&1 || die "找不到 ${NGINX_SERVICE}；无法建立 Nginx 启动前恢复屏障"
 [[ -x "${NGINX_BINARY}" ]] || die "Nginx 二进制不可执行"
 [[ -f "${NGINX_CONFIG}" ]] || die "找不到 Nginx 主配置 ${NGINX_CONFIG}"

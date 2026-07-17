@@ -11,6 +11,8 @@ Control-plane protocol (all request and response bodies are JSON):
 * POST /api/v1/agent/enroll
 * POST /api/v1/agent/heartbeat       (machine credential)
 * POST /api/v1/agent/poll            (machine credential)
+* POST /api/v1/agent/log-sessions/poll (machine credential)
+* POST /api/v1/agent/log-sessions/{id}/chunks (machine credential)
 * POST /api/v1/agent/jobs/{id}/result (machine credential)
 
 Python 3.6+ and the standard library are sufficient.
@@ -59,7 +61,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -385,6 +387,9 @@ class Settings:
         backup_retention: int = 20,
         health_check: Optional[Dict[str, Any]] = None,
         allowed_health_hosts: Optional[List[str]] = None,
+        allowed_log_roots: Optional[List[str]] = None,
+        stub_status_url: Optional[str] = None,
+        allow_plaintext_log_stream: bool = False,
     ):
         self.server_url = server_url
         self.node_name = node_name
@@ -425,6 +430,9 @@ class Settings:
             if allowed_health_hosts is None
             else list(allowed_health_hosts)
         )
+        self.allowed_log_roots = [] if allowed_log_roots is None else list(allowed_log_roots)
+        self.stub_status_url = stub_status_url
+        self.allow_plaintext_log_stream = allow_plaintext_log_stream
 
     @classmethod
     def load(cls, path: str) -> "Settings":
@@ -477,6 +485,9 @@ class Settings:
             backup_retention=int(raw.get("backup_retention", 20)),
             health_check=health,
             allowed_health_hosts=[str(item).lower() for item in raw.get("allowed_health_hosts", ["127.0.0.1", "::1", "localhost"])],
+            allowed_log_roots=[str(item) for item in raw.get("allowed_log_roots", [])],
+            stub_status_url=_optional_string(raw.get("stub_status_url")),
+            allow_plaintext_log_stream=bool(raw.get("allow_plaintext_log_stream", False)),
         )
         settings.validate()
         return settings
@@ -525,6 +536,27 @@ class Settings:
             raise AgentError("byte limits are unreasonably small")
         if not self.allowed_health_hosts or any(not item for item in self.allowed_health_hosts):
             raise AgentError("allowed_health_hosts must contain explicit host names or addresses")
+        if any(not os.path.isabs(path) for path in self.allowed_log_roots):
+            raise AgentError("allowed_log_roots must contain absolute paths")
+        if len(self.allowed_log_roots) > 16:
+            raise AgentError("allowed_log_roots contains too many directories")
+        if self.stub_status_url:
+            parsed_stub = urllib.parse.urlparse(self.stub_status_url)
+            if parsed_stub.scheme not in ("http", "https") or not parsed_stub.hostname:
+                raise AgentError("stub_status_url must be an absolute HTTP(S) URL")
+            if parsed_stub.username or parsed_stub.password or parsed_stub.fragment:
+                raise AgentError("stub_status_url must not contain credentials or a fragment")
+            if parsed_stub.hostname.lower() not in {"127.0.0.1", "::1", "localhost"}:
+                raise AgentError("stub_status_url must use a loopback host")
+
+    def reported_capabilities(self) -> List[str]:
+        result = list(CAPABILITIES) + ["metrics_v1"]
+        if self.stub_status_url:
+            result.append("stub_status_v1")
+        server_scheme = urllib.parse.urlparse(self.server_url).scheme
+        if self.allowed_log_roots and (server_scheme == "https" or self.allow_plaintext_log_stream):
+            result.append("log_stream_v1")
+        return result
 
 
 def _optional_string(value: Any) -> Optional[str]:
@@ -845,10 +877,156 @@ class JobExecutor:
         self.store = store
         self._allowed_config_roots = [Path(path).resolve() for path in settings.allowed_config_roots]
         self._allowed_certificate_roots = [Path(path).resolve() for path in settings.allowed_certificate_roots]
+        self._configured_log_roots = [Path(os.path.abspath(path)) for path in settings.allowed_log_roots]
+        self._allowed_log_roots = [Path(path).resolve() for path in settings.allowed_log_roots]
         self._lock_path = Path(settings.helper_state_dir) / "apply.lock"
         # Recovery material is privileged state and must never live in the
         # unprivileged network Agent's writable state directory.
         self._transaction_dir = Path(settings.helper_state_dir) / "transactions"
+
+    def _log_path(self, value: Any) -> Path:
+        if not isinstance(value, str) or not value or not os.path.isabs(value) or not value.lower().endswith(".log"):
+            raise ActionError("log path must be an absolute .log file")
+        raw_path = Path(os.path.abspath(value))
+        matched_root: Optional[Path] = None
+        resolved: Optional[Path] = None
+        for configured_root, root in zip(self._configured_log_roots, self._allowed_log_roots):
+            try:
+                relative = raw_path.relative_to(configured_root)
+            except ValueError:
+                continue
+            if not relative.parts:
+                continue
+            current = configured_root
+            try:
+                if current.is_symlink():
+                    raise ActionError("symbolic links are not allowed in log paths")
+                for part in relative.parts:
+                    current = current / part
+                    if current.is_symlink():
+                        raise ActionError("symbolic links are not allowed in log paths")
+                candidate = raw_path.resolve(strict=True)
+            except OSError:
+                raise ActionError("log file is unavailable")
+            if candidate != root and _is_relative_to(candidate, root):
+                matched_root = root
+                resolved = candidate
+                break
+        if matched_root is None:
+            raise ActionError("log path is outside allowed_log_roots")
+        try:
+            assert resolved is not None
+            file_stat = resolved.lstat()
+        except OSError:
+            raise ActionError("log file is unavailable")
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ActionError("log path is not a regular file")
+        return resolved
+
+    def log_inventory(self) -> List[str]:
+        """List only regular .log files below configured roots."""
+        files: List[str] = []
+        seen = set()
+        for root in self._allowed_log_roots:
+            try:
+                if not root.is_dir() or root.is_symlink():
+                    continue
+            except OSError:
+                continue
+            for current_root, directory_names, file_names in os.walk(str(root), followlinks=False):
+                directory_names[:] = sorted(
+                    name for name in directory_names if not (Path(current_root) / name).is_symlink()
+                )
+                for name in sorted(file_names):
+                    if not name.lower().endswith(".log"):
+                        continue
+                    candidate = Path(current_root) / name
+                    try:
+                        if candidate.is_symlink() or not candidate.is_file():
+                            continue
+                        resolved = candidate.resolve(strict=True)
+                    except OSError:
+                        continue
+                    if not any(resolved != allowed and _is_relative_to(resolved, allowed)
+                               for allowed in self._allowed_log_roots):
+                        continue
+                    value = str(resolved)
+                    if value not in seen:
+                        files.append(value)
+                        seen.add(value)
+                    if len(files) >= 200:
+                        return files
+        return files
+
+    def read_log_chunk(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        path = self._log_path(payload.get("path"))
+        cursor = payload.get("cursor") if isinstance(payload.get("cursor"), dict) else {}
+        tail_lines = max(1, min(1000, int(payload.get("tail_lines", 200))))
+        include = str(payload.get("include", ""))[:256]
+        exclude = str(payload.get("exclude", ""))[:256]
+        case_sensitive = bool(payload.get("case_sensitive", False))
+        preset = str(payload.get("preset", "all"))
+        if preset not in {"all", "error", "warn", "http4xx", "http5xx"}:
+            raise ActionError("invalid log filter preset")
+        file_stat = path.stat()
+        inode = int(file_stat.st_ino)
+        size = int(file_stat.st_size)
+        previous_inode = cursor.get("inode")
+        previous_offset = cursor.get("offset")
+        initial = not isinstance(previous_inode, int) or not isinstance(previous_offset, int)
+        rotated = bool(not initial and (previous_inode != inode or previous_offset > size))
+        initial = initial or rotated
+        max_read_bytes = 256 * 1024
+        with path.open("rb") as handle:
+            if initial:
+                handle.seek(max(0, size - max_read_bytes))
+                if handle.tell() > 0:
+                    handle.readline()
+                raw = handle.read(max_read_bytes)
+                next_offset = size
+                decoded_lines = raw.decode("utf-8", errors="replace").splitlines()[-tail_lines:]
+            else:
+                handle.seek(previous_offset)
+                raw = handle.read(max_read_bytes)
+                next_offset = handle.tell()
+                decoded_lines = raw.decode("utf-8", errors="replace").splitlines()
+        read_lines = len(decoded_lines)
+        sent: List[str] = []
+        dropped = 0
+        include_cmp = include if case_sensitive else include.lower()
+        exclude_cmp = exclude if case_sensitive else exclude.lower()
+        for raw_line in decoded_lines:
+            line = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "�", raw_line)[:8192]
+            compared = line if case_sensitive else line.lower()
+            matched = (not include_cmp or include_cmp in compared) and (not exclude_cmp or exclude_cmp not in compared)
+            if preset == "error":
+                matched = matched and "error" in compared
+            elif preset == "warn":
+                matched = matched and ("warn" in compared or "warning" in compared)
+            elif preset == "http4xx":
+                matched = matched and re.search(r"(?:^|\s)4\d\d(?:\s|$)", line) is not None
+            elif preset == "http5xx":
+                matched = matched and re.search(r"(?:^|\s)5\d\d(?:\s|$)", line) is not None
+            if matched:
+                sent.append(line)
+            else:
+                dropped += 1
+        content = "\n".join(sent)
+        if content:
+            content += "\n"
+        encoded = content.encode("utf-8", errors="replace")
+        if len(encoded) > max_read_bytes:
+            encoded = encoded[:max_read_bytes]
+            content = encoded.decode("utf-8", errors="ignore")
+            dropped += max(0, len(sent) - content.count("\n"))
+        return {
+            "cursor": {"inode": inode, "offset": next_offset},
+            "content": content,
+            "read_lines": read_lines,
+            "sent_lines": content.count("\n"),
+            "dropped_lines": dropped,
+            "rotated": rotated,
+        }
 
     def execute(self, job: Dict[str, Any]) -> Dict[str, Any]:
         job_id = str(job.get("id", "")).strip()
@@ -1256,7 +1434,7 @@ class JobExecutor:
             "nginx": nginx,
             "nginx_config": str(config_path),
             "config_sha256": config_hash,
-            "capabilities": list(CAPABILITIES),
+            "capabilities": self.settings.reported_capabilities(),
         }
 
     def _action_nginx_test(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
@@ -2315,6 +2493,37 @@ class HelperClient:
             raise AgentError("privileged helper returned an invalid response")
         return response["response"]
 
+    def read_log_chunk(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(self.settings.helper_timeout)
+        try:
+            connection.connect(self.settings.helper_socket)
+            _send_frame(connection, {"log_request": payload}, self.settings.helper_max_request_bytes)
+            response = _recv_frame(connection, self.settings.helper_max_request_bytes)
+        except (OSError, AgentError) as exc:
+            raise AgentError("privileged helper unavailable: {}".format(exc))
+        finally:
+            connection.close()
+        if not isinstance(response.get("log_response"), dict):
+            raise AgentError("privileged helper returned an invalid log response")
+        return response["log_response"]
+
+    def log_inventory(self) -> List[str]:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(self.settings.helper_timeout)
+        try:
+            connection.connect(self.settings.helper_socket)
+            _send_frame(connection, {"log_inventory": True}, self.settings.helper_max_request_bytes)
+            response = _recv_frame(connection, self.settings.helper_max_request_bytes)
+        except (OSError, AgentError) as exc:
+            raise AgentError("privileged helper unavailable: {}".format(exc))
+        finally:
+            connection.close()
+        inventory = response.get("log_inventory")
+        if not isinstance(inventory, list) or any(not isinstance(item, str) for item in inventory):
+            raise AgentError("privileged helper returned an invalid log inventory")
+        return inventory[:200]
+
 
 class HelperServer:
     def __init__(self, settings: Settings, executor: JobExecutor, socket_path: str, allowed_uid: int,
@@ -2370,6 +2579,18 @@ class HelperServer:
             return
         try:
             request = _recv_frame(connection, self.settings.helper_max_request_bytes)
+            if request.get("log_inventory") is True:
+                _send_frame(
+                    connection,
+                    {"log_inventory": self.executor.log_inventory()},
+                    self.settings.helper_max_request_bytes,
+                )
+                return
+            log_request = request.get("log_request")
+            if isinstance(log_request, dict):
+                response = self.executor.read_log_chunk(log_request)
+                _send_frame(connection, {"log_response": response}, self.settings.helper_max_request_bytes)
+                return
             job = request.get("job")
             if not isinstance(job, dict):
                 raise AgentError("helper request is missing job")
@@ -2380,6 +2601,279 @@ class HelperServer:
             _send_frame(connection, {"response": {"status": "failed", "error": str(exc)}}, self.settings.helper_max_request_bytes)
 
 
+def _safe_percent(used: float, total: float) -> float:
+    return round((used / total * 100.0) if total > 0 else 0.0, 2)
+
+
+def _discover_log_files(settings: Settings) -> List[str]:
+    files: List[str] = []
+    seen = set()
+    for root_text in settings.allowed_log_roots:
+        root = Path(root_text)
+        try:
+            if not root.is_dir() or root.is_symlink():
+                continue
+        except OSError:
+            continue
+        for current_root, directory_names, file_names in os.walk(str(root), followlinks=False):
+            directory_names[:] = sorted(
+                name for name in directory_names if not (Path(current_root) / name).is_symlink()
+            )
+            for name in sorted(file_names):
+                if not name.lower().endswith(".log"):
+                    continue
+                candidate = Path(current_root) / name
+                try:
+                    if candidate.is_symlink() or not candidate.is_file():
+                        continue
+                    resolved = str(candidate.resolve())
+                except OSError:
+                    continue
+                if resolved not in seen:
+                    files.append(resolved)
+                    seen.add(resolved)
+                if len(files) >= 200:
+                    return files
+    return files
+
+
+class MetricsCollector:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.previous_cpu: Optional[Tuple[float, float]] = None
+        self.previous_network: Optional[Tuple[float, int, int]] = None
+        self.previous_disk: Optional[Tuple[float, int, int]] = None
+        self.previous_stub: Optional[Tuple[float, int, int, int]] = None
+
+    @staticmethod
+    def _read_cpu() -> Tuple[float, float, List[Dict[str, Any]]]:
+        lines = Path("/proc/stat").read_text(encoding="utf-8", errors="replace").splitlines()
+        cores: List[Dict[str, Any]] = []
+        total = 0.0
+        idle = 0.0
+        for line in lines:
+            if not line.startswith("cpu"):
+                break
+            parts = line.split()
+            if not parts or not re.fullmatch(r"cpu\d*", parts[0]):
+                continue
+            values = [float(item) for item in parts[1:11]]
+            current_total = sum(values)
+            current_idle = sum(values[3:5]) if len(values) >= 5 else values[3]
+            if parts[0] == "cpu":
+                total, idle = current_total, current_idle
+            else:
+                cores.append({"name": parts[0], "total": current_total, "idle": current_idle})
+        return total, idle, cores
+
+    @staticmethod
+    def _memory() -> Dict[str, Any]:
+        values: Dict[str, int] = {}
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            key, separator, raw = line.partition(":")
+            if not separator:
+                continue
+            matched = re.search(r"\d+", raw)
+            if matched:
+                values[key] = int(matched.group(0)) * 1024
+        total = values.get("MemTotal", 0)
+        available = values.get("MemAvailable", values.get("MemFree", 0) + values.get("Buffers", 0) + values.get("Cached", 0))
+        swap_total = values.get("SwapTotal", 0)
+        swap_free = values.get("SwapFree", 0)
+        return {
+            "total_bytes": total,
+            "available_bytes": available,
+            "used_bytes": max(0, total - available),
+            "percent": _safe_percent(max(0, total - available), total),
+            "cached_bytes": values.get("Cached", 0),
+            "swap_total_bytes": swap_total,
+            "swap_used_bytes": max(0, swap_total - swap_free),
+            "swap_percent": _safe_percent(max(0, swap_total - swap_free), swap_total),
+        }
+
+    def _cpu(self) -> Dict[str, Any]:
+        total, idle, _cores = self._read_cpu()
+        percent = 0.0
+        if self.previous_cpu:
+            total_delta = max(0.0, total - self.previous_cpu[0])
+            idle_delta = max(0.0, idle - self.previous_cpu[1])
+            percent = _safe_percent(max(0.0, total_delta - idle_delta), total_delta)
+        self.previous_cpu = (total, idle)
+        load1, load5, load15 = os.getloadavg()
+        cpu_count = max(1, os.cpu_count() or 1)
+        return {
+            "percent": percent,
+            "count": cpu_count,
+            "load1": round(load1, 3),
+            "load5": round(load5, 3),
+            "load15": round(load15, 3),
+            "load_per_core": round(load1 / cpu_count, 3),
+        }
+
+    def _network(self, now: float) -> Dict[str, Any]:
+        received = sent = errors = 0
+        interfaces: List[Dict[str, Any]] = []
+        for line in Path("/proc/net/dev").read_text(encoding="utf-8", errors="replace").splitlines()[2:]:
+            name, separator, raw = line.partition(":")
+            if not separator:
+                continue
+            fields = raw.split()
+            if len(fields) < 16:
+                continue
+            item = {"name": name.strip(), "rx_bytes": int(fields[0]), "tx_bytes": int(fields[8]), "errors": int(fields[2]) + int(fields[10])}
+            interfaces.append(item)
+            if item["name"] != "lo":
+                received += item["rx_bytes"]
+                sent += item["tx_bytes"]
+                errors += item["errors"]
+        rx_rate = tx_rate = 0.0
+        if self.previous_network:
+            elapsed = max(0.001, now - self.previous_network[0])
+            rx_rate = max(0.0, (received - self.previous_network[1]) / elapsed)
+            tx_rate = max(0.0, (sent - self.previous_network[2]) / elapsed)
+        self.previous_network = (now, received, sent)
+        return {"rx_bytes": received, "tx_bytes": sent, "rx_bytes_per_second": round(rx_rate, 2), "tx_bytes_per_second": round(tx_rate, 2), "errors": errors, "interfaces": interfaces[:16]}
+
+    def _disk_io(self, now: float) -> Dict[str, Any]:
+        read_sectors = write_sectors = 0
+        try:
+            block_devices = {item.name for item in Path("/sys/block").iterdir()}
+        except OSError:
+            block_devices = set()
+        for line in Path("/proc/diskstats").read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = line.split()
+            if len(fields) < 14 or re.match(r"^(loop|ram|fd|sr)", fields[2]):
+                continue
+            if block_devices and fields[2] not in block_devices:
+                continue
+            read_sectors += int(fields[5])
+            write_sectors += int(fields[9])
+        read_rate = write_rate = 0.0
+        if self.previous_disk:
+            elapsed = max(0.001, now - self.previous_disk[0])
+            read_rate = max(0.0, (read_sectors - self.previous_disk[1]) * 512.0 / elapsed)
+            write_rate = max(0.0, (write_sectors - self.previous_disk[2]) * 512.0 / elapsed)
+        self.previous_disk = (now, read_sectors, write_sectors)
+        return {"read_bytes_per_second": round(read_rate, 2), "write_bytes_per_second": round(write_rate, 2)}
+
+    def _filesystems(self) -> List[Dict[str, Any]]:
+        paths = ["/", self.settings.nginx_root, self.settings.nginx_config]
+        paths.extend(self.settings.allowed_config_roots)
+        paths.extend(self.settings.allowed_certificate_roots)
+        paths.extend(self.settings.allowed_log_roots)
+        result: List[Dict[str, Any]] = []
+        seen_devices = set()
+        for raw_path in paths:
+            path = Path(raw_path)
+            if path.is_file():
+                path = path.parent
+            try:
+                resolved = path.resolve()
+                device = resolved.stat().st_dev
+                if device in seen_devices:
+                    continue
+                stat_value = os.statvfs(str(resolved))
+                mount = resolved
+                while mount.parent != mount:
+                    try:
+                        if mount.parent.stat().st_dev != device:
+                            break
+                    except OSError:
+                        break
+                    mount = mount.parent
+            except OSError:
+                continue
+            seen_devices.add(device)
+            total = stat_value.f_frsize * stat_value.f_blocks
+            available = stat_value.f_frsize * stat_value.f_bavail
+            used = max(0, total - available)
+            result.append({"path": str(resolved), "mount": str(mount), "total_bytes": total, "used_bytes": used, "available_bytes": available, "percent": _safe_percent(used, total)})
+        return result[:16]
+
+    @staticmethod
+    def _nginx_processes() -> Dict[str, Any]:
+        count = workers = rss_bytes = 0
+        page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+        proc = Path("/proc")
+        try:
+            entries = list(proc.iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                comm = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
+                if comm != "nginx":
+                    continue
+                count += 1
+                cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", errors="replace")
+                if "worker process" in cmdline:
+                    workers += 1
+                statm = (entry / "statm").read_text(encoding="ascii", errors="replace").split()
+                if len(statm) > 1:
+                    rss_bytes += int(statm[1]) * page_size
+            except (OSError, ValueError):
+                continue
+        return {"running": count > 0, "processes": count, "workers": workers, "rss_bytes": rss_bytes}
+
+    def _stub_status(self, now: float) -> Dict[str, Any]:
+        if not self.settings.stub_status_url:
+            return {"configured": False, "available": False, "reason": "not_configured"}
+        request = urllib.request.Request(self.settings.stub_status_url, headers={"User-Agent": "nginx-manager-agent/{}".format(VERSION)})
+        try:
+            with urllib.request.urlopen(request, timeout=min(5.0, self.settings.api_timeout)) as response:
+                if response.status != 200:
+                    return {"configured": True, "available": False, "reason": "http_{}".format(response.status)}
+                raw = response.read(64 * 1024).decode("utf-8", errors="replace")
+            active_match = re.search(r"Active connections:\s*(\d+)", raw, re.IGNORECASE)
+            counters_match = re.search(r"server accepts handled requests\s*\n\s*(\d+)\s+(\d+)\s+(\d+)", raw, re.IGNORECASE)
+            states_match = re.search(r"Reading:\s*(\d+)\s+Writing:\s*(\d+)\s+Waiting:\s*(\d+)", raw, re.IGNORECASE)
+            if not (active_match and counters_match and states_match):
+                return {"configured": True, "available": False, "reason": "invalid_format"}
+            accepts, handled, requests = [int(item) for item in counters_match.groups()]
+            request_rate = accept_rate = 0.0
+            if self.previous_stub:
+                elapsed = max(0.001, now - self.previous_stub[0])
+                request_rate = max(0.0, (requests - self.previous_stub[1]) / elapsed)
+                accept_rate = max(0.0, (accepts - self.previous_stub[2]) / elapsed)
+            self.previous_stub = (now, requests, accepts, handled)
+            return {
+                "configured": True, "available": True, "active": int(active_match.group(1)),
+                "accepts": accepts, "handled": handled, "requests": requests,
+                "reading": int(states_match.group(1)), "writing": int(states_match.group(2)), "waiting": int(states_match.group(3)),
+                "requests_per_second": round(request_rate, 3), "accepts_per_second": round(accept_rate, 3),
+                "dropped_connections": max(0, accepts - handled),
+            }
+        except urllib.error.HTTPError as exc:
+            return {"configured": True, "available": False, "reason": "http_{}".format(exc.code)}
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            return {"configured": True, "available": False, "reason": type(exc).__name__.lower()}
+
+    def collect(self) -> Dict[str, Any]:
+        now = time.time()
+        result: Dict[str, Any] = {"sampled_at_epoch": int(now)}
+        collectors = {
+            "cpu": self._cpu,
+            "memory": self._memory,
+            "network": lambda: self._network(now),
+            "disk_io": lambda: self._disk_io(now),
+            "filesystems": self._filesystems,
+            "nginx": self._nginx_processes,
+            "stub_status": lambda: self._stub_status(now),
+        }
+        for key, collector in collectors.items():
+            try:
+                result[key] = collector()
+            except (OSError, ValueError) as exc:
+                result[key] = {"available": False, "reason": type(exc).__name__.lower()}
+        try:
+            result["system"] = {"uptime_seconds": float(Path("/proc/uptime").read_text(encoding="ascii").split()[0]), "kernel": platform.release()}
+        except (OSError, ValueError, IndexError):
+            result["system"] = {"kernel": platform.release()}
+        return result
+
+
 class AgentService:
     def __init__(self, settings: Settings, stop_event: threading.Event):
         self.settings = settings
@@ -2387,6 +2881,51 @@ class AgentService:
         self.api = ApiClient(settings)
         self.identity_path = Path(settings.state_dir) / "identity.json"
         self.result_outbox = ResultOutbox(Path(settings.state_dir) / "result-outbox.json")
+        self.metrics_collector = MetricsCollector(settings)
+
+    def _process_log_sessions(self, executor: Any, identity: Dict[str, str]) -> bool:
+        if "log_stream_v1" not in self.settings.reported_capabilities():
+            return False
+        try:
+            response = self.api.post(
+                "/api/v1/agent/log-sessions/poll",
+                {"agent_id": identity["agent_id"]},
+                identity["machine_credential"],
+            )
+        except ApiError as exc:
+            if exc.status_code == 404:
+                return False
+            raise
+        sessions = response.get("sessions", [])
+        if not isinstance(sessions, list):
+            raise ApiError("log session poll response must contain an array")
+        for session in sessions[:20]:
+            if not isinstance(session, dict) or not session.get("id"):
+                continue
+            session_id = str(session["id"])
+            try:
+                chunk = executor.read_log_chunk(session)
+            except AgentError as exc:
+                LOG.warning("live log read failed session=%s: %s", session_id[:64], exc)
+                chunk = {
+                    "cursor": session.get("cursor") if isinstance(session.get("cursor"), dict) else {},
+                    "content": "",
+                    "read_lines": 0,
+                    "sent_lines": 0,
+                    "dropped_lines": 0,
+                    "rotated": False,
+                    "error": str(exc)[:256],
+                }
+            try:
+                self.api.post(
+                    "/api/v1/agent/log-sessions/{}/chunks".format(urllib.parse.quote(session_id, safe="")),
+                    chunk,
+                    identity["machine_credential"],
+                )
+            except ApiError as exc:
+                if exc.status_code != 404:
+                    raise
+        return bool(sessions)
 
     def _deliver_result_outbox(self, identity: Dict[str, str]) -> None:
         for pending in self.result_outbox.pending():
@@ -2429,7 +2968,7 @@ class AgentService:
                 if self.stop_event.is_set():
                     return
                 try:
-                    self._heartbeat(identity, str(job.get("id", "")) or None)
+                    self._heartbeat(identity, str(job.get("id", "")) or None, executor)
                 except AgentError as exc:
                     LOG.warning("heartbeat during job execution failed: %s", exc)
 
@@ -2582,8 +3121,9 @@ class AgentService:
                 self._deliver_result_outbox(identity)
                 now = time.monotonic()
                 if now - last_heartbeat >= self.settings.heartbeat_interval:
-                    self._heartbeat(identity)
+                    self._heartbeat(identity, executor=executor)
                     last_heartbeat = now
+                log_sessions_active = self._process_log_sessions(executor, identity)
                 polled = self.api.post("/api/v1/agent/poll", {"agent_id": identity["agent_id"], "limit": 1}, identity["machine_credential"])
                 jobs = polled.get("jobs")
                 if jobs is None:  # Backward compatibility with an early singular response.
@@ -2610,7 +3150,7 @@ class AgentService:
                 failures = 0
                 if once:
                     return
-                self.stop_event.wait(self.settings.poll_interval)
+                self.stop_event.wait(min(self.settings.poll_interval, 1.0) if log_sessions_active else self.settings.poll_interval)
             except AgentError as exc:
                 failures += 1
                 LOG.warning("agent loop error: %s", exc)
@@ -2618,15 +3158,20 @@ class AgentService:
                     raise
                 self.stop_event.wait(min(30.0, max(self.settings.poll_interval, 2 ** min(failures, 5))))
 
-    def _heartbeat(self, identity: Dict[str, str], active_job_id: Optional[str] = None) -> None:
-        observation = self._local_observation()
+    def _heartbeat(
+        self,
+        identity: Dict[str, str],
+        active_job_id: Optional[str] = None,
+        executor: Optional[Any] = None,
+    ) -> None:
+        observation = self._local_observation(executor)
         payload = {
             "agent_id": identity["agent_id"],
             "node_name": self.settings.node_name,
             "hostname": self.settings.hostname,
             "labels": self.settings.labels,
             "agent_version": VERSION,
-            "capabilities": list(CAPABILITIES),
+            "capabilities": self.settings.reported_capabilities(),
             "status": "online",
             "timestamp": utc_now(),
             **observation,
@@ -2639,14 +3184,28 @@ class AgentService:
             identity["machine_credential"],
         )
 
-    def _local_observation(self) -> Dict[str, Any]:
+    def _local_observation(self, executor: Optional[Any] = None) -> Dict[str, Any]:
+        log_files = _discover_log_files(self.settings)
+        if executor is not None and hasattr(executor, "log_inventory"):
+            try:
+                log_files = executor.log_inventory()
+            except AgentError as exc:
+                LOG.warning("cannot refresh privileged log inventory: %s", exc)
         observation: Dict[str, Any] = {
             "facts": {
                 "nginx_root": self.settings.nginx_root,
                 "managed_config_root": self.settings.allowed_config_roots[0],
                 "managed_certificate_root": self.settings.allowed_certificate_roots[0],
+                "log_roots": list(self.settings.allowed_log_roots),
+                "log_files": log_files,
+                "stub_status_url": self.settings.stub_status_url,
+                "log_stream_transport": (
+                    "https" if urllib.parse.urlparse(self.settings.server_url).scheme == "https"
+                    else ("http_authorized" if self.settings.allow_plaintext_log_stream else "http_blocked")
+                ),
             }
         }
+        observation["metrics"] = self.metrics_collector.collect()
         try:
             completed = subprocess.run(
                 [self.settings.nginx_binary, "-v"],

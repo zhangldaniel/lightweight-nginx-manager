@@ -34,6 +34,10 @@
       box-sizing: border-box;
     }
 
+    [hidden] {
+      display: none !important;
+    }
+
     html {
       color-scheme: light;
     }
@@ -4511,6 +4515,199 @@
         font-size: 20px;
       }
     }
+
+    /* Runtime monitoring and on-demand log workspace */
+    .runtime-toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.4fr) minmax(150px, .6fr) auto;
+      align-items: end;
+      gap: 12px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,.94);
+      box-shadow: var(--shadow);
+    }
+
+    .runtime-field { min-width: 0; }
+    .runtime-field label {
+      display: block;
+      margin: 0 0 7px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .runtime-field select,
+    .runtime-field input {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid #cbd7e5;
+      border-radius: 9px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 14px;
+    }
+    .runtime-field input:focus,
+    .runtime-field select:focus {
+      border-color: #2684ff;
+      outline: 3px solid rgba(38,132,255,.13);
+    }
+
+    .log-page-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 300px;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .log-console-card,
+    .runtime-side-card,
+    .monitor-node-list,
+    .monitor-detail {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+    .log-console-head,
+    .runtime-card-head,
+    .monitor-detail-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 58px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .log-console-head h2,
+    .runtime-card-head h3,
+    .monitor-detail-head h2 { margin: 0; font-size: 16px; }
+    .log-console-head p,
+    .monitor-detail-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .live-indicator { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .live-indicator i { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }
+    .live-indicator.running { color: #07845f; }
+    .live-indicator.running i { background: #10b981; box-shadow: 0 0 0 5px rgba(16,185,129,.12); }
+    .log-terminal {
+      height: min(58vh, 590px);
+      min-height: 390px;
+      margin: 0;
+      overflow: auto;
+      padding: 18px;
+      background: #071426;
+      color: #dce8f7;
+      font: 13px/1.65 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+      tab-size: 2;
+    }
+    .log-console-foot { display: flex; justify-content: space-between; gap: 12px; padding: 10px 16px; background: #f7f9fc; color: var(--muted); font-size: 12px; }
+    .runtime-side-card { padding-bottom: 8px; }
+    .runtime-side-body { display: grid; gap: 14px; padding: 16px; }
+    .runtime-side-body .button { width: 100%; justify-content: center; }
+    .filter-preset-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .filter-preset {
+      min-height: 36px;
+      border: 1px solid #d3dce8;
+      border-radius: 8px;
+      background: #fff;
+      color: #42556f;
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .filter-preset.active { border-color: #2684ff; background: #eef6ff; color: #075bc7; }
+    .runtime-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+    .runtime-warning { padding: 11px 12px; border: 1px solid #f3cc87; border-radius: 9px; background: #fff8e8; color: #8a5700; font-size: 12px; line-height: 1.55; }
+
+    .monitor-layout { display: grid; grid-template-columns: 310px minmax(0, 1fr); gap: 16px; margin-top: 16px; }
+    .monitor-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .monitor-stat {
+      position: relative;
+      min-height: 116px;
+      padding: 16px 18px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+    .monitor-stat::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: #2f80ed; }
+    .monitor-stat.warning::before { background: #f59e0b; }
+    .monitor-stat.critical::before { background: #ef4444; }
+    .monitor-stat.healthy::before { background: #10b981; }
+    .monitor-stat span { color: var(--muted); font-size: 12px; font-weight: 700; }
+    .monitor-stat strong { display: block; margin-top: 10px; color: var(--ink); font-size: 26px; line-height: 1; }
+    .monitor-stat small { display: block; margin-top: 10px; color: var(--muted); font-size: 12px; }
+
+    .monitor-list-head { padding: 16px; border-bottom: 1px solid var(--line); }
+    .monitor-list-head h2 { margin: 0; font-size: 16px; }
+    .monitor-list-head p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .monitor-node-items { max-height: 660px; overflow: auto; padding: 8px; }
+    .monitor-node-item {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 10px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      min-height: 68px;
+      padding: 10px 11px;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .monitor-node-item:hover { background: #f6f9fd; }
+    .monitor-node-item.active { border-color: #bcd7f8; background: #eef6ff; }
+    .monitor-health-dot { width: 9px; height: 9px; border-radius: 50%; background: #10b981; }
+    .monitor-health-dot.warning { background: #f59e0b; }
+    .monitor-health-dot.critical,
+    .monitor-health-dot.offline { background: #ef4444; }
+    .monitor-health-dot.no_data { background: #94a3b8; }
+    .monitor-node-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+    .monitor-node-copy small { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .monitor-node-item > b { color: var(--muted); font-size: 11px; }
+    .monitor-detail { min-width: 0; }
+    .monitor-range { display: flex; gap: 6px; }
+    .monitor-range button { min-height: 32px; padding: 0 10px; border: 1px solid #d5dfeb; border-radius: 7px; background: #fff; color: #50627a; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700; }
+    .monitor-range button.active { border-color: #2684ff; background: #eef6ff; color: #075bc7; }
+    .monitor-metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+    .monitor-metric { padding: 15px 16px; border-right: 1px solid var(--line); }
+    .monitor-metric:last-child { border-right: 0; }
+    .monitor-metric span { display: block; color: var(--muted); font-size: 11px; }
+    .monitor-metric strong { display: block; margin-top: 7px; font-size: 19px; }
+    .monitor-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 14px; }
+    .metric-chart { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfe; }
+    .metric-chart-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+    .metric-chart-head strong { font-size: 13px; }
+    .metric-chart-head span { color: var(--muted); font-size: 11px; }
+    .metric-chart svg { display: block; width: 100%; height: 118px; overflow: visible; }
+    .metric-chart .grid { stroke: #dfe7f0; stroke-width: 1; }
+    .metric-chart .area { fill: rgba(47,128,237,.10); }
+    .metric-chart .line { fill: none; stroke: #2f80ed; stroke-width: 2.2; vector-effect: non-scaling-stroke; }
+    .metric-chart.amber .area { fill: rgba(245,158,11,.11); }
+    .metric-chart.amber .line { stroke: #f59e0b; }
+    .metric-chart.green .area { fill: rgba(16,185,129,.10); }
+    .metric-chart.green .line { stroke: #10b981; }
+    .monitor-reasons { margin: 0; padding: 13px 16px; border-top: 1px solid var(--line); background: #fbfcfe; color: var(--muted); font-size: 12px; }
+
+    @media (max-width: 1180px) {
+      .runtime-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .log-page-grid, .monitor-layout { grid-template-columns: 1fr; }
+      .monitor-node-items { max-height: 260px; }
+      .monitor-overview, .monitor-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 720px) {
+      .runtime-toolbar, .monitor-overview, .monitor-metric-grid, .monitor-charts { grid-template-columns: 1fr; }
+      .log-terminal { min-height: 340px; }
+      .monitor-metric { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
   </style>
 </head>
 <body>
@@ -4540,6 +4737,16 @@
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"></rect><rect x="3.5" y="14" width="17" height="6" rx="1.5"></rect><path d="M7.5 7h.01M7.5 17h.01M11 7h6M11 17h6"></path></svg></span>
           <span class="nav-text">节点 Agent</span>
           <span class="nav-count" id="nav-node-count">0</span>
+        </button>
+        <button class="nav-button" type="button" data-nav="logs" aria-label="实时日志" title="实时日志">
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"></path><path d="m8 9 2 2-2 2M12 14h4"></path></svg></span>
+          <span class="nav-text">实时日志</span>
+          <span class="nav-count" id="nav-log-count">0</span>
+        </button>
+        <button class="nav-button" type="button" data-nav="monitoring" aria-label="运行监控" title="运行监控">
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.5 12h4l2-5 4 10 2-5h5"></path><path d="M4 4v16h16"></path></svg></span>
+          <span class="nav-text">运行监控</span>
+          <span class="nav-count" id="nav-monitor-count">0</span>
         </button>
         <button class="nav-button" type="button" data-nav="runs" aria-label="执行记录" title="执行记录">
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7v5l3.3 2"></path></svg></span>
@@ -5048,6 +5255,19 @@
       var activeRunTimer = null;
       var toastTimer = null;
       var toastHideTimer = null;
+      var monitoringSummary = [];
+      var monitoringSamples = [];
+      var monitoringRange = 3600;
+      var selectedMonitorNodeId = null;
+      var monitoringRequestSequence = 0;
+      var selectedLogNodeId = null;
+      var selectedLogPath = '';
+      var activeLogSession = null;
+      var logEventSource = null;
+      var logLines = [];
+      var logPaused = false;
+      var logPreset = 'all';
+      var logStats = { read: 0, sent: 0, dropped: 0 };
 
       function clone(value) {
         return JSON.parse(JSON.stringify(value));
@@ -5601,6 +5821,11 @@
           root: facts.nginx_root || '/etc/nginx',
           managedConfigRoot: facts.managed_config_root || '/etc/nginx/nginx-manager.d',
           managedCertificateRoot: facts.managed_certificate_root || '/etc/nginx/ssl/nginx-manager',
+          logRoots: Array.isArray(facts.log_roots) ? facts.log_roots.slice() : [],
+          logFiles: Array.isArray(facts.log_files) ? facts.log_files.slice() : [],
+          stubStatusUrl: facts.stub_status_url || '',
+          logStreamTransport: facts.log_stream_transport || '',
+          capabilities: Array.isArray(node.capabilities) ? node.capabilities.slice() : [],
           sites: state.sites.filter(function (site) { return site.nodeIds.includes(node.id); }).length,
           drift: false,
           lastSeen: relativeTime(node.last_seen_at),
@@ -6374,7 +6599,8 @@
         localStorage.setItem(storageKey, JSON.stringify(state));
         if (normalizedDeploymentState && canOperate()) scheduleRemoteSave();
         updateChrome();
-        render();
+        if (!(activeView === 'logs' && activeLogSession)) render();
+        if (activeView === 'monitoring') refreshMonitoringData();
       }
 
       async function connectRemote(forcePrompt) {
@@ -6433,6 +6659,7 @@
       }
 
       async function logoutRemote() {
+        if (activeLogSession) await stopLiveLog(false);
         try {
           await apiRequest('/api/v1/auth/logout', { method: 'POST' });
         } catch (error) {}
@@ -6597,6 +6824,12 @@
         document.getElementById('nav-site-count').textContent = state.sites.length;
         document.getElementById('nav-cert-count').textContent = state.certificates.length;
         document.getElementById('nav-node-count').textContent = total + pendingEnrollments.length;
+        document.getElementById('nav-log-count').textContent = state.nodes.filter(function (node) {
+          return node.online && (!remoteConnected || (node.capabilities || []).includes('log_stream_v1'));
+        }).length;
+        document.getElementById('nav-monitor-count').textContent = monitoringSummary.filter(function (item) {
+          return item.health && ['warning', 'critical', 'offline'].includes(item.health.status);
+        }).length;
         document.getElementById('nav-run-count').textContent = Math.min(state.runs.length, 99);
         document.getElementById('sidebar-agent-state').textContent = pendingEnrollments.length
           ? pendingEnrollments.length + ' 个接入申请待审批'
@@ -6997,6 +7230,205 @@
         ].join('');
       }
 
+      function nodeSupports(node, capability) {
+        return Boolean(node && (!remoteConnected || (node.capabilities || []).includes(capability)));
+      }
+
+      function nodeLogFiles(node) {
+        if (!node) return [];
+        if (Array.isArray(node.logFiles) && node.logFiles.length) return node.logFiles.slice();
+        if (!remoteConnected) return [
+          (node.root || '/etc/nginx') + '/logs/access.log',
+          (node.root || '/etc/nginx') + '/logs/error.log'
+        ];
+        return [];
+      }
+
+      function renderLogs() {
+        var logNodes = state.nodes.filter(function (node) { return nodeSupports(node, 'log_stream_v1'); });
+        if (!selectedLogNodeId || !logNodes.some(function (node) { return node.id === selectedLogNodeId; })) {
+          selectedLogNodeId = logNodes[0] ? logNodes[0].id : null;
+        }
+        var selectedNode = getNode(selectedLogNodeId);
+        var files = nodeLogFiles(selectedNode);
+        if (!selectedLogPath || !files.includes(selectedLogPath)) selectedLogPath = files[0] || '';
+        var nodeOptions = logNodes.map(function (node) {
+          return '<option value="' + escapeHtml(node.id) + '"' + (node.id === selectedLogNodeId ? ' selected' : '') + '>' + escapeHtml(node.name) + (node.online ? ' · 在线' : ' · 离线') + '</option>';
+        }).join('');
+        var fileOptions = files.map(function (path) {
+          return '<option value="' + escapeHtml(path) + '"' + (path === selectedLogPath ? ' selected' : '') + '>' + escapeHtml(path) + '</option>';
+        }).join('');
+        var capabilityNotice = !logNodes.length
+          ? '<div class="runtime-warning">当前没有支持实时日志的 Agent。请升级 Agent，并在安装时添加 <code>--nginx-log-dir</code>；HTTP 管理网还需显式添加 <code>--allow-plaintext-log-stream</code>。</div>'
+          : (!selectedNode.online ? '<div class="runtime-warning">所选 Agent 当前离线，恢复心跳后才能开始日志会话。</div>' : '');
+        var noPermission = remoteConnected && currentRole === 'auditor';
+        var displayLines = logLines.length ? logLines.join('\n') : [
+          '选择一个节点和日志文件，然后开始实时查看。',
+          '',
+          '日志只在当前浏览器会话中显示；控制端不写入数据库或磁盘。'
+        ].join('\n');
+        var presetButtons = [
+          ['all', '全部'], ['error', 'Error'], ['warn', 'Warn'], ['http4xx', 'HTTP 4xx'], ['http5xx', 'HTTP 5xx']
+        ].map(function (item) {
+          return '<button class="filter-preset ' + (logPreset === item[0] ? 'active' : '') + '" type="button" data-action="log-preset" data-preset="' + item[0] + '">' + item[1] + '</button>';
+        }).join('');
+        return [
+          pageHead('实时日志', '按需查看单个节点上的 Nginx 日志；日志内容不在控制端长期保存。', ''),
+          '<div class="runtime-toolbar">',
+          '  <div class="runtime-field"><label for="log-node-select">Agent 节点</label><select id="log-node-select"' + (activeLogSession ? ' disabled' : '') + '>' + (nodeOptions || '<option value="">暂无可用节点</option>') + '</select></div>',
+          '  <div class="runtime-field"><label for="log-file-select">日志文件</label><select id="log-file-select"' + (activeLogSession ? ' disabled' : '') + '>' + (fileOptions || '<option value="">没有发现 .log 文件</option>') + '</select></div>',
+          '  <div class="runtime-field"><label for="log-tail-lines">初始尾部行数</label><select id="log-tail-lines"' + (activeLogSession ? ' disabled' : '') + '><option value="100">100 行</option><option value="200" selected>200 行</option><option value="500">500 行</option><option value="1000">1000 行</option></select></div>',
+          '  <button class="button primary" type="button" data-action="' + (activeLogSession ? 'stop-live-log' : 'start-live-log') + '"' + ((!activeLogSession && (!selectedNode || !selectedNode.online || !selectedLogPath || noPermission)) ? ' disabled' : '') + '>' + (activeLogSession ? '停止会话' : '开始实时查看') + '</button>',
+          '</div>',
+          capabilityNotice,
+          noPermission ? '<div class="runtime-warning">只读审计角色不能查看实时日志；运行监控仍可正常使用。</div>' : '',
+          '<div class="log-page-grid">',
+          '  <section class="log-console-card">',
+          '    <div class="log-console-head"><div><h2>' + escapeHtml(selectedNode ? selectedNode.name : '尚未选择节点') + '</h2><p>' + escapeHtml(selectedLogPath || '尚未发现日志文件') + '</p></div><span class="live-indicator ' + (activeLogSession ? 'running' : '') + '" id="live-log-indicator"><i></i>' + (activeLogSession ? (logPaused ? '已暂停显示' : '实时接收中') : '尚未连接') + '</span></div>',
+          '    <pre class="log-terminal" id="live-log-output">' + escapeHtml(displayLines) + '</pre>',
+          '    <div class="log-console-foot"><span id="live-log-stats">读取 ' + logStats.read + ' · 显示 ' + logStats.sent + ' · 过滤 ' + logStats.dropped + '</span><span>浏览器最多保留 5,000 行</span></div>',
+          '  </section>',
+          '  <aside class="runtime-side-card">',
+          '    <div class="runtime-card-head"><h3>过滤与显示</h3><span class="status-pill">Agent 侧过滤</span></div>',
+          '    <div class="runtime-side-body">',
+          '      <div><label class="runtime-help">快捷条件</label><div class="filter-preset-grid">' + presetButtons + '</div></div>',
+          '      <div class="runtime-field"><label for="log-include">必须包含</label><input id="log-include" maxlength="256" placeholder="例如 upstream timed out"' + (activeLogSession ? ' disabled' : '') + '></div>',
+          '      <div class="runtime-field"><label for="log-exclude">排除内容</label><input id="log-exclude" maxlength="256" placeholder="例如 healthcheck"' + (activeLogSession ? ' disabled' : '') + '></div>',
+          '      <label class="runtime-help"><input type="checkbox" id="log-case-sensitive"' + (activeLogSession ? ' disabled' : '') + '> 区分大小写</label>',
+          '      <button class="button" type="button" data-action="toggle-log-pause"' + (!activeLogSession ? ' disabled' : '') + '>' + (logPaused ? '继续显示' : '暂停显示') + '</button>',
+          '      <button class="button" type="button" data-action="clear-live-log">清空当前窗口</button>',
+          '      <p class="runtime-help">文件路径只能来自 Agent 上报的白名单。页面不支持任意路径，也不提供日志下载。</p>',
+          '    </div>',
+          '  </aside>',
+          '</div>'
+        ].join('');
+      }
+
+      function metricValue(metrics, path) {
+        var value = metrics || {};
+        path.split('.').forEach(function (key) { value = value && typeof value === 'object' ? value[key] : null; });
+        return typeof value === 'number' && Number.isFinite(value) ? value : null;
+      }
+
+      function formatBytes(value, perSecond) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+        var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        var index = 0;
+        while (Math.abs(value) >= 1024 && index < units.length - 1) { value /= 1024; index += 1; }
+        return (value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)) + ' ' + units[index] + (perSecond ? '/s' : '');
+      }
+
+      function syntheticMonitoring() {
+        return state.nodes.map(function (node, index) {
+          var online = node.online;
+          var cpu = online ? 18 + index * 7 : 0;
+          return {
+            node: { id: node.id, status: online ? 'online' : 'offline' },
+            sampled_at: new Date().toISOString(),
+            health: { status: online ? (node.drift ? 'warning' : 'healthy') : 'offline', reasons: node.drift ? ['配置存在漂移'] : (online ? [] : ['Agent 心跳中断']) },
+            metrics: {
+              cpu: { percent: cpu, count: 8, load1: +(cpu / 28).toFixed(2), load_per_core: +(cpu / 224).toFixed(2) },
+              memory: { percent: 42 + index * 6, used_bytes: (6 + index) * 1073741824, total_bytes: 16 * 1073741824 },
+              network: { rx_bytes_per_second: 1900000 + index * 320000, tx_bytes_per_second: 760000 + index * 90000 },
+              disk_io: { read_bytes_per_second: 240000, write_bytes_per_second: 680000 + index * 120000 },
+              nginx: { running: online, processes: online ? 5 : 0, workers: online ? 4 : 0, rss_bytes: online ? 96 * 1048576 : 0 },
+              stub_status: { configured: true, available: online, active: online ? 36 + index * 12 : 0, requests_per_second: online ? 125 + index * 42 : 0, reading: 1, writing: 5, waiting: 30 },
+              filesystems: [{ path: '/', mount: '/', percent: 48 + index * 4 }],
+              system: { uptime_seconds: 864000 + index * 3600, kernel: '5.15.0' }
+            }
+          };
+        });
+      }
+
+      function syntheticSamples(nodeId) {
+        var index = Math.max(0, state.nodes.findIndex(function (node) { return node.id === nodeId; }));
+        return Array.from({ length: 48 }, function (_value, sampleIndex) {
+          var wave = Math.sin(sampleIndex / 5 + index) * 7;
+          return {
+            sampled_at: new Date(Date.now() - (47 - sampleIndex) * 75000).toISOString(),
+            metrics: {
+              cpu: { percent: +(26 + wave + index * 3).toFixed(2), load1: +(1.2 + wave / 20).toFixed(2) },
+              memory: { percent: +(48 + index * 4 + Math.sin(sampleIndex / 9) * 2).toFixed(2) },
+              network: { rx_bytes_per_second: 1800000 + wave * 60000, tx_bytes_per_second: 720000 + wave * 30000 },
+              disk_io: { read_bytes_per_second: 220000 + Math.abs(wave) * 22000, write_bytes_per_second: 560000 + Math.abs(wave) * 50000 },
+              stub_status: { requests_per_second: +(130 + index * 30 + wave * 3).toFixed(2), active: Math.max(0, Math.round(38 + wave)) }
+            }
+          };
+        });
+      }
+
+      function chartSvg(path, maximum) {
+        var values = monitoringSamples.map(function (sample) { return metricValue(sample.metrics, path); }).filter(function (value) { return value !== null; });
+        if (!values.length) return '<div class="empty-state" style="min-height:118px"><span>暂无时间序列</span></div>';
+        var max = Math.max(maximum || 0, Math.max.apply(null, values), 1);
+        var points = values.map(function (value, index) {
+          var x = values.length === 1 ? 0 : index / (values.length - 1) * 100;
+          var y = 40 - Math.min(40, value / max * 36);
+          return x.toFixed(2) + ',' + y.toFixed(2);
+        }).join(' ');
+        return '<svg viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true"><path class="grid" d="M0 10H100M0 20H100M0 30H100"></path><polygon class="area" points="0,40 ' + points + ' 100,40"></polygon><polyline class="line" points="' + points + '"></polyline></svg>';
+      }
+
+      function renderMetricChart(title, path, suffix, tone, maximum) {
+        var latest = monitoringSamples.length ? metricValue(monitoringSamples[monitoringSamples.length - 1].metrics, path) : null;
+        var value = latest === null ? '—' : (suffix === ' B/s' ? formatBytes(latest, true) : latest.toFixed(latest >= 100 ? 0 : 1) + suffix);
+        return '<article class="metric-chart ' + (tone || '') + '"><div class="metric-chart-head"><strong>' + title + '</strong><span>' + value + '</span></div>' + chartSvg(path, maximum) + '</article>';
+      }
+
+      function renderMonitoring() {
+        var items = monitoringSummary.length ? monitoringSummary : (remoteConnected ? [] : syntheticMonitoring());
+        if (!selectedMonitorNodeId || !items.some(function (item) { return item.node.id === selectedMonitorNodeId; })) {
+          selectedMonitorNodeId = items[0] ? items[0].node.id : null;
+        }
+        var selected = items.find(function (item) { return item.node.id === selectedMonitorNodeId; });
+        var node = getNode(selectedMonitorNodeId);
+        var metrics = selected ? selected.metrics || {} : {};
+        var statuses = { healthy: 0, warning: 0, critical: 0, offline: 0, no_data: 0 };
+        items.forEach(function (item) { statuses[item.health && item.health.status || 'no_data'] += 1; });
+        var stub = metrics.stub_status || {};
+        var filesystem = Array.isArray(metrics.filesystems) ? metrics.filesystems.reduce(function (largest, item) {
+          return !largest || Number(item.percent || 0) > Number(largest.percent || 0) ? item : largest;
+        }, null) : null;
+        var nodeItems = items.map(function (item) {
+          var itemNode = getNode(item.node.id);
+          var status = item.health && item.health.status || 'no_data';
+          return '<button class="monitor-node-item ' + (item.node.id === selectedMonitorNodeId ? 'active' : '') + '" type="button" data-action="select-monitor-node" data-node-id="' + escapeHtml(item.node.id) + '"><i class="monitor-health-dot ' + status + '"></i><span class="monitor-node-copy"><strong>' + escapeHtml(itemNode ? itemNode.name : item.node.id) + '</strong><small>CPU ' + (metricValue(item.metrics, 'cpu.percent') === null ? '—' : metricValue(item.metrics, 'cpu.percent').toFixed(0) + '%') + ' · 内存 ' + (metricValue(item.metrics, 'memory.percent') === null ? '—' : metricValue(item.metrics, 'memory.percent').toFixed(0) + '%') + '</small></span><b>' + ({ healthy: '正常', warning: '关注', critical: '异常', offline: '离线', no_data: '待上报' }[status]) + '</b></button>';
+        }).join('');
+        var reasons = selected && selected.health && selected.health.reasons && selected.health.reasons.length
+          ? selected.health.reasons.join('；') : '当前采样未发现明显异常。';
+        return [
+          pageHead('运行监控', '查看宿主机资源、Nginx 进程与 Stub Status；15 秒采样，最近 24 小时可回看。', ''),
+          '<div class="monitor-overview">',
+          '  <article class="monitor-stat healthy"><span>正常节点</span><strong>' + statuses.healthy + '</strong><small>共 ' + items.length + ' 个 Agent</small></article>',
+          '  <article class="monitor-stat warning"><span>需要关注</span><strong>' + statuses.warning + '</strong><small>资源临近阈值或 Stub 不可用</small></article>',
+          '  <article class="monitor-stat critical"><span>严重异常</span><strong>' + statuses.critical + '</strong><small>建议立即检查</small></article>',
+          '  <article class="monitor-stat"><span>离线 / 待上报</span><strong>' + (statuses.offline + statuses.no_data) + '</strong><small>旧 Agent 仍可继续执行原有功能</small></article>',
+          '</div>',
+          '<div class="monitor-layout">',
+          '  <aside class="monitor-node-list"><div class="monitor-list-head"><h2>节点健康</h2><p>优先查看异常节点</p></div><div class="monitor-node-items">' + (nodeItems || '<div class="empty-state">暂无节点</div>') + '</div></aside>',
+          '  <section class="monitor-detail">',
+          '    <div class="monitor-detail-head"><div><h2>' + escapeHtml(node ? node.name : '尚未选择节点') + '</h2><p>' + escapeHtml(node ? node.ip + ' · 最近心跳 ' + node.lastSeen : '暂无监控数据') + '</p></div><div class="monitor-range"><button type="button" data-action="monitor-range" data-range="3600" class="' + (monitoringRange === 3600 ? 'active' : '') + '">1 小时</button><button type="button" data-action="monitor-range" data-range="7200" class="' + (monitoringRange === 7200 ? 'active' : '') + '">2 小时</button><button type="button" data-action="monitor-range" data-range="86400" class="' + (monitoringRange === 86400 ? 'active' : '') + '">24 小时</button></div></div>',
+          '    <div class="monitor-metric-grid">',
+          '      <div class="monitor-metric"><span>CPU / Load</span><strong>' + (metricValue(metrics, 'cpu.percent') === null ? '—' : metricValue(metrics, 'cpu.percent').toFixed(1) + '%') + ' <small>/ ' + (metricValue(metrics, 'cpu.load1') === null ? '—' : metricValue(metrics, 'cpu.load1').toFixed(2)) + '</small></strong></div>',
+          '      <div class="monitor-metric"><span>内存使用</span><strong>' + (metricValue(metrics, 'memory.percent') === null ? '—' : metricValue(metrics, 'memory.percent').toFixed(1) + '%') + '</strong></div>',
+          '      <div class="monitor-metric"><span>Nginx / RSS</span><strong>' + (metrics.nginx && metrics.nginx.running ? (metrics.nginx.workers || 0) + ' workers' : '未运行') + ' <small>/ ' + formatBytes(metricValue(metrics, 'nginx.rss_bytes')) + '</small></strong></div>',
+          '      <div class="monitor-metric"><span>Stub Status</span><strong>' + (stub.available ? (stub.active || 0) + ' 活跃' : (stub.configured ? '采集失败' : '未配置')) + '</strong></div>',
+          '    </div>',
+          '    <div class="monitor-charts">',
+          renderMetricChart('CPU 使用率', 'cpu.percent', '%', '', 100),
+          renderMetricChart('内存使用率', 'memory.percent', '%', 'amber', 100),
+          renderMetricChart('请求速率', 'stub_status.requests_per_second', ' req/s', 'green', 0),
+          renderMetricChart('网络接收', 'network.rx_bytes_per_second', ' B/s', '', 0),
+          renderMetricChart('磁盘写入', 'disk_io.write_bytes_per_second', ' B/s', 'amber', 0),
+          renderMetricChart('活跃连接', 'stub_status.active', '', 'green', 0),
+          '    </div>',
+          '    <p class="monitor-reasons"><strong>健康判断：</strong>' + escapeHtml(reasons) + (filesystem ? ' · 最高磁盘使用 ' + escapeHtml(filesystem.mount || filesystem.path || '磁盘') + ' ' + Number(filesystem.percent || 0).toFixed(1) + '%' : '') + '</p>',
+          '  </section>',
+          '</div>',
+          '<p class="view-note">原始采样保留 2 小时，分钟级历史保留 24 小时并自动滚动清理。监控不可用不会阻断 Agent 安装或原有运维操作。</p>'
+        ].join('');
+      }
+
       function renderNodes() {
         var pendingCards = pendingEnrollments.map(function (request) {
           var labels = Object.keys(request.labels || {}).map(function (key) {
@@ -7038,6 +7470,8 @@
             '    <div class="fact"><label>托管站点</label><strong>' + node.sites + ' 个 · ' + escapeHtml(node.configVersion) + '</strong></div>',
             '  </div>',
             '  <div class="node-actions">',
+            '    <button type="button" data-action="view-node-monitoring" data-node-id="' + escapeHtml(node.id) + '">运行监控</button>',
+            '    <button type="button" data-action="view-node-logs" data-node-id="' + escapeHtml(node.id) + '" ' + (nodeSupports(node, 'log_stream_v1') && node.online ? '' : 'disabled') + '>实时日志</button>',
             '    <button type="button" data-action="inspect-node" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>重新探测</button>',
             '    <button type="button" data-action="test-node" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>nginx -t</button>',
             '    <button type="button" data-action="reload-node" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>平滑 reload</button>',
@@ -7052,7 +7486,7 @@
           pendingSection,
           '<div class="section-head" style="margin-top:18px"><div><h2>已托管节点</h2><p>批准后 Agent 会自动完成机器身份初始化并开始心跳。</p></div></div>',
           '<div class="node-grid">' + cards + '</div>',
-          '<p class="view-note">不提供任意 Shell。Agent 只接受 inspect、nginx_test、nginx_reload、config_inventory、certificate_inventory、config_read、config_hash、config_apply、config_delete、certificate_apply 十种固定动作。</p>'
+          '<p class="view-note">不提供任意 Shell。配置与证书仍只执行固定动作；监控是只读采样，日志只能读取安装时声明的 .log 白名单。</p>'
         ].join('');
       }
 
@@ -7083,13 +7517,15 @@
       function render() {
         updateChrome();
         var content = document.getElementById('app-content');
-        var titleMap = { sites: '站点与配置', certificates: '证书', nodes: '节点 Agent', runs: '执行记录' };
+        var titleMap = { sites: '站点与配置', certificates: '证书', nodes: '节点 Agent', logs: '实时日志', monitoring: '运行监控', runs: '执行记录' };
         document.getElementById('breadcrumb-current').textContent = titleMap[activeView];
         document.querySelectorAll('[data-nav]').forEach(function (button) {
           button.classList.toggle('active', button.getAttribute('data-nav') === activeView);
         });
         if (activeView === 'certificates') content.innerHTML = renderCertificates();
         else if (activeView === 'nodes') content.innerHTML = renderNodes();
+        else if (activeView === 'logs') content.innerHTML = renderLogs();
+        else if (activeView === 'monitoring') content.innerHTML = renderMonitoring();
         else if (activeView === 'runs') content.innerHTML = renderRuns();
         else content.innerHTML = renderSites();
         applyRolePermissions();
@@ -7300,13 +7736,161 @@
             render();
           });
         }
+        var logNodeSelect = document.getElementById('log-node-select');
+        if (logNodeSelect) {
+          logNodeSelect.addEventListener('change', function (event) {
+            selectedLogNodeId = event.target.value;
+            selectedLogPath = '';
+            render();
+          });
+        }
+        var logFileSelect = document.getElementById('log-file-select');
+        if (logFileSelect) {
+          logFileSelect.addEventListener('change', function (event) {
+            selectedLogPath = event.target.value;
+          });
+        }
+      }
+
+      async function refreshMonitoringData() {
+        var sequence = ++monitoringRequestSequence;
+        if (!remoteConnected) {
+          monitoringSummary = syntheticMonitoring();
+          if (!selectedMonitorNodeId && monitoringSummary[0]) selectedMonitorNodeId = monitoringSummary[0].node.id;
+          monitoringSamples = syntheticSamples(selectedMonitorNodeId);
+          if (activeView === 'monitoring') render();
+          return;
+        }
+        try {
+          var summary = await apiRequest('/api/v1/admin/monitoring/summary');
+          if (sequence !== monitoringRequestSequence) return;
+          monitoringSummary = summary.items || [];
+          if (!selectedMonitorNodeId || !monitoringSummary.some(function (item) { return item.node.id === selectedMonitorNodeId; })) {
+            selectedMonitorNodeId = monitoringSummary[0] ? monitoringSummary[0].node.id : null;
+          }
+          if (selectedMonitorNodeId) {
+            var history = await apiRequest('/api/v1/admin/monitoring/nodes/' + encodeURIComponent(selectedMonitorNodeId) + '/metrics?range_seconds=' + monitoringRange);
+            if (sequence !== monitoringRequestSequence) return;
+            monitoringSamples = history.items || [];
+          } else {
+            monitoringSamples = [];
+          }
+          updateChrome();
+          if (activeView === 'monitoring') render();
+        } catch (error) {
+          if (sequence !== monitoringRequestSequence) return;
+          if (activeView === 'monitoring') notify('监控数据读取失败：' + error.message);
+        }
+      }
+
+      function updateLiveLogDisplay() {
+        var output = document.getElementById('live-log-output');
+        var stats = document.getElementById('live-log-stats');
+        if (output && !logPaused) {
+          output.textContent = logLines.join('\n');
+          output.scrollTop = output.scrollHeight;
+        }
+        if (stats) stats.textContent = '读取 ' + logStats.read + ' · 显示 ' + logStats.sent + ' · 过滤 ' + logStats.dropped;
+      }
+
+      function consumeLogEvent(event) {
+        var payload;
+        try { payload = JSON.parse(event.data || '{}'); } catch (_error) { return; }
+        if (payload.rotated) logLines.push('── 日志文件发生轮转，已继续读取新文件 ──');
+        if (payload.error) logLines.push('【Agent 读取失败】' + payload.error);
+        if (payload.content) {
+          String(payload.content).replace(/\n$/, '').split('\n').forEach(function (line) { logLines.push(line); });
+        }
+        if (logLines.length > 5000) logLines.splice(0, logLines.length - 5000);
+        logStats.read = Number(payload.read_lines || logStats.read || 0);
+        logStats.sent = Number(payload.sent_lines || logStats.sent || 0);
+        logStats.dropped = Number(payload.dropped_lines || logStats.dropped || 0);
+        updateLiveLogDisplay();
+      }
+
+      function openLogEventStream(sessionId) {
+        if (logEventSource) logEventSource.close();
+        logEventSource = new EventSource('/api/v1/admin/log-sessions/' + encodeURIComponent(sessionId) + '/events');
+        logEventSource.addEventListener('log', consumeLogEvent);
+        logEventSource.addEventListener('end', function () {
+          if (logEventSource) logEventSource.close();
+          logEventSource = null;
+          activeLogSession = null;
+          if (activeView === 'logs') render();
+        });
+        logEventSource.onopen = function () {
+          var indicator = document.getElementById('live-log-indicator');
+          if (indicator) { indicator.classList.add('running'); indicator.innerHTML = '<i></i>实时接收中'; }
+        };
+        logEventSource.onerror = function () {
+          var indicator = document.getElementById('live-log-indicator');
+          if (indicator && activeLogSession) { indicator.classList.remove('running'); indicator.innerHTML = '<i></i>连接重试中'; }
+        };
+      }
+
+      async function startLiveLog() {
+        var node = getNode(selectedLogNodeId);
+        if (!node || !node.online || !selectedLogPath) return;
+        var include = document.getElementById('log-include').value;
+        var exclude = document.getElementById('log-exclude').value;
+        var caseSensitive = document.getElementById('log-case-sensitive').checked;
+        var tailLines = Number(document.getElementById('log-tail-lines').value || 200);
+        logLines = [];
+        logStats = { read: 0, sent: 0, dropped: 0 };
+        logPaused = false;
+        if (!remoteConnected) {
+          activeLogSession = { id: 'demo-log-session', node_id: node.id, path: selectedLogPath };
+          logLines = [
+            '2026/07/17 14:26:01 [notice] nginx worker process started',
+            '192.0.2.44 - - [17/Jul/2026:14:26:03 +0800] "GET /health HTTP/1.1" 200 17',
+            '192.0.2.51 - - [17/Jul/2026:14:26:05 +0800] "GET /api/orders HTTP/1.1" 200 842'
+          ];
+          logStats = { read: 3, sent: 3, dropped: 0 };
+          render();
+          return;
+        }
+        try {
+          activeLogSession = await apiRequest('/api/v1/admin/log-sessions', {
+            method: 'POST',
+            body: {
+              node_id: node.id,
+              path: selectedLogPath,
+              include: include,
+              exclude: exclude,
+              case_sensitive: caseSensitive,
+              preset: logPreset,
+              tail_lines: tailLines
+            }
+          });
+          render();
+          openLogEventStream(activeLogSession.id);
+        } catch (error) {
+          activeLogSession = null;
+          notify('实时日志启动失败：' + error.message);
+        }
+      }
+
+      async function stopLiveLog(shouldRender) {
+        var session = activeLogSession;
+        if (logEventSource) logEventSource.close();
+        logEventSource = null;
+        activeLogSession = null;
+        logPaused = false;
+        if (session && remoteConnected && session.id !== 'demo-log-session') {
+          try {
+            await apiRequest('/api/v1/admin/log-sessions/' + encodeURIComponent(session.id), { method: 'DELETE' });
+          } catch (_error) {}
+        }
+        if (shouldRender !== false && activeView === 'logs') render();
       }
 
       function switchView(view) {
-        if (!['sites', 'certificates', 'nodes', 'runs'].includes(view)) return;
+        if (!['sites', 'certificates', 'nodes', 'logs', 'monitoring', 'runs'].includes(view)) return;
+        if (activeView === 'logs' && view !== 'logs' && activeLogSession) stopLiveLog(false);
         activeView = view;
         window.location.hash = view;
         render();
+        if (view === 'monitoring') refreshMonitoringData();
         window.scrollTo({ top: 0, behavior: 'smooth' });
       }
 
@@ -8708,6 +9292,41 @@
 
         if (action === 'connect-control') connectRemote(true);
         else if (action === 'logout') logoutRemote();
+        else if (action === 'view-node-monitoring') {
+          selectedMonitorNodeId = nodeId;
+          switchView('monitoring');
+        }
+        else if (action === 'view-node-logs') {
+          selectedLogNodeId = nodeId;
+          selectedLogPath = '';
+          switchView('logs');
+        }
+        else if (action === 'select-monitor-node') {
+          selectedMonitorNodeId = nodeId;
+          monitoringSamples = remoteConnected ? [] : syntheticSamples(nodeId);
+          render();
+          refreshMonitoringData();
+        }
+        else if (action === 'monitor-range') {
+          monitoringRange = Number(actionTarget.getAttribute('data-range') || 3600);
+          render();
+          refreshMonitoringData();
+        }
+        else if (action === 'start-live-log') startLiveLog();
+        else if (action === 'stop-live-log') stopLiveLog(true);
+        else if (action === 'log-preset') {
+          if (activeLogSession) notify('过滤条件在会话启动时固定；请先停止当前会话');
+          else { logPreset = actionTarget.getAttribute('data-preset') || 'all'; render(); }
+        }
+        else if (action === 'toggle-log-pause') {
+          logPaused = !logPaused;
+          render();
+          if (!logPaused) updateLiveLogDisplay();
+        }
+        else if (action === 'clear-live-log') {
+          logLines = [];
+          updateLiveLogDisplay();
+        }
         else if (action === 'add-site') prepareSiteDialog();
         else if (action === 'add-node') openNodeDialog();
         else if (action === 'add-certificate') {
@@ -9317,9 +9936,10 @@
       });
 
       var initialHash = window.location.hash.replace('#', '');
-      if (['sites', 'certificates', 'nodes', 'runs'].includes(initialHash)) activeView = initialHash;
+      if (['sites', 'certificates', 'nodes', 'logs', 'monitoring', 'runs'].includes(initialHash)) activeView = initialHash;
       selectedSiteId = state.sites[0] ? state.sites[0].id : null;
       render();
+      if (activeView === 'monitoring') refreshMonitoringData();
       if (remoteMode) setTimeout(function () { connectRemote(false); }, 0);
     })();
   </script>

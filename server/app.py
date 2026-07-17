@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import stat
 import threading
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +30,7 @@ from urllib.parse import urlparse
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import Literal
 
@@ -504,6 +506,12 @@ class Settings:
     late_result_grace_seconds: int = 30 * 86400
     job_retention_seconds: int = 30 * 86400
     audit_retention_seconds: int = 180 * 86400
+    metric_retention_seconds: int = 24 * 3600
+    metric_raw_retention_seconds: int = 2 * 3600
+    max_log_sessions: int = 20
+    max_log_sessions_per_user: int = 3
+    log_session_ttl_seconds: int = 30 * 60
+    log_session_buffer_bytes: int = 2 * 1024 * 1024
     max_payload_bytes: int = 2 * 1024 * 1024
     max_ui_state_bytes: int = 16 * 1024 * 1024
     max_resource_bytes: int = 1024 * 1024
@@ -544,6 +552,12 @@ class Settings:
             ),
             job_retention_seconds=int(os.environ.get("NGINX_MANAGER_JOB_RETENTION_SECONDS", str(30 * 86400))),
             audit_retention_seconds=int(os.environ.get("NGINX_MANAGER_AUDIT_RETENTION_SECONDS", str(180 * 86400))),
+            metric_retention_seconds=int(os.environ.get("NGINX_MANAGER_METRIC_RETENTION_SECONDS", str(24 * 3600))),
+            metric_raw_retention_seconds=int(os.environ.get("NGINX_MANAGER_METRIC_RAW_RETENTION_SECONDS", str(2 * 3600))),
+            max_log_sessions=int(os.environ.get("NGINX_MANAGER_MAX_LOG_SESSIONS", "20")),
+            max_log_sessions_per_user=int(os.environ.get("NGINX_MANAGER_MAX_LOG_SESSIONS_PER_USER", "3")),
+            log_session_ttl_seconds=int(os.environ.get("NGINX_MANAGER_LOG_SESSION_TTL_SECONDS", str(30 * 60))),
+            log_session_buffer_bytes=int(os.environ.get("NGINX_MANAGER_LOG_SESSION_BUFFER_BYTES", str(2 * 1024 * 1024))),
             max_payload_bytes=int(os.environ.get("NGINX_MANAGER_MAX_PAYLOAD_BYTES", str(2 * 1024 * 1024))),
             max_ui_state_bytes=int(os.environ.get("NGINX_MANAGER_MAX_UI_STATE_BYTES", str(16 * 1024 * 1024))),
             max_resource_bytes=int(os.environ.get("NGINX_MANAGER_MAX_RESOURCE_BYTES", str(1024 * 1024))),
@@ -584,6 +598,16 @@ class Settings:
             raise ValueError("NGINX_MANAGER_LATE_RESULT_GRACE_SECONDS is out of range")
         if self.job_retention_seconds < 86400 or self.audit_retention_seconds < 86400:
             raise ValueError("retention settings must be at least one day")
+        if not 3600 <= self.metric_retention_seconds <= 7 * 86400:
+            raise ValueError("NGINX_MANAGER_METRIC_RETENTION_SECONDS must be between one hour and seven days")
+        if not 300 <= self.metric_raw_retention_seconds <= self.metric_retention_seconds:
+            raise ValueError("NGINX_MANAGER_METRIC_RAW_RETENTION_SECONDS is out of range")
+        if not 1 <= self.max_log_sessions <= 200 or not 1 <= self.max_log_sessions_per_user <= self.max_log_sessions:
+            raise ValueError("log session limits are invalid")
+        if not 60 <= self.log_session_ttl_seconds <= 8 * 3600:
+            raise ValueError("NGINX_MANAGER_LOG_SESSION_TTL_SECONDS is out of range")
+        if not 64 * 1024 <= self.log_session_buffer_bytes <= 16 * 1024 * 1024:
+            raise ValueError("NGINX_MANAGER_LOG_SESSION_BUFFER_BYTES is out of range")
         if not self.ldap_enabled:
             return
         required = {
@@ -873,6 +897,30 @@ class LoginRequest(BaseModel):
             raise ValueError("invalid username")
         return value
 
+
+def _sanitize_metric_value(value: Any, depth: int = 0) -> Any:
+    if depth > 4:
+        return None
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number != number or number in (float("inf"), float("-inf")):
+            return None
+        return round(number, 4)
+    if isinstance(value, str):
+        return value[:256]
+    if isinstance(value, list):
+        return [_sanitize_metric_value(item, depth + 1) for item in value[:32]]
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, item in list(value.items())[:64]:
+            key = str(key)[:64]
+            if re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", key):
+                cleaned[key] = _sanitize_metric_value(item, depth + 1)
+        return cleaned
+    return None
+
 class HeartbeatRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -883,6 +931,7 @@ class HeartbeatRequest(BaseModel):
     active_job_id: Optional[str] = Field(None, min_length=1, max_length=200)
     capabilities: List[str] = Field(default_factory=list)
     facts: Dict[str, Any] = Field(default_factory=dict)
+    metrics: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("capabilities")
     def validate_capabilities(cls, value: List[str]) -> List[str]:
@@ -895,13 +944,52 @@ class HeartbeatRequest(BaseModel):
         allowed = {
             "os", "os_version", "arch", "kernel", "cpu_count", "memory_bytes",
             "nginx_root", "managed_config_root", "managed_certificate_root",
+            "log_roots", "log_files", "stub_status_url", "log_stream_transport",
         }
         result: Dict[str, Any] = {}
         for key, item in value.items():
-            if key not in allowed or not isinstance(item, (str, int, float, bool, type(None))):
+            if key not in allowed:
                 continue
-            result[key] = item[:256] if isinstance(item, str) else item
+            if key in {"log_roots", "log_files"}:
+                if not isinstance(item, list):
+                    continue
+                result[key] = [str(entry)[:4096] for entry in item[:200] if isinstance(entry, str)]
+            elif isinstance(item, (str, int, float, bool, type(None))):
+                result[key] = item[:4096] if isinstance(item, str) else item
         return result
+
+    @field_validator("metrics")
+    def sanitize_metrics(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = _sanitize_metric_value(value)
+        if not isinstance(cleaned, dict):
+            raise ValueError("metrics must be an object")
+        if len(_canonical_json(cleaned).encode("utf-8")) > 64 * 1024:
+            raise ValueError("metrics payload is too large")
+        return cleaned
+
+
+class LogSessionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str = Field(..., min_length=1, max_length=200)
+    path: str = Field(..., min_length=1, max_length=4096)
+    include: str = Field("", max_length=256)
+    exclude: str = Field("", max_length=256)
+    case_sensitive: bool = False
+    preset: Literal["all", "error", "warn", "http4xx", "http5xx"] = "all"
+    tail_lines: int = Field(200, ge=1, le=1000)
+
+
+class LogChunkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cursor: Dict[str, Any] = Field(default_factory=dict)
+    content: str = Field("", max_length=256 * 1024)
+    read_lines: int = Field(0, ge=0, le=1000000)
+    sent_lines: int = Field(0, ge=0, le=1000000)
+    dropped_lines: int = Field(0, ge=0, le=1000000)
+    rotated: bool = False
+    error: Optional[str] = Field(None, max_length=256)
 
 class PollRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -1199,6 +1287,25 @@ class Database:
                     ON agent_enrollments(status, requested_at DESC);
                 CREATE INDEX IF NOT EXISTS agent_enrollments_node_name_idx
                     ON agent_enrollments(node_name COLLATE NOCASE, status);
+
+                CREATE TABLE IF NOT EXISTS metric_samples (
+                    node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                    sampled_at INTEGER NOT NULL,
+                    metrics_json TEXT NOT NULL,
+                    PRIMARY KEY(node_id, sampled_at)
+                );
+                CREATE INDEX IF NOT EXISTS metric_samples_time_idx
+                    ON metric_samples(sampled_at);
+
+                CREATE TABLE IF NOT EXISTS metric_minutes (
+                    node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                    bucket_at INTEGER NOT NULL,
+                    metrics_json TEXT NOT NULL,
+                    sample_count INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY(node_id, bucket_at)
+                );
+                CREATE INDEX IF NOT EXISTS metric_minutes_time_idx
+                    ON metric_minutes(bucket_at);
                 """
             )
             existing_job_columns = {
@@ -1305,7 +1412,14 @@ class Database:
         return len(rows)
 
     @staticmethod
-    def prune(connection: sqlite3.Connection, now: int, job_retention: int, audit_retention: int) -> Dict[str, int]:
+    def prune(
+        connection: sqlite3.Connection,
+        now: int,
+        job_retention: int,
+        audit_retention: int,
+        metric_retention: int = 24 * 3600,
+        metric_raw_retention: int = 2 * 3600,
+    ) -> Dict[str, int]:
         job_cursor = connection.execute(
             "DELETE FROM jobs WHERE status IN ('succeeded', 'failed', 'expired') "
             "AND completed_at IS NOT NULL AND completed_at < ?",
@@ -1323,11 +1437,19 @@ class Database:
             "DELETE FROM agent_enrollments WHERE status <> 'pending' AND updated_at < ?",
             (now - job_retention,),
         )
+        metric_cursor = connection.execute(
+            "DELETE FROM metric_samples WHERE sampled_at < ?", (now - metric_raw_retention,)
+        )
+        metric_minute_cursor = connection.execute(
+            "DELETE FROM metric_minutes WHERE bucket_at < ?", (now - metric_retention,)
+        )
         return {
             "jobs": max(0, job_cursor.rowcount),
             "operations": max(0, operation_cursor.rowcount),
             "audit": max(0, audit_cursor.rowcount),
             "enrollments": max(0, enrollment_cursor.rowcount),
+            "metric_samples": max(0, metric_cursor.rowcount),
+            "metric_minutes": max(0, metric_minute_cursor.rowcount),
         }
 
 
@@ -1355,6 +1477,61 @@ def _node_public(row: sqlite3.Row, now: int, online_after_seconds: int) -> Dict[
         "last_seen_at": _utc_iso(last_seen),
         "revoked_at": _utc_iso(row["revoked_at"]),
     }
+
+
+def _metric_path(metrics: Dict[str, Any], *path: str) -> Optional[float]:
+    value: Any = metrics
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _metric_health(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    reasons: List[str] = []
+    severity = "healthy"
+
+    def mark(level: str, message: str) -> None:
+        nonlocal severity
+        ranks = {"healthy": 0, "warning": 1, "critical": 2}
+        if ranks[level] > ranks[severity]:
+            severity = level
+        reasons.append(message)
+
+    cpu = _metric_path(metrics, "cpu", "percent")
+    memory = _metric_path(metrics, "memory", "percent")
+    load = _metric_path(metrics, "cpu", "load_per_core")
+    if cpu is not None and cpu >= 95:
+        mark("critical", "CPU 使用率超过 95%")
+    elif cpu is not None and cpu >= 85:
+        mark("warning", "CPU 使用率超过 85%")
+    if memory is not None and memory >= 95:
+        mark("critical", "内存使用率超过 95%")
+    elif memory is not None and memory >= 90:
+        mark("warning", "内存使用率超过 90%")
+    if load is not None and load >= 1.5:
+        mark("critical", "归一化 Load 超过 1.5")
+    elif load is not None and load >= 1.0:
+        mark("warning", "归一化 Load 超过 1.0")
+    filesystems = metrics.get("filesystems") if isinstance(metrics.get("filesystems"), list) else []
+    for item in filesystems:
+        if not isinstance(item, dict):
+            continue
+        percent = item.get("percent")
+        if not isinstance(percent, (int, float)):
+            continue
+        name = str(item.get("mount") or item.get("path") or "磁盘")
+        if percent >= 95:
+            mark("critical", "{} 使用率超过 95%".format(name))
+        elif percent >= 85:
+            mark("warning", "{} 使用率超过 85%".format(name))
+    stub = metrics.get("stub_status") if isinstance(metrics.get("stub_status"), dict) else {}
+    if stub and not stub.get("available", False):
+        mark("warning", "Stub Status 不可用")
+    return {"status": severity, "reasons": reasons[:8]}
 
 
 def _job_public(row: sqlite3.Row) -> Dict[str, Any]:
@@ -1483,6 +1660,149 @@ def _load_ui_state_document(connection: sqlite3.Connection) -> Dict[str, Any]:
     return {"revision": row["revision"], "state": state}
 
 
+class LogSessionManager:
+    """Small in-memory relay. Log content is never written to SQLite or disk."""
+
+    def __init__(self, max_sessions: int, max_per_user: int, ttl_seconds: int, buffer_bytes: int):
+        self.max_sessions = max_sessions
+        self.max_per_user = max_per_user
+        self.ttl_seconds = ttl_seconds
+        self.buffer_bytes = buffer_bytes
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+
+    def _purge_locked(self, now: int) -> None:
+        expired = [
+            session_id for session_id, session in self._sessions.items()
+            if session["expires_at"] <= now or (session.get("stopped") and now - session["updated_at"] > 30)
+        ]
+        for session_id in expired:
+            self._sessions.pop(session_id, None)
+
+    def create(self, owner: str, node_id: str, request: LogSessionCreateRequest) -> Dict[str, Any]:
+        now = int(time.time())
+        with self._lock:
+            self._purge_locked(now)
+            active = [session for session in self._sessions.values() if not session.get("stopped")]
+            if len(active) >= self.max_sessions:
+                raise HTTPException(status_code=429, detail="global live log session limit reached")
+            if sum(1 for session in active if session["owner"] == owner) >= self.max_per_user:
+                raise HTTPException(status_code=429, detail="user live log session limit reached")
+            session_id = str(uuid.uuid4())
+            session = {
+                "id": session_id,
+                "owner": owner,
+                "node_id": node_id,
+                "path": request.path,
+                "include": request.include,
+                "exclude": request.exclude,
+                "case_sensitive": request.case_sensitive,
+                "preset": request.preset,
+                "tail_lines": request.tail_lines,
+                "cursor": {},
+                "created_at": now,
+                "updated_at": now,
+                "expires_at": now + self.ttl_seconds,
+                "stopped": False,
+                "events": deque(),
+                "event_bytes": 0,
+                "next_sequence": 1,
+                "read_lines": 0,
+                "sent_lines": 0,
+                "dropped_lines": 0,
+            }
+            self._sessions[session_id] = session
+            return self.public(session)
+
+    @staticmethod
+    def public(session: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": session["id"],
+            "node_id": session["node_id"],
+            "path": session["path"],
+            "created_at": _utc_iso(session["created_at"]),
+            "expires_at": _utc_iso(session["expires_at"]),
+            "stopped": bool(session.get("stopped")),
+            "read_lines": int(session.get("read_lines", 0)),
+            "sent_lines": int(session.get("sent_lines", 0)),
+            "dropped_lines": int(session.get("dropped_lines", 0)),
+        }
+
+    def get_owned(self, session_id: str, owner: str, allow_admin: bool = False) -> Dict[str, Any]:
+        with self._lock:
+            self._purge_locked(int(time.time()))
+            session = self._sessions.get(session_id)
+            if session is None or (session["owner"] != owner and not allow_admin):
+                raise HTTPException(status_code=404, detail="log session not found")
+            return session
+
+    def stop(self, session_id: str, owner: str, allow_admin: bool = False) -> Dict[str, Any]:
+        with self._lock:
+            session = self.get_owned(session_id, owner, allow_admin)
+            session["stopped"] = True
+            session["updated_at"] = int(time.time())
+            return self.public(session)
+
+    def poll_for_agent(self, node_id: str) -> List[Dict[str, Any]]:
+        now = int(time.time())
+        with self._lock:
+            self._purge_locked(now)
+            result: List[Dict[str, Any]] = []
+            for session in self._sessions.values():
+                if session["node_id"] != node_id or session.get("stopped"):
+                    continue
+                result.append({
+                    "id": session["id"],
+                    "path": session["path"],
+                    "include": session["include"],
+                    "exclude": session["exclude"],
+                    "case_sensitive": session["case_sensitive"],
+                    "preset": session["preset"],
+                    "tail_lines": session["tail_lines"],
+                    "cursor": dict(session.get("cursor") or {}),
+                })
+            return result
+
+    def append(self, session_id: str, node_id: str, chunk: LogChunkRequest) -> Dict[str, Any]:
+        now = int(time.time())
+        with self._lock:
+            self._purge_locked(now)
+            session = self._sessions.get(session_id)
+            if session is None or session["node_id"] != node_id or session.get("stopped"):
+                raise HTTPException(status_code=404, detail="log session not found")
+            cursor = _sanitize_metric_value(chunk.cursor)
+            session["cursor"] = cursor if isinstance(cursor, dict) else {}
+            session["updated_at"] = now
+            session["read_lines"] += chunk.read_lines
+            session["sent_lines"] += chunk.sent_lines
+            session["dropped_lines"] += chunk.dropped_lines
+            if chunk.content or chunk.rotated or chunk.dropped_lines or chunk.error:
+                event = {
+                    "sequence": session["next_sequence"],
+                    "content": chunk.content,
+                    "rotated": chunk.rotated,
+                    "read_lines": session["read_lines"],
+                    "sent_lines": session["sent_lines"],
+                    "dropped_lines": session["dropped_lines"],
+                    "error": chunk.error,
+                    "at": _utc_iso(now),
+                }
+                session["next_sequence"] += 1
+                encoded_size = len(_canonical_json(event).encode("utf-8"))
+                session["events"].append((event, encoded_size))
+                session["event_bytes"] += encoded_size
+                while session["events"] and session["event_bytes"] > self.buffer_bytes:
+                    _old_event, old_size = session["events"].popleft()
+                    session["event_bytes"] -= old_size
+            return self.public(session)
+
+    def events_since(self, session_id: str, owner: str, sequence: int, allow_admin: bool = False) -> Tuple[List[Dict[str, Any]], bool]:
+        with self._lock:
+            session = self.get_owned(session_id, owner, allow_admin)
+            events = [dict(event) for event, _size in session["events"] if event["sequence"] > sequence]
+            return events, bool(session.get("stopped"))
+
+
 def create_app(
     settings: Optional[Settings] = None,
     ldap_authenticator: Optional[Callable[[Settings, str, str], Dict[str, str]]] = None,
@@ -1495,6 +1815,12 @@ def create_app(
         current_settings, username, None
     ))
     database = Database(settings.db_path)
+    log_sessions = LogSessionManager(
+        settings.max_log_sessions,
+        settings.max_log_sessions_per_user,
+        settings.log_session_ttl_seconds,
+        settings.log_session_buffer_bytes,
+    )
 
     @asynccontextmanager
     async def lifespan(_api: FastAPI) -> AsyncIterator[None]:
@@ -1508,6 +1834,8 @@ def create_app(
                 now,
                 settings.job_retention_seconds,
                 settings.audit_retention_seconds,
+                settings.metric_retention_seconds,
+                settings.metric_raw_retention_seconds,
             )
         yield
 
@@ -1521,6 +1849,7 @@ def create_app(
     )
     api.state.settings = settings
     api.state.database = database
+    api.state.log_sessions = log_sessions
     secure_session_cookie = "__Host-nginx_manager_session"
     http_session_cookie = "nginx_manager_session"
     login_attempts: Dict[str, List[int]] = {}
@@ -1951,10 +2280,32 @@ def create_app(
                     (now + settings.job_lease_seconds, request.active_job_id, agent["id"], now),
                 )
                 lease_renewed = cursor.rowcount == 1
+            if request.metrics:
+                metrics_json = _canonical_json(request.metrics)
+                connection.execute(
+                    "INSERT OR REPLACE INTO metric_samples(node_id, sampled_at, metrics_json) VALUES (?, ?, ?)",
+                    (agent["id"], now, metrics_json),
+                )
+                bucket_at = now - (now % 60)
+                existing_minute = connection.execute(
+                    "SELECT sample_count FROM metric_minutes WHERE node_id = ? AND bucket_at = ?",
+                    (agent["id"], bucket_at),
+                ).fetchone()
+                connection.execute(
+                    "INSERT OR REPLACE INTO metric_minutes(node_id, bucket_at, metrics_json, sample_count) VALUES (?, ?, ?, ?)",
+                    (agent["id"], bucket_at, metrics_json, int(existing_minute["sample_count"]) + 1 if existing_minute else 1),
+                )
+                connection.execute(
+                    "DELETE FROM metric_samples WHERE sampled_at < ?", (now - settings.metric_raw_retention_seconds,)
+                )
+                connection.execute(
+                    "DELETE FROM metric_minutes WHERE bucket_at < ?", (now - settings.metric_retention_seconds,)
+                )
         return {
             "ok": True,
             "server_time": _utc_iso(now),
             "poll_interval_seconds": 5,
+            "metric_interval_seconds": 15,
             "job_lease_renewed": lease_renewed,
         }
 
@@ -2012,6 +2363,18 @@ def create_app(
             "jobs": claimed,
             "server_time": _utc_iso(now),
         }
+
+    @api.post("/api/v1/agent/log-sessions/poll")
+    def poll_log_sessions(agent: Dict[str, Any] = Depends(require_agent)) -> Dict[str, Any]:
+        return {"sessions": log_sessions.poll_for_agent(agent["id"]), "server_time": _utc_iso(int(time.time()))}
+
+    @api.post("/api/v1/agent/log-sessions/{session_id}/chunks")
+    def append_log_chunk(
+        session_id: str,
+        request: LogChunkRequest,
+        agent: Dict[str, Any] = Depends(require_agent),
+    ) -> Dict[str, Any]:
+        return {"accepted": True, "session": log_sessions.append(session_id, agent["id"], request)}
 
     @api.post("/api/v1/agent/jobs/{job_id}/result")
     def job_result(
@@ -2090,6 +2453,171 @@ def create_app(
         with database.connection() as connection:
             rows = connection.execute("SELECT * FROM nodes ORDER BY node_name COLLATE NOCASE").fetchall()
         return {"items": [_node_public(row, now, settings.online_after_seconds) for row in rows]}
+
+    @api.get("/api/v1/admin/monitoring/summary")
+    def monitoring_summary(admin: Dict[str, Any] = Depends(require_session)) -> Dict[str, Any]:
+        now = int(time.time())
+        items: List[Dict[str, Any]] = []
+        with database.connection() as connection:
+            nodes = connection.execute("SELECT * FROM nodes ORDER BY node_name COLLATE NOCASE").fetchall()
+            for row in nodes:
+                public = _node_public(row, now, settings.online_after_seconds)
+                metric_row = connection.execute(
+                    "SELECT sampled_at, metrics_json FROM metric_samples WHERE node_id = ? ORDER BY sampled_at DESC LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                if metric_row is None:
+                    metric_row = connection.execute(
+                        "SELECT bucket_at AS sampled_at, metrics_json FROM metric_minutes WHERE node_id = ? ORDER BY bucket_at DESC LIMIT 1",
+                        (row["id"],),
+                    ).fetchone()
+                metrics = json.loads(metric_row["metrics_json"]) if metric_row else {}
+                health = _metric_health(metrics) if metrics else {"status": "no_data", "reasons": ["尚未收到监控数据"]}
+                if public["status"] == "offline":
+                    health = {"status": "offline", "reasons": ["Agent 心跳中断"]}
+                items.append({
+                    "node": public,
+                    "sampled_at": _utc_iso(metric_row["sampled_at"]) if metric_row else None,
+                    "metrics": metrics,
+                    "health": health,
+                })
+        return {"items": items, "server_time": _utc_iso(now)}
+
+    @api.get("/api/v1/admin/monitoring/nodes/{node_id}/metrics")
+    def monitoring_metrics(
+        node_id: str,
+        range_seconds: int = Query(3600, ge=900, le=86400),
+        admin: Dict[str, Any] = Depends(require_session),
+    ) -> Dict[str, Any]:
+        now = int(time.time())
+        table = "metric_samples" if range_seconds <= settings.metric_raw_retention_seconds else "metric_minutes"
+        time_column = "sampled_at" if table == "metric_samples" else "bucket_at"
+        with database.connection() as connection:
+            node = connection.execute("SELECT id FROM nodes WHERE id = ?", (node_id,)).fetchone()
+            if node is None:
+                raise HTTPException(status_code=404, detail="node not found")
+            rows = connection.execute(
+                "SELECT {} AS sampled_at, metrics_json FROM {} WHERE node_id = ? AND {} >= ? ORDER BY {}".format(
+                    time_column, table, time_column, time_column
+                ),
+                (node_id, now - range_seconds),
+            ).fetchall()
+        return {
+            "node_id": node_id,
+            "range_seconds": range_seconds,
+            "resolution": "raw" if table == "metric_samples" else "minute",
+            "items": [{"sampled_at": _utc_iso(row["sampled_at"]), "metrics": json.loads(row["metrics_json"])} for row in rows],
+        }
+
+    @api.post("/api/v1/admin/log-sessions", status_code=201)
+    def create_log_session(
+        request: LogSessionCreateRequest,
+        principal: Dict[str, Any] = Depends(require_operator),
+    ) -> Dict[str, Any]:
+        now = int(time.time())
+        with database.transaction() as connection:
+            row = connection.execute("SELECT * FROM nodes WHERE id = ?", (request.node_id,)).fetchone()
+            if row is None or row["revoked_at"] is not None:
+                raise HTTPException(status_code=404, detail="node not found")
+            if _node_public(row, now, settings.online_after_seconds)["status"] == "offline":
+                raise HTTPException(status_code=409, detail="agent is offline")
+            capabilities = set(json.loads(row["capabilities_json"] or "[]"))
+            facts = json.loads(row["facts_json"] or "{}")
+            if "log_stream_v1" not in capabilities:
+                raise HTTPException(status_code=409, detail="agent does not support live log streaming")
+            log_files = facts.get("log_files") if isinstance(facts.get("log_files"), list) else []
+            if request.path not in log_files:
+                raise HTTPException(status_code=400, detail="log path is not in the agent allowlist")
+            session = log_sessions.create(principal["username"], row["id"], request)
+            Database.audit(
+                connection,
+                principal["auth_source"],
+                principal["username"],
+                "live_log_session_started",
+                "node",
+                row["id"],
+                {
+                    "session_id": session["id"],
+                    "path": request.path,
+                    "preset": request.preset,
+                    "has_include_filter": bool(request.include),
+                    "has_exclude_filter": bool(request.exclude),
+                },
+            )
+        return session
+
+    @api.get("/api/v1/admin/log-sessions/{session_id}/events")
+    async def stream_log_session(
+        session_id: str,
+        request: Request,
+        last_event_id: Optional[str] = Header(None, alias="Last-Event-ID"),
+        principal: Dict[str, Any] = Depends(require_operator),
+    ) -> StreamingResponse:
+        allow_admin = principal["role"] == "admin"
+        log_sessions.get_owned(session_id, principal["username"], allow_admin)
+        try:
+            sequence = max(0, int(last_event_id or "0"))
+        except ValueError:
+            sequence = 0
+
+        async def generate() -> AsyncIterator[str]:
+            nonlocal sequence
+            last_keepalive = time.monotonic()
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        events, stopped = log_sessions.events_since(
+                            session_id, principal["username"], sequence, allow_admin
+                        )
+                    except HTTPException:
+                        break
+                    for event in events:
+                        sequence = max(sequence, int(event["sequence"]))
+                        yield "id: {}\nevent: log\ndata: {}\n\n".format(sequence, _canonical_json(event))
+                    if stopped:
+                        yield "event: end\ndata: {\"stopped\":true}\n\n"
+                        break
+                    if time.monotonic() - last_keepalive >= 15:
+                        yield ": keepalive\n\n"
+                        last_keepalive = time.monotonic()
+                    await asyncio.sleep(0.5)
+            finally:
+                with database.transaction() as connection:
+                    Database.audit(
+                        connection,
+                        principal["auth_source"],
+                        principal["username"],
+                        "live_log_stream_disconnected",
+                        "log_session",
+                        session_id,
+                        {"last_sequence": sequence},
+                    )
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    @api.delete("/api/v1/admin/log-sessions/{session_id}")
+    def stop_log_session(
+        session_id: str,
+        principal: Dict[str, Any] = Depends(require_operator),
+    ) -> Dict[str, Any]:
+        stopped = log_sessions.stop(session_id, principal["username"], principal["role"] == "admin")
+        with database.transaction() as connection:
+            Database.audit(
+                connection,
+                principal["auth_source"],
+                principal["username"],
+                "live_log_session_stopped",
+                "log_session",
+                session_id,
+                {"node_id": stopped["node_id"], "path": stopped["path"]},
+            )
+        return stopped
 
     @api.post("/api/v1/admin/nodes/{node_id}/revoke")
     def revoke_node(
@@ -2692,6 +3220,8 @@ def create_app(
                 now,
                 settings.job_retention_seconds,
                 settings.audit_retention_seconds,
+                settings.metric_retention_seconds,
+                settings.metric_raw_retention_seconds,
             )
             Database.audit(
                 connection,

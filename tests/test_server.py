@@ -186,6 +186,15 @@ class ServerTestCase(unittest.TestCase):
             self.assertEqual(readonly.json()["auth_source"], "ldap")
             readonly_csrf = {"X-CSRF-Token": readonly.json()["csrf_token"]}
             self.assertEqual(ldap_client.get("/api/v1/admin/nodes").status_code, 200)
+            self.assertEqual(ldap_client.get("/api/v1/admin/monitoring/summary").status_code, 200)
+            self.assertEqual(
+                ldap_client.post(
+                    "/api/v1/admin/log-sessions",
+                    headers=readonly_csrf,
+                    json={"node_id": "not-allowed", "path": "/var/log/nginx/access.log"},
+                ).status_code,
+                403,
+            )
             self.assertEqual(
                 ldap_client.put(
                     "/api/v1/admin/ui-state",
@@ -366,6 +375,113 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0]["status"], "online")
         self.assertNotIn("token_hash", nodes[0])
+
+    def test_monitoring_metrics_are_stored_with_bounded_history(self):
+        enrolled = self.enroll("metrics-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        heartbeat = self.client.post(
+            "/api/v1/agent/heartbeat",
+            headers=agent_headers,
+            json={
+                "status": "online",
+                "agent_version": "0.8.0",
+                "capabilities": ["metrics_v1", "stub_status_v1"],
+                "facts": {"stub_status_url": "http://127.0.0.1:18080/nginx_status"},
+                "metrics": {
+                    "cpu": {"percent": 31.5, "count": 8, "load1": 1.1, "load_per_core": 0.1375},
+                    "memory": {"percent": 62.0},
+                    "filesystems": [{"mount": "/", "percent": 54.0}],
+                    "stub_status": {"configured": True, "available": True, "active": 12, "requests_per_second": 84.2},
+                },
+            },
+        )
+        self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+        self.assertEqual(15, heartbeat.json()["metric_interval_seconds"])
+
+        summary = self.client.get("/api/v1/admin/monitoring/summary")
+        self.assertEqual(summary.status_code, 200, summary.text)
+        item = summary.json()["items"][0]
+        self.assertEqual(31.5, item["metrics"]["cpu"]["percent"])
+        self.assertEqual("healthy", item["health"]["status"])
+        history = self.client.get(
+            "/api/v1/admin/monitoring/nodes/{}/metrics?range_seconds=3600".format(enrolled["agent_id"])
+        )
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual("raw", history.json()["resolution"])
+        self.assertEqual(1, len(history.json()["items"]))
+        with self.client.app.state.database.connection() as connection:
+            self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM metric_samples").fetchone()[0])
+            self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM metric_minutes").fetchone()[0])
+
+    def test_live_log_session_is_allowlisted_in_memory_and_audited_without_content(self):
+        enrolled = self.enroll("log-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        allowed_path = "/apps/nginx/logs/access.log"
+        heartbeat = self.client.post(
+            "/api/v1/agent/heartbeat",
+            headers=agent_headers,
+            json={
+                "status": "online",
+                "agent_version": "0.8.0",
+                "capabilities": ["metrics_v1", "log_stream_v1"],
+                "facts": {
+                    "log_roots": ["/apps/nginx/logs"],
+                    "log_files": [allowed_path],
+                    "log_stream_transport": "https",
+                },
+            },
+        )
+        self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+        rejected = self.client.post(
+            "/api/v1/admin/log-sessions",
+            headers=self.admin_headers,
+            json={"node_id": enrolled["agent_id"], "path": "/etc/shadow"},
+        )
+        self.assertEqual(400, rejected.status_code)
+
+        created = self.client.post(
+            "/api/v1/admin/log-sessions",
+            headers=self.admin_headers,
+            json={
+                "node_id": enrolled["agent_id"],
+                "path": allowed_path,
+                "include": "sensitive-filter-value",
+                "preset": "http5xx",
+                "tail_lines": 100,
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        session_id = created.json()["id"]
+        polled = self.client.post("/api/v1/agent/log-sessions/poll", headers=agent_headers, json={})
+        self.assertEqual(session_id, polled.json()["sessions"][0]["id"])
+
+        content = "sensitive-live-log-line 500\n"
+        appended = self.client.post(
+            "/api/v1/agent/log-sessions/{}/chunks".format(session_id),
+            headers=agent_headers,
+            json={
+                "cursor": {"inode": 11, "offset": 99},
+                "content": content,
+                "read_lines": 1,
+                "sent_lines": 1,
+                "dropped_lines": 0,
+                "rotated": False,
+            },
+        )
+        self.assertEqual(appended.status_code, 200, appended.text)
+        events, stopped = self.client.app.state.log_sessions.events_since(session_id, "admin", 0, True)
+        self.assertFalse(stopped)
+        self.assertEqual(content, events[0]["content"])
+        with self.client.app.state.database.connection() as connection:
+            database_dump = "\n".join(connection.iterdump())
+        self.assertNotIn("sensitive-live-log-line", database_dump)
+        self.assertNotIn("sensitive-filter-value", database_dump)
+
+        stopped_response = self.client.delete(
+            "/api/v1/admin/log-sessions/{}".format(session_id), headers=self.admin_headers
+        )
+        self.assertEqual(stopped_response.status_code, 200, stopped_response.text)
+        self.assertTrue(stopped_response.json()["stopped"])
 
     def test_reject_enrollment_and_remove_manual_token_endpoint(self):
         request, _pending = self.start_enrollment("rejected-node")
