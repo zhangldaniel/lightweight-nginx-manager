@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -1003,10 +1003,14 @@ class JobExecutor:
                 matched = matched and "error" in compared
             elif preset == "warn":
                 matched = matched and ("warn" in compared or "warning" in compared)
-            elif preset == "http4xx":
-                matched = matched and re.search(r"(?:^|\s)4\d\d(?:\s|$)", line) is not None
-            elif preset == "http5xx":
-                matched = matched and re.search(r"(?:^|\s)5\d\d(?:\s|$)", line) is not None
+            elif preset in {"http4xx", "http5xx"}:
+                status_match = re.search(
+                    r'''(?:^|[\s,{])["']?status["']?\s*[:=]\s*["']?([1-5]\d\d)["']?''',
+                    line,
+                    flags=re.IGNORECASE,
+                ) or re.search(r"(?:^|\s)([1-5]\d\d)(?=\s|$)", line)
+                status_class = "4" if preset == "http4xx" else "5"
+                matched = matched and bool(status_match and status_match.group(1).startswith(status_class))
             if matched:
                 sent.append(line)
             else:

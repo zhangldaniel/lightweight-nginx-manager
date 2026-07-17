@@ -5298,6 +5298,10 @@
       var logLines = [];
       var logPaused = false;
       var logPreset = 'all';
+      var logInclude = '';
+      var logExclude = '';
+      var logCaseSensitive = false;
+      var logTailLines = 200;
       var logStats = { read: 0, sent: 0, dropped: 0 };
 
       function clone(value) {
@@ -7380,6 +7384,41 @@
         return [];
       }
 
+      function logLineHasHttpStatus(line, statusClass) {
+        var text = String(line || '');
+        var fieldMatch = text.match(/(?:^|[\s,{])["']?status["']?\s*[:=]\s*["']?([1-5]\d\d)["']?/i);
+        if (fieldMatch && fieldMatch[1].charAt(0) === statusClass) return true;
+        var accessMatch = text.match(/(?:^|\s)([1-5]\d\d)(?=\s|$)/);
+        return Boolean(accessMatch && accessMatch[1].charAt(0) === statusClass);
+      }
+
+      function logLineMatchesFilters(line, preset, include, exclude, caseSensitive) {
+        var text = String(line || '');
+        var compared = caseSensitive ? text : text.toLowerCase();
+        var includeCompared = caseSensitive ? String(include || '') : String(include || '').toLowerCase();
+        var excludeCompared = caseSensitive ? String(exclude || '') : String(exclude || '').toLowerCase();
+        if (includeCompared && !compared.includes(includeCompared)) return false;
+        if (excludeCompared && compared.includes(excludeCompared)) return false;
+        if (preset === 'error') return compared.includes('error');
+        if (preset === 'warn') return compared.includes('warn') || compared.includes('warning');
+        if (preset === 'http4xx') return logLineHasHttpStatus(text, '4');
+        if (preset === 'http5xx') return logLineHasHttpStatus(text, '5');
+        return true;
+      }
+
+      function filteredLogLines() {
+        return logLines.filter(function (line) {
+          return logLineMatchesFilters(line, logPreset, logInclude, logExclude, logCaseSensitive);
+        });
+      }
+
+      function logStatsText(visibleCount) {
+        return '读取 ' + logStats.read
+          + ' · Agent 发送 ' + logStats.sent
+          + ' · 当前显示 ' + visibleCount + '/' + logLines.length
+          + ' · Agent 过滤 ' + logStats.dropped;
+      }
+
       function renderLogs() {
         var logNodes = state.nodes.filter(function (node) { return nodeSupports(node, 'log_stream_v1'); });
         if (!selectedLogNodeId || !logNodes.some(function (node) { return node.id === selectedLogNodeId; })) {
@@ -7398,7 +7437,12 @@
           ? '<div class="runtime-warning">当前没有支持实时日志的 Agent。请升级 Agent，并在安装时添加 <code>--nginx-log-dir</code>；HTTP 管理网还需显式添加 <code>--allow-plaintext-log-stream</code>。</div>'
           : (!selectedNode.online ? '<div class="runtime-warning">所选 Agent 当前离线，恢复心跳后才能开始日志会话。</div>' : '');
         var noPermission = remoteConnected && currentRole === 'auditor';
-        var displayLines = logLines.length ? logLines.join('\n') : [
+        var visibleLines = filteredLogLines();
+        var displayLines = logLines.length ? (visibleLines.length ? visibleLines.join('\n') : [
+          '当前窗口没有匹配的日志。',
+          '',
+          '请调整右侧快捷条件、包含内容或排除内容。'
+        ].join('\n')) : [
           '选择一个节点和日志文件，然后开始实时查看。',
           '',
           '日志只在当前浏览器会话中显示；控制端不写入数据库或磁盘。'
@@ -7413,7 +7457,7 @@
           '<div class="runtime-toolbar">',
           '  <div class="runtime-field"><label for="log-node-select">Agent 节点</label><select id="log-node-select"' + (activeLogSession ? ' disabled' : '') + '>' + (nodeOptions || '<option value="">暂无可用节点</option>') + '</select></div>',
           '  <div class="runtime-field"><label for="log-file-select">日志文件</label><select id="log-file-select"' + (activeLogSession ? ' disabled' : '') + '>' + (fileOptions || '<option value="">没有发现 .log 文件</option>') + '</select></div>',
-          '  <div class="runtime-field"><label for="log-tail-lines">初始尾部行数</label><select id="log-tail-lines"' + (activeLogSession ? ' disabled' : '') + '><option value="100">100 行</option><option value="200" selected>200 行</option><option value="500">500 行</option><option value="1000">1000 行</option></select></div>',
+          '  <div class="runtime-field"><label for="log-tail-lines">初始尾部行数</label><select id="log-tail-lines"' + (activeLogSession ? ' disabled' : '') + '><option value="100"' + (logTailLines === 100 ? ' selected' : '') + '>100 行</option><option value="200"' + (logTailLines === 200 ? ' selected' : '') + '>200 行</option><option value="500"' + (logTailLines === 500 ? ' selected' : '') + '>500 行</option><option value="1000"' + (logTailLines === 1000 ? ' selected' : '') + '>1000 行</option></select></div>',
           '  <button class="button primary" type="button" data-action="' + (activeLogSession ? 'stop-live-log' : 'start-live-log') + '"' + ((!activeLogSession && (!selectedNode || !selectedNode.online || !selectedLogPath || noPermission)) ? ' disabled' : '') + '>' + (activeLogSession ? '停止会话' : '开始实时查看') + '</button>',
           '</div>',
           capabilityNotice,
@@ -7422,18 +7466,18 @@
           '  <section class="log-console-card">',
           '    <div class="log-console-head"><div><h2>' + escapeHtml(selectedNode ? selectedNode.name : '尚未选择节点') + '</h2><p>' + escapeHtml(selectedLogPath || '尚未发现日志文件') + '</p></div><span class="live-indicator ' + (activeLogSession ? 'running' : '') + '" id="live-log-indicator"><i></i>' + (activeLogSession ? (logPaused ? '已暂停显示' : '实时接收中') : '尚未连接') + '</span></div>',
           '    <pre class="log-terminal" id="live-log-output">' + escapeHtml(displayLines) + '</pre>',
-          '    <div class="log-console-foot"><span id="live-log-stats">读取 ' + logStats.read + ' · 显示 ' + logStats.sent + ' · 过滤 ' + logStats.dropped + '</span><span>浏览器最多保留 5,000 行</span></div>',
+          '    <div class="log-console-foot"><span id="live-log-stats">' + escapeHtml(logStatsText(visibleLines.length)) + '</span><span>浏览器最多保留 5,000 行</span></div>',
           '  </section>',
           '  <aside class="runtime-side-card">',
-          '    <div class="runtime-card-head"><h3>过滤与显示</h3><span class="status-pill">Agent 侧过滤</span></div>',
+          '    <div class="runtime-card-head"><h3>过滤与显示</h3><span class="status-pill">窗口即时筛选</span></div>',
           '    <div class="runtime-side-body">',
           '      <div><label class="runtime-help">快捷条件</label><div class="filter-preset-grid">' + presetButtons + '</div></div>',
-          '      <div class="runtime-field"><label for="log-include">必须包含</label><input id="log-include" maxlength="256" placeholder="例如 upstream timed out"' + (activeLogSession ? ' disabled' : '') + '></div>',
-          '      <div class="runtime-field"><label for="log-exclude">排除内容</label><input id="log-exclude" maxlength="256" placeholder="例如 healthcheck"' + (activeLogSession ? ' disabled' : '') + '></div>',
-          '      <label class="runtime-help"><input type="checkbox" id="log-case-sensitive"' + (activeLogSession ? ' disabled' : '') + '> 区分大小写</label>',
+          '      <div class="runtime-field"><label for="log-include">必须包含</label><input id="log-include" maxlength="256" value="' + escapeHtml(logInclude) + '" placeholder="例如 upstream timed out"></div>',
+          '      <div class="runtime-field"><label for="log-exclude">排除内容</label><input id="log-exclude" maxlength="256" value="' + escapeHtml(logExclude) + '" placeholder="例如 healthcheck"></div>',
+          '      <label class="runtime-help"><input type="checkbox" id="log-case-sensitive"' + (logCaseSensitive ? ' checked' : '') + '> 区分大小写</label>',
           '      <button class="button" type="button" data-action="toggle-log-pause"' + (!activeLogSession ? ' disabled' : '') + '>' + (logPaused ? '继续显示' : '暂停显示') + '</button>',
           '      <button class="button" type="button" data-action="clear-live-log">清空当前窗口</button>',
-          '      <p class="runtime-help">文件路径只能来自 Agent 上报的白名单。页面不支持任意路径，也不提供日志下载。</p>',
+          '      <p class="runtime-help">当前窗口会立即筛选；开始下一次会话时，同样的条件会提交给 Agent。文件路径只能来自 Agent 上报的白名单。</p>',
           '    </div>',
           '  </aside>',
           '</div>'
@@ -7888,6 +7932,33 @@
             selectedLogPath = event.target.value;
           });
         }
+        var logTailSelect = document.getElementById('log-tail-lines');
+        if (logTailSelect) {
+          logTailSelect.addEventListener('change', function (event) {
+            logTailLines = Number(event.target.value || 200);
+          });
+        }
+        var logIncludeInput = document.getElementById('log-include');
+        if (logIncludeInput) {
+          logIncludeInput.addEventListener('input', function (event) {
+            logInclude = event.target.value;
+            updateLiveLogDisplay(true);
+          });
+        }
+        var logExcludeInput = document.getElementById('log-exclude');
+        if (logExcludeInput) {
+          logExcludeInput.addEventListener('input', function (event) {
+            logExclude = event.target.value;
+            updateLiveLogDisplay(true);
+          });
+        }
+        var logCaseInput = document.getElementById('log-case-sensitive');
+        if (logCaseInput) {
+          logCaseInput.addEventListener('change', function (event) {
+            logCaseSensitive = event.target.checked;
+            updateLiveLogDisplay(true);
+          });
+        }
       }
 
       async function refreshMonitoringData() {
@@ -7921,16 +7992,19 @@
         }
       }
 
-      function updateLiveLogDisplay() {
+      function updateLiveLogDisplay(force) {
         var output = document.getElementById('live-log-output');
         var stats = document.getElementById('live-log-stats');
-        if (output && !logPaused) {
+        var visibleLines = filteredLogLines();
+        if (output && (!logPaused || force)) {
           var previousTop = output.scrollTop;
           var followTail = !output.textContent || output.scrollHeight - output.scrollTop - output.clientHeight <= 48;
-          output.textContent = logLines.join('\n');
+          output.textContent = logLines.length
+            ? (visibleLines.length ? visibleLines.join('\n') : '当前窗口没有匹配的日志。\n\n请调整右侧快捷条件、包含内容或排除内容。')
+            : '';
           output.scrollTop = followTail ? output.scrollHeight : previousTop;
         }
-        if (stats) stats.textContent = '读取 ' + logStats.read + ' · 显示 ' + logStats.sent + ' · 过滤 ' + logStats.dropped;
+        if (stats) stats.textContent = logStatsText(visibleLines.length);
       }
 
       function consumeLogEvent(event) {
@@ -7971,10 +8045,10 @@
       async function startLiveLog() {
         var node = getNode(selectedLogNodeId);
         if (!node || !node.online || !selectedLogPath) return;
-        var include = document.getElementById('log-include').value;
-        var exclude = document.getElementById('log-exclude').value;
-        var caseSensitive = document.getElementById('log-case-sensitive').checked;
-        var tailLines = Number(document.getElementById('log-tail-lines').value || 200);
+        logInclude = document.getElementById('log-include').value;
+        logExclude = document.getElementById('log-exclude').value;
+        logCaseSensitive = document.getElementById('log-case-sensitive').checked;
+        logTailLines = Number(document.getElementById('log-tail-lines').value || 200);
         logLines = [];
         logStats = { read: 0, sent: 0, dropped: 0 };
         logPaused = false;
@@ -7995,11 +8069,11 @@
             body: {
               node_id: node.id,
               path: selectedLogPath,
-              include: include,
-              exclude: exclude,
-              case_sensitive: caseSensitive,
+              include: logInclude,
+              exclude: logExclude,
+              case_sensitive: logCaseSensitive,
               preset: logPreset,
-              tail_lines: tailLines
+              tail_lines: logTailLines
             }
           });
           render();
@@ -9621,8 +9695,9 @@
         else if (action === 'start-live-log') startLiveLog();
         else if (action === 'stop-live-log') stopLiveLog(true);
         else if (action === 'log-preset') {
-          if (activeLogSession) notify('过滤条件在会话启动时固定；请先停止当前会话');
-          else { logPreset = actionTarget.getAttribute('data-preset') || 'all'; render(); }
+          logPreset = actionTarget.getAttribute('data-preset') || 'all';
+          render();
+          if (activeLogSession) notify('当前窗口已立即筛选；Agent 侧条件将在重新连接后生效');
         }
         else if (action === 'toggle-log-pause') {
           logPaused = !logPaused;
@@ -9631,7 +9706,7 @@
         }
         else if (action === 'clear-live-log') {
           logLines = [];
-          updateLiveLogDisplay();
+          updateLiveLogDisplay(true);
         }
         else if (action === 'add-site') prepareSiteDialog();
         else if (action === 'add-node') openNodeDialog();

@@ -864,7 +864,9 @@ class AgentTestCase(unittest.TestCase):
         access_log.write_text(
             "192.0.2.1 GET /health 200\n"
             "192.0.2.2 GET /missing 404\n"
-            "192.0.2.3 GET /broken 500\n",
+            "192.0.2.3 GET /broken 500\n"
+            '{"request_method":"GET","status":"404","path":"/json-missing"}\n'
+            '{"request_method":"GET","status":"502","path":"/json-broken"}\n',
             encoding="utf-8",
         )
         (log_root / "ignored.txt").write_text("not a log", encoding="utf-8")
@@ -879,9 +881,11 @@ class AgentTestCase(unittest.TestCase):
             "include": "GET",
         })
         self.assertIn("/broken 500", first["content"])
+        self.assertIn('"status":"502"', first["content"])
         self.assertNotIn("/missing 404", first["content"])
-        self.assertEqual(1, first["sent_lines"])
-        self.assertEqual(2, first["dropped_lines"])
+        self.assertNotIn('"status":"404"', first["content"])
+        self.assertEqual(2, first["sent_lines"])
+        self.assertEqual(3, first["dropped_lines"])
 
         with access_log.open("a", encoding="utf-8") as handle:
             handle.write("192.0.2.4 GET /again 500\n")

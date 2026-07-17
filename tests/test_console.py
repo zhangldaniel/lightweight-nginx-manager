@@ -70,6 +70,12 @@ if (!html.includes("restoreRenderViewport(content, viewport)")
     || !html.includes("terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight <= 48")) {
   throw new Error("page, dialog, and live-log scroll positions are not preserved across UI updates");
 }
+if (!html.includes('窗口即时筛选')
+    || !html.includes('updateLiveLogDisplay(true)')
+    || !html.includes("logInclude = event.target.value")
+    || !html.includes("logExclude = event.target.value")) {
+  throw new Error("live-log controls do not immediately filter the current browser window");
+}
 if ((html.match(/'delete-config', 'delete-site-record'/g) || []).length < 2) {
   throw new Error("platform record deletion is not protected by both action and visibility permissions");
 }
@@ -91,6 +97,7 @@ eval(take("function certificateCoversDomain", "function getSite"));
 eval(take("function normalizeSiteDeploymentStates", "function loadState"));
 eval(take("function capturePendingRemoteState", "function relativeTime"));
 eval(take("function siteHasUnpublishedChanges", "function runStatus"));
+eval(take("function logLineHasHttpStatus", "function filteredLogLines"));
 eval(take("function normalizeProxyTarget", "function defaultConfig"));
 eval(take("function defaultConfig", "function configCertificateState"));
 eval(take("function rewriteConfigCertificatePaths", "function openConfigEditor"));
@@ -99,6 +106,21 @@ eval(take("function rememberProcessedOperation", "function stripNginxComments"))
 eval(take("function stripNginxComments", "function nginxStatements"));
 eval(take("function nginxStatements", "function importInventoryFile"));
 eval(take("function managedConfigContent", "async function startRemoteConfigRun"));
+
+const json404 = '{"status":"404","message":"not found"}';
+const json502 = '{"status":"502","message":"upstream failed"}';
+const access500 = '192.0.2.1 - - "GET / HTTP/1.1" 500 146';
+if (!logLineMatchesFilters("ordinary line", "all", "", "", false)
+    || !logLineMatchesFilters("ERROR upstream failed", "error", "", "", false)
+    || !logLineMatchesFilters(json404, "http4xx", "", "", false)
+    || logLineMatchesFilters(json404, "http5xx", "", "", false)
+    || !logLineMatchesFilters(json502, "http5xx", "", "", false)
+    || !logLineMatchesFilters(access500, "http5xx", "", "", false)
+    || !logLineMatchesFilters("WARN upstream retry", "warn", "UPSTREAM", "health", false)
+    || logLineMatchesFilters("WARN HEALTH retry", "warn", "UPSTREAM", "health", false)
+    || logLineMatchesFilters("warn upstream retry", "warn", "UPSTREAM", "", true)) {
+  throw new Error("live-log presets, include/exclude, or case sensitivity are not applied correctly");
+}
 
 const node = { id: "node-1", managedCertificateRoot: "/apps/nginx/cert" };
 const wrongWildcard = {
