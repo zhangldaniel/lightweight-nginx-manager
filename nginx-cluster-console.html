@@ -3819,14 +3819,68 @@
     }
 
     .certificate-card .cert-location {
-      grid-template-columns: minmax(82px, 104px) minmax(0, 1fr);
-      gap: 9px;
-      padding: 6px 0;
+      display: block;
+      padding: 10px;
+      border: 1px solid #dce9f4;
+      border-radius: 7px;
+      background: linear-gradient(135deg, #f3f9ff, #fff 58%);
+    }
+
+    .certificate-card .cert-location + .cert-location {
+      margin-top: 8px;
+      border-top: 1px solid #dce9f4;
+    }
+
+    .certificate-card .cert-location--offline {
+      border-color: #efd5d8;
+      background: linear-gradient(135deg, #fff5f6, #fff 58%);
+    }
+
+    .cert-node-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .cert-node-identity {
+      display: flex;
+      align-items: center;
+      gap: 7px;
     }
 
     .certificate-card .cert-location-node {
-      color: #3c4b5e;
+      display: inline-flex;
+      align-items: center;
+      min-height: 27px;
+      padding: 3px 9px;
+      border: 1px solid #c9e2f6;
+      border-radius: 999px;
+      background: #eaf5ff;
+      color: #1675b9;
       font-size: 12px;
+      font-weight: 650;
+    }
+
+    .certificate-card .cert-location--offline .cert-location-node {
+      border-color: #efcfd2;
+      background: #fff0f1;
+      color: #c7434d;
+    }
+
+    .cert-node-state {
+      color: #638174;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .cert-location--offline .cert-node-state {
+      color: #bf4a54;
+    }
+
+    .certificate-card .cert-location-files {
+      gap: 6px;
     }
 
     .certificate-card .cert-location-path {
@@ -3952,6 +4006,222 @@
     .path-copy-button:focus-visible {
       background: #e7f3ff;
       color: #087edb;
+    }
+
+    .smart-select-native {
+      position: absolute !important;
+      width: 1px !important;
+      height: 1px !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+      border: 0 !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+
+    .smart-select {
+      position: relative;
+      min-width: 0;
+    }
+
+    .toolbar .smart-select {
+      width: 190px;
+      flex: none;
+    }
+
+    .toolbar .smart-select[data-smart-for="site-node-filter"] {
+      width: 220px;
+    }
+
+    .smart-select-trigger {
+      width: 100%;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 7px 38px 7px 11px;
+      border: 1px solid #d6dee8;
+      border-radius: 7px;
+      background: #fff;
+      color: #263447;
+      text-align: left;
+      cursor: pointer;
+      box-shadow: 0 1px 2px rgba(31, 49, 73, .025);
+      transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+    }
+
+    .smart-select-trigger::after {
+      position: absolute;
+      right: 13px;
+      top: 50%;
+      width: 7px;
+      height: 7px;
+      border-right: 1.5px solid #718094;
+      border-bottom: 1.5px solid #718094;
+      content: "";
+      transform: translateY(-70%) rotate(45deg);
+      transition: transform .15s ease;
+    }
+
+    .smart-select.open .smart-select-trigger {
+      border-color: #63b5f4;
+      background: #fbfdff;
+      box-shadow: 0 0 0 3px rgba(22, 137, 245, .1);
+    }
+
+    .smart-select.open .smart-select-trigger::after {
+      transform: translateY(-25%) rotate(225deg);
+    }
+
+    .smart-select-value {
+      min-width: 0;
+      display: grid;
+      gap: 1px;
+      flex: 1;
+    }
+
+    .smart-select-value strong {
+      overflow: hidden;
+      color: #253247;
+      font-size: 13px;
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .smart-select-value small {
+      overflow: hidden;
+      color: #788697;
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .smart-select-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #8592a3;
+      box-shadow: 0 0 0 3px rgba(133, 146, 163, .1);
+      flex: none;
+    }
+
+    .smart-select-dot.green {
+      background: #18a179;
+      box-shadow: 0 0 0 3px rgba(24, 161, 121, .11);
+    }
+
+    .smart-select-dot.blue {
+      background: #1689f5;
+      box-shadow: 0 0 0 3px rgba(22, 137, 245, .1);
+    }
+
+    .smart-select-dot.amber {
+      background: #d89421;
+      box-shadow: 0 0 0 3px rgba(216, 148, 33, .11);
+    }
+
+    .smart-select-dot.red {
+      background: #e3535d;
+      box-shadow: 0 0 0 3px rgba(227, 83, 93, .1);
+    }
+
+    .smart-select-menu {
+      position: absolute;
+      z-index: 90;
+      top: calc(100% + 7px);
+      left: 0;
+      width: max(100%, 290px);
+      max-height: 330px;
+      padding: 6px;
+      overflow: auto;
+      border: 1px solid #d8e0e9;
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 16px 38px rgba(24, 42, 66, .16);
+    }
+
+    .smart-select[data-smart-for="config-certificate"] .smart-select-menu {
+      width: min(560px, calc(100vw - 56px));
+    }
+
+    .smart-select-option {
+      width: 100%;
+      min-height: 48px;
+      display: grid;
+      grid-template-columns: 10px minmax(0, 1fr) 22px;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 9px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: #314056;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .smart-select-option:hover,
+    .smart-select-option:focus-visible {
+      background: #f1f7fd;
+      outline: none;
+    }
+
+    .smart-select-option[aria-selected="true"] {
+      background: #eaf5ff;
+      color: #087edb;
+    }
+
+    .smart-select-option[aria-disabled="true"] {
+      cursor: not-allowed;
+      opacity: .5;
+    }
+
+    .smart-select-option-copy {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+    }
+
+    .smart-select-option-copy strong {
+      overflow: hidden;
+      font-size: 13px;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .smart-select-option-copy small {
+      overflow: hidden;
+      color: #758396;
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .smart-select-check {
+      color: #1689f5;
+      font-size: 15px;
+      font-weight: 800;
+      opacity: 0;
+      text-align: center;
+    }
+
+    .smart-select-option[aria-selected="true"] .smart-select-check {
+      opacity: 1;
+    }
+
+    @media (max-width: 760px) {
+      .toolbar .smart-select,
+      .toolbar .smart-select[data-smart-for="site-node-filter"] {
+        width: 100%;
+      }
+
+      .smart-select-menu,
+      .smart-select[data-smart-for="config-certificate"] .smart-select-menu {
+        width: 100%;
+      }
     }
 
     @keyframes button-busy-spin {
@@ -6687,7 +6957,18 @@
             var node = getNode(nodeId);
             if (!node) return '';
             var paths = certificateTargetPaths(cert, node);
-            return '<div class="cert-location"><span class="cert-location-node" title="' + escapeHtml(node.name) + '">' + escapeHtml(node.name) + '</span><div class="cert-location-files"><div class="cert-location-path" title="' + escapeHtml(paths.certificatePath) + '"><span>证书</span><code>' + escapeHtml(paths.certificatePath) + '</code><button class="path-copy-button" type="button" data-copy-text="' + escapeHtml(paths.certificatePath) + '" data-copy-label="证书路径" aria-label="复制证书路径" title="复制路径">复制</button></div><div class="cert-location-path" title="' + escapeHtml(paths.keyPath) + '"><span>私钥</span><code>' + escapeHtml(paths.keyPath) + '</code><button class="path-copy-button" type="button" data-copy-text="' + escapeHtml(paths.keyPath) + '" data-copy-label="私钥路径" aria-label="复制私钥路径" title="复制路径">复制</button></div></div></div>';
+            return [
+              '<div class="cert-location ' + (node.online ? '' : 'cert-location--offline') + '">',
+              '  <div class="cert-node-header">',
+              '    <span class="cert-node-identity"><span class="status-dot ' + (node.online ? '' : 'offline') + '" aria-hidden="true"></span><span class="cert-location-node" title="' + escapeHtml(node.name) + '">' + escapeHtml(node.name) + '</span></span>',
+              '    <span class="cert-node-state">' + (node.online ? '在线节点' : '节点离线') + '</span>',
+              '  </div>',
+              '  <div class="cert-location-files">',
+              '    <div class="cert-location-path" title="' + escapeHtml(paths.certificatePath) + '"><span>证书</span><code>' + escapeHtml(paths.certificatePath) + '</code><button class="path-copy-button" type="button" data-copy-text="' + escapeHtml(paths.certificatePath) + '" data-copy-label="证书路径" aria-label="复制证书路径" title="复制路径">复制</button></div>',
+              '    <div class="cert-location-path" title="' + escapeHtml(paths.keyPath) + '"><span>私钥</span><code>' + escapeHtml(paths.keyPath) + '</code><button class="path-copy-button" type="button" data-copy-text="' + escapeHtml(paths.keyPath) + '" data-copy-label="私钥路径" aria-label="复制私钥路径" title="复制路径">复制</button></div>',
+              '  </div>',
+              '</div>'
+            ].join('');
           }).filter(Boolean).join('');
           return [
             '<article class="certificate-card ' + cardClass + '">',
@@ -6814,6 +7095,182 @@
         applyRolePermissions();
         updateSessionBadge();
         bindViewControls();
+        enhanceSmartSelects(content);
+      }
+
+      function smartSelectMeta(select, option) {
+        var value = option ? option.value : '';
+        var title = option ? option.textContent.trim() : '';
+        var subtitle = '';
+        var tone = 'blue';
+        if (select.id === 'site-node-filter') {
+          if (value === 'all') {
+            title = '全部站点记录';
+            subtitle = state.sites.length + ' 条配置';
+          } else {
+            var node = getNode(value);
+            var nodeSiteCount = state.sites.filter(function (site) { return (site.nodeIds || []).includes(value); }).length;
+            title = node ? node.name : title;
+            subtitle = nodeSiteCount + ' 个站点 · ' + (node && node.online ? '在线' : '离线');
+            tone = node && node.online ? 'green' : 'red';
+          }
+        } else if (select.id === 'site-status-filter') {
+          var counts = {
+            all: state.sites.length,
+            published: state.sites.filter(function (site) { return site.status === 'published'; }).length,
+            draft: state.sites.filter(function (site) { return site.status === 'draft'; }).length,
+            unassigned: state.sites.filter(function (site) { return site.status === 'unassigned'; }).length,
+            attention: state.sites.filter(function (site) { return site.status === 'drift' || site.status === 'failed' || hasValidationFailure(site); }).length
+          };
+          title = { all: '全部状态', published: '已发布', draft: '有草稿', unassigned: '未部署', attention: '漂移 / 失败' }[value] || title;
+          subtitle = (counts[value] || 0) + ' 条记录';
+          tone = { all: 'blue', published: 'green', draft: 'amber', unassigned: 'blue', attention: 'red' }[value] || 'blue';
+        } else if (select.id === 'config-certificate') {
+          if (!value) {
+            title = '暂不绑定';
+            subtitle = '保留 Conf 内现有路径';
+            tone = 'blue';
+          } else {
+            var cert = getCert(value);
+            var site = getSite(editingSiteId);
+            title = cert ? cert.domain : title;
+            if (cert && site) {
+              var certState = configCertificateState(cert, site);
+              subtitle = '剩余 ' + certificateDays(cert) + ' 天 · ' + (certState.available
+                ? '域名和节点均匹配'
+                : (!certState.coversDomain ? '不覆盖当前域名' : (cert.pendingRemote ? '仍在部署中' : '部分节点缺少')));
+              tone = certState.available ? 'green' : (certState.coversDomain ? 'amber' : 'red');
+            }
+          }
+        }
+        return { title: title, subtitle: subtitle, tone: tone };
+      }
+
+      function closeSmartSelects(except) {
+        document.querySelectorAll('.smart-select.open').forEach(function (wrapper) {
+          if (wrapper === except) return;
+          wrapper.classList.remove('open');
+          var trigger = wrapper.querySelector('.smart-select-trigger');
+          var menu = wrapper.querySelector('.smart-select-menu');
+          if (trigger) trigger.setAttribute('aria-expanded', 'false');
+          if (menu) menu.hidden = true;
+        });
+      }
+
+      function syncSmartSelect(select) {
+        var wrapper = select && select.parentNode ? select.parentNode.querySelector('.smart-select[data-smart-for="' + select.id + '"]') : null;
+        if (!wrapper) return;
+        var selected = select.options[select.selectedIndex] || select.options[0];
+        var meta = smartSelectMeta(select, selected);
+        var trigger = wrapper.querySelector('.smart-select-trigger');
+        if (trigger) {
+          trigger.innerHTML = '<span class="smart-select-dot ' + meta.tone + '" aria-hidden="true"></span><span class="smart-select-value"><strong>' + escapeHtml(meta.title) + '</strong><small>' + escapeHtml(meta.subtitle) + '</small></span>';
+          trigger.setAttribute('aria-label', (select.getAttribute('aria-label') || '选择项') + '：' + meta.title);
+        }
+        wrapper.querySelectorAll('.smart-select-option').forEach(function (button) {
+          button.setAttribute('aria-selected', button.getAttribute('data-value') === select.value ? 'true' : 'false');
+        });
+      }
+
+      function enhanceSmartSelect(select) {
+        if (!select || !select.id) return;
+        var existing = select.parentNode.querySelector('.smart-select[data-smart-for="' + select.id + '"]');
+        if (existing) existing.remove();
+        select.classList.add('smart-select-native');
+        var wrapper = document.createElement('div');
+        wrapper.className = 'smart-select';
+        wrapper.setAttribute('data-smart-for', select.id);
+        var menuId = select.id + '-smart-menu';
+        wrapper.innerHTML = [
+          '<button class="smart-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="' + menuId + '"></button>',
+          '<div class="smart-select-menu" id="' + menuId + '" role="listbox" hidden></div>'
+        ].join('');
+        select.insertAdjacentElement('afterend', wrapper);
+        var trigger = wrapper.querySelector('.smart-select-trigger');
+        var menu = wrapper.querySelector('.smart-select-menu');
+        Array.from(select.options).forEach(function (option) {
+          var meta = smartSelectMeta(select, option);
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'smart-select-option';
+          button.setAttribute('role', 'option');
+          button.setAttribute('data-value', option.value);
+          button.setAttribute('aria-selected', option.value === select.value ? 'true' : 'false');
+          button.setAttribute('aria-disabled', option.disabled ? 'true' : 'false');
+          button.innerHTML = '<span class="smart-select-dot ' + meta.tone + '" aria-hidden="true"></span><span class="smart-select-option-copy"><strong>' + escapeHtml(meta.title) + '</strong><small>' + escapeHtml(meta.subtitle) + '</small></span><span class="smart-select-check" aria-hidden="true">✓</span>';
+          menu.appendChild(button);
+        });
+
+        function enabledOptions() {
+          return Array.from(menu.querySelectorAll('.smart-select-option[aria-disabled="false"]'));
+        }
+
+        function openSmartSelect(focusSelected) {
+          closeSmartSelects(wrapper);
+          wrapper.classList.add('open');
+          trigger.setAttribute('aria-expanded', 'true');
+          menu.hidden = false;
+          if (focusSelected) {
+            var selectedButton = menu.querySelector('.smart-select-option[aria-selected="true"]') || enabledOptions()[0];
+            if (selectedButton) selectedButton.focus();
+          }
+        }
+
+        function closeSmartSelect(restoreFocus) {
+          wrapper.classList.remove('open');
+          trigger.setAttribute('aria-expanded', 'false');
+          menu.hidden = true;
+          if (restoreFocus) trigger.focus();
+        }
+
+        trigger.addEventListener('click', function (event) {
+          event.stopPropagation();
+          if (wrapper.classList.contains('open')) closeSmartSelect(false);
+          else openSmartSelect(false);
+        });
+        trigger.addEventListener('keydown', function (event) {
+          if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) {
+            event.preventDefault();
+            openSmartSelect(true);
+          } else if (event.key === 'Escape') {
+            closeSmartSelect(false);
+          }
+        });
+        menu.addEventListener('click', function (event) {
+          event.stopPropagation();
+          var optionButton = event.target.closest('.smart-select-option');
+          if (!optionButton || optionButton.getAttribute('aria-disabled') === 'true') return;
+          select.value = optionButton.getAttribute('data-value');
+          syncSmartSelect(select);
+          closeSmartSelect(true);
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        menu.addEventListener('keydown', function (event) {
+          var options = enabledOptions();
+          var currentIndex = options.indexOf(document.activeElement);
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            closeSmartSelect(true);
+          } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+            event.preventDefault();
+            var nextIndex = event.key === 'Home' ? 0 : (event.key === 'End' ? options.length - 1 : currentIndex + (event.key === 'ArrowDown' ? 1 : -1));
+            if (nextIndex < 0) nextIndex = options.length - 1;
+            if (nextIndex >= options.length) nextIndex = 0;
+            if (options[nextIndex]) options[nextIndex].focus();
+          } else if ((event.key === 'Enter' || event.key === ' ') && document.activeElement.classList.contains('smart-select-option')) {
+            event.preventDefault();
+            document.activeElement.click();
+          }
+        });
+        select.onfocus = function () { trigger.focus(); };
+        syncSmartSelect(select);
+      }
+
+      function enhanceSmartSelects(root) {
+        ['site-node-filter', 'site-status-filter', 'config-certificate'].forEach(function (id) {
+          var select = (root && root.querySelector ? root.querySelector('#' + id) : null) || document.getElementById(id);
+          if (select) enhanceSmartSelect(select);
+        });
       }
 
       function bindViewControls() {
@@ -7136,6 +7593,7 @@
         select.dataset.original = currentId;
         select.dataset.current = currentId;
         updateConfigCertificateHelp(site);
+        enhanceSmartSelect(select);
       }
 
       function updateConfigCertificateHelp(site) {
@@ -8195,6 +8653,7 @@
       }, true);
 
       document.addEventListener('click', function (event) {
+        closeSmartSelects();
         var nav = event.target.closest('[data-nav]');
         if (nav) {
           switchView(nav.getAttribute('data-nav'));
@@ -8515,6 +8974,7 @@
         event.target.dataset.current = event.target.value;
         updateConfigCertificateHelp(site);
         updateDiffBadge();
+        syncSmartSelect(event.target);
       });
 
       document.getElementById('site-node-checks').addEventListener('change', function (event) {

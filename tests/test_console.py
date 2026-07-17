@@ -29,6 +29,17 @@ if (!html.includes('data-copy-label="证书路径"')
     || !html.includes("runWithBusyButton(actionTarget")) {
   throw new Error("readable path-copy and button-busy interactions are missing");
 }
+if (!html.includes('class="cert-node-header"')
+    || !html.includes('cert-location--offline')
+    || !html.includes("node.online ? '在线节点' : '节点离线'")) {
+  throw new Error("certificate paths are not visibly grouped by node and online state");
+}
+if (!html.includes('class="smart-select-menu"')
+    || !html.includes('role="listbox"')
+    || !html.includes("['ArrowDown', 'ArrowUp', 'Enter', ' ']")
+    || !html.includes("['site-node-filter', 'site-status-filter', 'config-certificate']")) {
+  throw new Error("the high-frequency filters are missing the accessible smart-select interaction");
+}
 if ((html.match(/'delete-config', 'delete-site-record'/g) || []).length < 2) {
   throw new Error("platform record deletion is not protected by both action and visibility permissions");
 }
