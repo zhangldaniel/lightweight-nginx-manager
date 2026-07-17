@@ -25,6 +25,10 @@ if (!html.includes('class="certificate-grid"')
     || !html.includes('summary-card--certificates')) {
   throw new Error("node and certificate risk cards are missing from the operations dashboard theme");
 }
+if (!html.includes('data-copy-label="证书路径"')
+    || !html.includes("runWithBusyButton(actionTarget")) {
+  throw new Error("readable path-copy and button-busy interactions are missing");
+}
 if ((html.match(/'delete-config', 'delete-site-record'/g) || []).length < 2) {
   throw new Error("platform record deletion is not protected by both action and visibility permissions");
 }
