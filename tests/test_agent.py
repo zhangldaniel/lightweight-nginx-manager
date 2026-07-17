@@ -60,6 +60,25 @@ class AgentTestCase(unittest.TestCase):
     def job(self, job_id, action, payload):
         return {"id": job_id, "action": action, "payload": payload, "expires_at": "2099-01-01T00:00:00Z"}
 
+    def test_result_outbox_survives_restart_until_acknowledged(self):
+        path = self.state / "result-outbox.json"
+        outbox = agent.ResultOutbox(path)
+        outbox.put("job-outbox", {"status": "succeeded", "job_id": "job-outbox"})
+        restored = agent.ResultOutbox(path)
+        self.assertEqual("job-outbox", restored.pending()[0]["job_id"])
+        restored.acknowledge("job-outbox")
+        self.assertEqual([], agent.ResultOutbox(path).pending())
+
+    def test_rejected_result_is_kept_in_dead_letter_ledger(self):
+        path = self.state / "result-outbox.json"
+        outbox = agent.ResultOutbox(path)
+        outbox.put("job-rejected", {"status": "succeeded", "job_id": "job-rejected"})
+        outbox.reject("job-rejected", "control plane rejected result with HTTP 409")
+        self.assertEqual([], agent.ResultOutbox(path).pending())
+        rejected = json.loads((self.state / "result-outbox-rejected.json").read_text(encoding="utf-8"))
+        self.assertEqual("job-rejected", rejected["job-rejected"]["job_id"])
+        self.assertIn("HTTP 409", rejected["job-rejected"]["reason"])
+
     def test_config_apply_is_atomic_and_idempotent(self):
         target = self.config_root / "site.conf"
         old = b"server { listen 80; }\n"
@@ -709,10 +728,17 @@ class AgentTestCase(unittest.TestCase):
         self.assertEqual(hashlib.sha256(private_key.encode()).hexdigest(), server_result["details"]["key_material_sha256"])
         if os.name == "posix":
             self.assertEqual(0o600, key_path.stat().st_mode & 0o777)
-
         read_key = self.executor.execute(self.job("job-read-key", "config_read", {"path": str(key_path)}))
         self.assertEqual("failed", read_key["status"])
         self.assertIn("managed configuration paths", read_key["error"])
+
+    def test_certificate_wildcard_matches_exactly_one_dns_label(self):
+        matches = self.executor._certificate_domain_matches
+        self.assertTrue(matches("*.example.test", "api.example.test"))
+        self.assertTrue(matches("API.EXAMPLE.TEST.", "api.example.test"))
+        self.assertFalse(matches("*.example.test", "deep.api.example.test"))
+        self.assertFalse(matches("*.example.test", "example.test"))
+        self.assertFalse(matches("*.other.test", "api.example.test"))
 
     def test_result_mapping_matches_control_plane_schema(self):
         local = {
@@ -1082,6 +1108,11 @@ class AgentTestCase(unittest.TestCase):
         self.assertIn("is not loaded by nginx", installer)
         self.assertIn('if [[ -e "${MANAGED_CONFIG_DIR}" ]]', installer)
         self.assertIn('if [[ -e "${MANAGED_CERT_DIR}" ]]', installer)
+        self.assertIn('harden_managed_path_chain "${MANAGED_CONFIG_DIR}"', installer)
+        self.assertIn('harden_managed_path_chain "${MANAGED_CERT_DIR}"', installer)
+        bootstrap = (AGENT_DIR.parent / "install-agent.sh").read_text(encoding="utf-8")
+        self.assertIn("NGINX_MANAGER_REQUIRE_PINNED_REF", bootstrap)
+        self.assertIn("NGINX_MANAGER_ARCHIVE_SHA256", bootstrap)
 
     def test_privileged_units_allow_custom_nginx_test_to_bind_low_ports(self):
         root = AGENT_DIR.parent

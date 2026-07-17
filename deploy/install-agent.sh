@@ -395,6 +395,12 @@ prepare_managed_directories() {
     install -d -m 0700 -o root -g root "${MANAGED_CERT_DIR}"
   fi
 
+  # The privileged helper validates paths before using them.  Root-owned,
+  # non-writable directory chains prevent a local nginx/Agent account from
+  # swapping an allowed parent for a symlink between validation and replace.
+  harden_managed_path_chain "${MANAGED_CONFIG_DIR}"
+  harden_managed_path_chain "${MANAGED_CERT_DIR}"
+
   if [[ "${MANAGED_CONFIG_ALREADY_INCLUDED}" == "1" ]]; then
     [[ -z "${MANAGED_INCLUDE_FILE}" ]] || die "--managed-config-already-included 不能与 --managed-include-file 同时使用"
     probe="$(mktemp "${MANAGED_CONFIG_DIR}/zz-nginx-manager-probe.XXXXXX.conf")"
@@ -443,6 +449,33 @@ prepare_managed_directories() {
     [[ "${created}" != "1" ]] || rm -f -- "${MANAGED_INCLUDE_FILE}"
     die "${MANAGED_INCLUDE_FILE} is not loaded by nginx; verify the conf.d include rule"
   fi
+}
+
+harden_managed_path_chain() {
+  local target current resolved_root owner mode
+  target="$1"
+  resolved_root="$(readlink -f -- "${NGINX_ROOT}")"
+  current="$(readlink -f -- "${target}")"
+  while [[ "${current}" == "${resolved_root}" || "${current}" == "${resolved_root}/"* ]]; do
+    [[ -d "${current}" && ! -L "${current}" ]] || die "托管路径链包含非目录或符号链接：${current}"
+    owner="$(stat -c '%u' -- "${current}")"
+    mode="$(stat -c '%a' -- "${current}")"
+    if [[ "${owner}" != "0" ]]; then
+      log "加固托管路径所有者：${current}（原 UID ${owner}）"
+      chown root:root -- "${current}"
+    fi
+    chmod go-w -- "${current}"
+    [[ "${current}" != "${resolved_root}" ]] || break
+    current="$(dirname -- "${current}")"
+  done
+  current="$(dirname -- "${resolved_root}")"
+  while [[ "${current}" != "/" ]]; do
+    owner="$(stat -c '%u' -- "${current}")"
+    mode="$(stat -c '%a' -- "${current}")"
+    [[ "${owner}" == "0" ]] || die "Nginx 根目录的上级路径不是 root 所有：${current}"
+    (( (8#${mode} & 0022) == 0 )) || die "Nginx 根目录的上级路径可被组或其他用户写入：${current}"
+    current="$(dirname -- "${current}")"
+  done
 }
 
 recover_existing_transactions() {

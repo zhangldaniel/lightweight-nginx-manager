@@ -3,6 +3,7 @@ import json
 import secrets
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from dataclasses import replace
@@ -15,6 +16,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1] / "server"
 sys.path.insert(0, str(SERVER_DIR))
 
 from app import (  # noqa: E402
+    LDAPAuthenticationError,
     LDAPUnavailableError,
     LoginRequest,
     Settings,
@@ -253,6 +255,62 @@ class ServerTestCase(unittest.TestCase):
             self.assertEqual(local_login.status_code, 200, local_login.text)
             self.assertEqual(local_login.json()["auth_source"], "local")
 
+    def test_ldap_session_role_is_rechecked_and_revoked(self):
+        ldap_settings = replace(
+            self.settings,
+            ldap_enabled=True,
+            ldap_url="ldap://directory.example.test:389",
+            ldap_base_dn="dc=example,dc=test",
+            ldap_bind_dn="cn=nginx-manager,ou=service,dc=example,dc=test",
+            ldap_bind_password_file=str(Path(self.tempdir.name).resolve() / "ldap-password"),
+            ldap_session_recheck_seconds=60,
+        )
+        current = {"role": "operator", "revoked": False}
+
+        def authenticate(_settings, username, _password):
+            return {
+                "principal_id": "ldap:" + username,
+                "username": username,
+                "role": "operator",
+                "auth_source": "ldap",
+            }
+
+        def check_role(_settings, username):
+            if current["revoked"]:
+                raise LDAPAuthenticationError("group membership removed")
+            return {
+                "principal_id": "ldap:" + username,
+                "username": username,
+                "role": current["role"],
+                "auth_source": "ldap",
+            }
+
+        app = create_app(
+            ldap_settings,
+            ldap_authenticator=authenticate,
+            ldap_role_checker=check_role,
+        )
+        with TestClient(app, base_url="https://testserver") as ldap_client:
+            login = ldap_client.post(
+                "/api/v1/auth/login", json={"username": "ops", "password": "directory-password"}
+            )
+            self.assertEqual(200, login.status_code, login.text)
+            current["role"] = "auditor"
+            with app.state.database.transaction() as connection:
+                connection.execute("UPDATE web_sessions SET role_checked_at = 0")
+            self.assertEqual(200, ldap_client.get("/api/v1/admin/nodes").status_code)
+            denied = ldap_client.put(
+                "/api/v1/admin/ui-state",
+                headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                json={"revision": 0, "state": {}},
+            )
+            self.assertEqual(403, denied.status_code)
+            current["revoked"] = True
+            with app.state.database.transaction() as connection:
+                connection.execute("UPDATE web_sessions SET role_checked_at = 0")
+            self.assertEqual(401, ldap_client.get("/api/v1/admin/nodes").status_code)
+            self.assertEqual(401, ldap_client.get("/api/v1/admin/nodes").status_code)
+
     def test_ldap_accepts_upn_and_matches_group_dn_case_insensitively(self):
         login = LoginRequest(username="alice@example.test", password="directory-password")
         self.assertEqual(login.username, "alice@example.test")
@@ -383,6 +441,179 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(jobs[0]["result"]["previous_config_hash"], "b" * 64)
         self.assertNotIn("output", jobs[0]["result"])
         self.assertIn("output_sha256", jobs[0]["result"])
+
+    def test_expired_lease_redelivers_same_job_and_accepts_late_result(self):
+        enrolled = self.enroll("lease-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [enrolled["agent_id"]],
+                "action": "nginx_test",
+                "payload": {"probe": "lease"},
+                "ttl_seconds": 60,
+            },
+        ).json()["jobs"][0]
+        first = self.client.post("/api/v1/agent/poll", headers=agent_headers, json={}).json()["jobs"][0]
+        self.assertEqual(created["id"], first["id"])
+        with self.client.app.state.database.transaction() as connection:
+            connection.execute(
+                "UPDATE jobs SET lease_expires_at = 0 WHERE id = ?", (created["id"],)
+            )
+        second = self.client.post("/api/v1/agent/poll", headers=agent_headers, json={}).json()["jobs"][0]
+        self.assertEqual(created["id"], second["id"])
+        with self.client.app.state.database.transaction() as connection:
+            connection.execute(
+                "UPDATE jobs SET expires_at = ? WHERE id = ?", (int(time.time()) - 1, created["id"])
+            )
+        late = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(created["id"]),
+            headers=agent_headers,
+            json={"status": "succeeded", "job_id": created["id"], "action": "nginx_test"},
+        )
+        self.assertEqual(200, late.status_code, late.text)
+        self.assertEqual("succeeded", late.json()["status"])
+        jobs = self.client.get(
+            "/api/v1/admin/jobs?ids=" + created["id"], headers=self.admin_headers
+        ).json()["items"]
+        self.assertEqual(2, jobs[0]["attempt_count"])
+        self.assertEqual("succeeded", jobs[0]["status"])
+
+    def test_active_job_heartbeat_renews_only_its_lease(self):
+        enrolled = self.enroll("lease-renew-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "action": "nginx_test", "payload": {}},
+        ).json()["jobs"][0]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        with self.client.app.state.database.transaction() as connection:
+            connection.execute("UPDATE jobs SET lease_expires_at = 1 WHERE id = ?", (created["id"],))
+        renewed = self.client.post(
+            "/api/v1/agent/heartbeat",
+            headers=agent_headers,
+            json={"status": "online", "active_job_id": created["id"]},
+        )
+        self.assertEqual(200, renewed.status_code, renewed.text)
+        self.assertTrue(renewed.json()["job_lease_renewed"])
+        with self.client.app.state.database.connection() as connection:
+            lease = connection.execute(
+                "SELECT lease_expires_at FROM jobs WHERE id = ?", (created["id"],)
+            ).fetchone()[0]
+        self.assertGreater(lease, int(time.time()))
+
+    def test_atomic_operation_publishes_immutable_revision(self):
+        enrolled = self.enroll("operation-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        request_id = "operation-test-0001"
+        body = {
+            "request_id": request_id,
+            "site_id": "site-test-1",
+            "kind": "publish",
+            "base_version": 0,
+            "candidate": {
+                "id": "site-test-1",
+                "domain": "example.test",
+                "config": "server { listen 8080; }\n",
+                "changeNote": "initial publish",
+            },
+            "jobs": [
+                {
+                    "node_id": enrolled["agent_id"],
+                    "action": "config_apply",
+                    "payload": {
+                        "path": "/etc/nginx/nginx-manager.d/example.test.conf",
+                        "content": "server { listen 8080; }\n",
+                        "expected_sha256": "missing",
+                    },
+                }
+            ],
+            "ttl_seconds": 60,
+        }
+        created = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=body
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        repeated = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=body
+        )
+        self.assertTrue(repeated.json()["idempotent"])
+        job_id = created.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        result = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": job_id,
+                "action": "config_apply",
+                "details": {"config_hash": "a" * 64, "path": "/etc/nginx/nginx-manager.d/example.test.conf"},
+            },
+        )
+        self.assertEqual(200, result.status_code, result.text)
+        operation = self.client.get(
+            "/api/v1/admin/operations/" + request_id, headers=self.admin_headers
+        ).json()
+        self.assertEqual("succeeded", operation["operation"]["status"])
+        self.assertEqual("admin", operation["jobs"][0]["created_by"])
+        revision = self.client.get(
+            "/api/v1/admin/sites/site-test-1/revisions/1", headers=self.admin_headers
+        )
+        self.assertEqual(200, revision.status_code, revision.text)
+        self.assertEqual("server { listen 8080; }\n", revision.json()["snapshot"]["config"])
+
+    def test_failed_publish_does_not_consume_the_candidate_version(self):
+        enrolled = self.enroll("failed-publish-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        body = {
+            "request_id": "operation-failure-0001",
+            "site_id": "site-failed-publish",
+            "kind": "publish",
+            "base_version": 0,
+            "candidate": {"id": "site-failed-publish", "config": "server { listen 80; }"},
+            "jobs": [{
+                "node_id": enrolled["agent_id"],
+                "action": "config_apply",
+                "payload": {"path": "/etc/nginx/site.conf", "content": "server { listen 80; }"},
+            }],
+        }
+        created = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=body
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        job_id = created.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        failed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={"status": "failed", "job_id": job_id, "action": "config_apply"},
+        )
+        self.assertEqual(200, failed.status_code, failed.text)
+        revisions = self.client.get(
+            "/api/v1/admin/sites/site-failed-publish/revisions", headers=self.admin_headers
+        ).json()["items"]
+        self.assertEqual([], revisions)
+        body["request_id"] = "operation-failure-0002"
+        retry = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=body
+        )
+        self.assertEqual(201, retry.status_code, retry.text)
+        self.assertEqual(1, retry.json()["operation"]["base_version"] + 1)
+
+    def test_admin_can_revoke_agent_credential(self):
+        enrolled = self.enroll("revoked-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        revoked = self.client.post(
+            "/api/v1/admin/nodes/{}/revoke".format(enrolled["agent_id"]),
+            headers=self.admin_headers,
+        )
+        self.assertEqual(200, revoked.status_code, revoked.text)
+        self.assertEqual(
+            401,
+            self.client.post("/api/v1/agent/poll", headers=agent_headers, json={}).status_code,
+        )
 
     def test_failed_jobs_expose_only_safe_failure_metadata(self):
         enrolled = self.enroll()
@@ -644,7 +875,7 @@ class ServerTestCase(unittest.TestCase):
         self.assertNotIn("PRIVATE KEY", json.dumps(inventory))
         self.assertNotIn("rejected.pem", json.dumps(inventory))
 
-    def test_certificate_payload_is_redacted_after_claim(self):
+    def test_certificate_payload_is_retained_for_lease_retry_then_redacted(self):
         enrolled = self.enroll()
         agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
         private_key = "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----"
@@ -666,8 +897,19 @@ class ServerTestCase(unittest.TestCase):
             row = connection.execute(
                 "SELECT payload_json, expires_at, created_at FROM jobs WHERE id = ?", (job_id,)
             ).fetchone()
-        self.assertNotIn("PRIVATE KEY", row["payload_json"])
+        self.assertIn("PRIVATE KEY", row["payload_json"])
         self.assertLessEqual(row["expires_at"] - row["created_at"], 900)
+        completed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={"status": "failed", "job_id": job_id, "action": "certificate_apply"},
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+        with self.client.app.state.database.connection() as connection:
+            redacted = connection.execute(
+                "SELECT payload_json FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()["payload_json"]
+        self.assertNotIn("PRIVATE KEY", redacted)
 
     def test_config_delete_is_a_fixed_action_with_safe_result_metadata(self):
         enrolled = self.enroll()
@@ -736,6 +978,32 @@ class ServerTestCase(unittest.TestCase):
         )
         self.assertEqual(rejected.status_code, 400)
 
+    def test_ui_resources_are_split_from_the_compact_state_document(self):
+        document = {
+            "sites": [{"id": "site-a", "domain": "a.example.test", "config": "server {}"}],
+            "certificates": [{"id": "cert-a", "domain": "*.example.test", "issuer": "Test CA"}],
+            "runs": [{"id": "run-a"}],
+        }
+        saved = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={"revision": 0, "state": document},
+        )
+        self.assertEqual(200, saved.status_code, saved.text)
+        loaded = self.client.get("/api/v1/admin/ui-state", headers=self.admin_headers).json()
+        self.assertEqual("a.example.test", loaded["state"]["sites"][0]["domain"])
+        self.assertEqual("*.example.test", loaded["state"]["certificates"][0]["domain"])
+        with self.client.app.state.database.connection() as connection:
+            compact = connection.execute(
+                "SELECT state_json FROM ui_state WHERE singleton_id = 1"
+            ).fetchone()[0]
+            resources = connection.execute(
+                "SELECT kind, id FROM resources ORDER BY kind, id"
+            ).fetchall()
+        self.assertNotIn("a.example.test", compact)
+        self.assertNotIn("*.example.test", compact)
+        self.assertEqual([("certificate", "cert-a"), ("site", "site-a")], [tuple(row) for row in resources])
+
     def test_installer_uses_password_bootstrap_and_relocatable_uvicorn(self):
         installer = (Path(__file__).resolve().parents[1] / "deploy" / "install-server.sh").read_text(
             encoding="utf-8"
@@ -762,6 +1030,13 @@ class ServerTestCase(unittest.TestCase):
         self.assertIn('systemctl is-enabled --quiet "${APP_NAME}.service" 2>/dev/null', installer)
         self.assertIn('chown -R root:"${APP_GROUP}" "${STAGING_DIR}"', installer)
         self.assertIn('runuser -u "${APP_USER}" -- "${NEW_RELEASE}/venv/bin/python"', installer)
+        self.assertIn("prune_old_releases", installer)
+        self.assertIn("NGINX_MANAGER_RELEASE_RETENTION", installer)
+        bootstrap = (Path(__file__).resolve().parents[1] / "install-server.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("NGINX_MANAGER_REQUIRE_PINNED_REF", bootstrap)
+        self.assertIn("NGINX_MANAGER_ARCHIVE_SHA256", bootstrap)
         requirements = (Path(__file__).resolve().parents[1] / "server" / "requirements.txt").read_text(
             encoding="utf-8"
         )

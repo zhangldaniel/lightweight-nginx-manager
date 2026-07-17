@@ -69,7 +69,7 @@ sudo bash -s -- \
 | `nginx -t` 报 `bind() to 0.0.0.0:80 failed (13: Permission denied)` | 部分自编译 Nginx 在测试配置时也会绑定低端口；升级 Agent，安装器会为受限 helper/recover 单元保留 `CAP_NET_BIND_SERVICE`。 |
 | `00-nginx-manager.conf has unexpected content` | 旧 include 文件和新托管目录冲突；先检查其内容。直接托管 `conf.d` 时不要再传 `--managed-include-file`。 |
 | 托管 `conf.d` 后出现递归 include | 不要在 `conf.d` 中创建一个再次 include `conf.d/*.conf` 的文件；必须使用 `--managed-config-already-included`。 |
-| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应至少显示 `0.6.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
+| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应至少显示 `0.7.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
 | `find /apps/nginx/conf/nginx-manager.d` 为空 | 如果托管目录已经改为 `conf.d`，这是正常的；应检查 `/apps/nginx/conf/conf.d`。 |
 | 从节点移除后站点仍在，并显示 `v1 → v2` | “从节点移除配置”只删除 Agent 上的 `.conf`，会保留平台记录；新版会显示“未部署”和原版本 `v1`。确认不再需要后，可在右侧点击“删除站点记录”。 |
 | 点击“逐节点校验”后出现 `v1 → v2` | 升级 Server。逐节点校验是只读操作，新版只显示“校验中/校验失败”，不会创建草稿或增加版本；只有真正编辑配置才会出现候选版本。 |
@@ -114,7 +114,11 @@ LDAP/AD 参数见 `sudo ./deploy/install-server.sh --help`。至少需要：
 
 ## 升级与检查
 
-升级 Server 或 Agent：重新执行原安装命令。Server 保留数据库和账号，Agent 保留已批准的机器身份。
+升级 Server 或 Agent：重新执行原安装命令。Server 保留数据库和账号，Agent 保留已批准的机器身份。涉及发布任务协议的版本应先升级 Server，再升级所有 Agent，最后浏览器 `Ctrl+F5`。
+
+新版发布有服务端操作单、逐节点任务租约和不可变版本快照。Agent 在网络中断时会将结果保存在 `/var/lib/nginx-manager-agent/result-outbox.json`，收到 Server 确认后才删除；永久被拒绝的结果会留在 `result-outbox-rejected.json` 供排查。多节点发布可能出现“部分成功”，页面会明确保留逐节点结果，不会把它伪装成全部成功。
+
+真实版本回滚只适用于升级后成功发布并形成快照的版本；升级前仅有页面历史文字、没有配置快照的旧版本不能自动回滚。升级前先备份 Server：
 
 ```bash
 # Server
@@ -135,6 +139,19 @@ Server 备份：
 ```bash
 sudo ./deploy/backup-server.sh
 ```
+
+生产环境不要长期从可变的 `main` 直接以 root 安装。确认一个已审核的 40 位 commit 后固定它：
+
+```bash
+export NGINX_MANAGER_REF='<40位Git提交>'
+export NGINX_MANAGER_REQUIRE_PINNED_REF=1
+curl -fsSL "https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/${NGINX_MANAGER_REF}/install-server.sh" | \
+sudo -E bash -s -- --host 192.0.2.20 --port 8443
+```
+
+Agent 安装同样设置这两个环境变量。也可以额外设置 `NGINX_MANAGER_ARCHIVE_SHA256` 校验 GitHub 源码归档。Server 默认只保留最近 3 个程序 release（数据与数据库不在 release 内），可用 `NGINX_MANAGER_RELEASE_RETENTION` 调整。
+
+控制端默认保留任务/操作 30 天、审计 180 天；LDAP 会话每 5 分钟重新检查一次角色。对应环境变量见 `server/env.example`。证书替换任务在排队和租约重试期间会暂存在权限为 `0600` 的 Server SQLite 中，任务结束即删除私钥 payload；因此仍应保护 Server 磁盘、备份和管理网络。
 
 ## 一键卸载
 

@@ -20,10 +20,10 @@ import stat
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
@@ -60,6 +60,7 @@ JOB_ACTIONS = {
 }
 TERMINAL_JOB_STATES = {"succeeded", "failed", "expired"}
 ACTIVE_JOB_STATES = {"queued", "running"}
+OPERATION_STATES = {"queued", "running", "succeeded", "failed", "partial", "expired"}
 WEB_ROLES = {"admin", "operator", "auditor"}
 FAILURE_CODES = {
     "job_expired",
@@ -394,6 +395,7 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
         "key_material_sha256",
         "certificate_fingerprint",
         "certificate_not_after",
+        "certificate_issuer",
     }
     for key, value in (request.details or {}).items():
         if key not in allowed_detail_keys or not isinstance(value, (str, int, float, bool, type(None))):
@@ -401,6 +403,14 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
         if isinstance(value, str):
             value = value[:256]
         result[key] = value
+    certificate_domains = (request.details or {}).get("certificate_domains")
+    if request.action == "certificate_apply" and isinstance(certificate_domains, list):
+        cleaned_domains = []
+        for item in certificate_domains[:100]:
+            if isinstance(item, str) and re.fullmatch(r"(?:\*\.)?[A-Za-z0-9.-]{1,253}", item):
+                cleaned_domains.append(item.lower().rstrip("."))
+        if cleaned_domains:
+            result["certificate_domains"] = cleaned_domains
 
     # Persist only bounded enums that are safe to expose to Web administrators.
     # The arbitrary error/output text below remains digest-only.
@@ -490,8 +500,13 @@ class Settings:
     default_job_ttl_seconds: int = 300
     max_job_ttl_seconds: int = 86400
     sensitive_job_ttl_seconds: int = 900
+    job_lease_seconds: int = 60
+    late_result_grace_seconds: int = 30 * 86400
+    job_retention_seconds: int = 30 * 86400
+    audit_retention_seconds: int = 180 * 86400
     max_payload_bytes: int = 2 * 1024 * 1024
-    max_ui_state_bytes: int = 2 * 1024 * 1024
+    max_ui_state_bytes: int = 16 * 1024 * 1024
+    max_resource_bytes: int = 1024 * 1024
     session_ttl_seconds: int = 28800
     enrollment_pending_ttl_seconds: int = 86400
     password_iterations: int = 310000
@@ -512,6 +527,7 @@ class Settings:
     ldap_start_tls: bool = False
     ldap_ca_file: Optional[str] = None
     ldap_connect_timeout: int = 5
+    ldap_session_recheck_seconds: int = 300
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -522,8 +538,15 @@ class Settings:
             default_job_ttl_seconds=int(os.environ.get("NGINX_MANAGER_JOB_TTL_SECONDS", "300")),
             max_job_ttl_seconds=int(os.environ.get("NGINX_MANAGER_MAX_JOB_TTL_SECONDS", "86400")),
             sensitive_job_ttl_seconds=int(os.environ.get("NGINX_MANAGER_SENSITIVE_JOB_TTL_SECONDS", "900")),
+            job_lease_seconds=int(os.environ.get("NGINX_MANAGER_JOB_LEASE_SECONDS", "60")),
+            late_result_grace_seconds=int(
+                os.environ.get("NGINX_MANAGER_LATE_RESULT_GRACE_SECONDS", str(30 * 86400))
+            ),
+            job_retention_seconds=int(os.environ.get("NGINX_MANAGER_JOB_RETENTION_SECONDS", str(30 * 86400))),
+            audit_retention_seconds=int(os.environ.get("NGINX_MANAGER_AUDIT_RETENTION_SECONDS", str(180 * 86400))),
             max_payload_bytes=int(os.environ.get("NGINX_MANAGER_MAX_PAYLOAD_BYTES", str(2 * 1024 * 1024))),
-            max_ui_state_bytes=int(os.environ.get("NGINX_MANAGER_MAX_UI_STATE_BYTES", str(2 * 1024 * 1024))),
+            max_ui_state_bytes=int(os.environ.get("NGINX_MANAGER_MAX_UI_STATE_BYTES", str(16 * 1024 * 1024))),
+            max_resource_bytes=int(os.environ.get("NGINX_MANAGER_MAX_RESOURCE_BYTES", str(1024 * 1024))),
             session_ttl_seconds=int(os.environ.get("NGINX_MANAGER_SESSION_TTL_SECONDS", "28800")),
             enrollment_pending_ttl_seconds=int(
                 os.environ.get("NGINX_MANAGER_ENROLLMENT_PENDING_TTL_SECONDS", "86400")
@@ -549,9 +572,18 @@ class Settings:
             ldap_start_tls=_env_bool("NGINX_MANAGER_LDAP_START_TLS", False),
             ldap_ca_file=os.environ.get("NGINX_MANAGER_LDAP_CA_FILE") or None,
             ldap_connect_timeout=int(os.environ.get("NGINX_MANAGER_LDAP_CONNECT_TIMEOUT", "5")),
+            ldap_session_recheck_seconds=int(
+                os.environ.get("NGINX_MANAGER_LDAP_SESSION_RECHECK_SECONDS", "300")
+            ),
         )
 
     def validate(self) -> None:
+        if not 10 <= self.job_lease_seconds <= 3600:
+            raise ValueError("NGINX_MANAGER_JOB_LEASE_SECONDS must be between 10 and 3600")
+        if not 0 <= self.late_result_grace_seconds <= 90 * 86400:
+            raise ValueError("NGINX_MANAGER_LATE_RESULT_GRACE_SECONDS is out of range")
+        if self.job_retention_seconds < 86400 or self.audit_retention_seconds < 86400:
+            raise ValueError("retention settings must be at least one day")
         if not self.ldap_enabled:
             return
         required = {
@@ -584,6 +616,8 @@ class Settings:
             raise ValueError("at least one LDAP role group must be configured")
         if not 1 <= self.ldap_connect_timeout <= 30:
             raise ValueError("NGINX_MANAGER_LDAP_CONNECT_TIMEOUT must be between 1 and 30 seconds")
+        if not 60 <= self.ldap_session_recheck_seconds <= 3600:
+            raise ValueError("NGINX_MANAGER_LDAP_SESSION_RECHECK_SECONDS must be between 60 and 3600")
         password_path = Path(str(self.ldap_bind_password_file))
         if not password_path.is_absolute():
             raise ValueError("NGINX_MANAGER_LDAP_BIND_PASSWORD_FILE must be an absolute path")
@@ -653,7 +687,11 @@ def _ldap_search_entries(connection: Any, search_base: str, search_filter: str,
     return [item for item in response if isinstance(item, dict) and item.get("type") == "searchResEntry"]
 
 
-def _authenticate_ldap(settings: Settings, username: str, password: str) -> Dict[str, str]:
+def _lookup_ldap_principal(
+    settings: Settings,
+    username: str,
+    password: Optional[str] = None,
+) -> Dict[str, str]:
     try:
         from ldap3 import (
             AUTO_BIND_NO_TLS,
@@ -721,21 +759,22 @@ def _authenticate_ldap(settings: Settings, username: str, password: str) -> Dict
         else:
             groups = []
 
-        user_connection = None
-        try:
-            user_connection = Connection(
-                server,
-                user=user_dn,
-                password=password,
-                client_strategy=SAFE_SYNC,
-                auto_bind=auto_bind,
-                raise_exceptions=True,
-            )
-        except LDAPBindError as exc:
-            raise LDAPAuthenticationError("directory rejected the user credentials") from exc
-        finally:
-            if user_connection is not None:
-                user_connection.unbind()
+        if password is not None:
+            user_connection = None
+            try:
+                user_connection = Connection(
+                    server,
+                    user=user_dn,
+                    password=password,
+                    client_strategy=SAFE_SYNC,
+                    auto_bind=auto_bind,
+                    raise_exceptions=True,
+                )
+            except LDAPBindError as exc:
+                raise LDAPAuthenticationError("directory rejected the user credentials") from exc
+            finally:
+                if user_connection is not None:
+                    user_connection.unbind()
 
         if settings.ldap_group_search_base:
             group_filter = settings.ldap_group_filter.replace("{user_dn}", escape_filter_chars(user_dn))
@@ -773,6 +812,10 @@ def _authenticate_ldap(settings: Settings, username: str, password: str) -> Dict
         bind_password = ""
         if service_connection is not None:
             service_connection.unbind()
+
+
+def _authenticate_ldap(settings: Settings, username: str, password: str) -> Dict[str, str]:
+    return _lookup_ldap_principal(settings, username, password)
 
 
 class EnrollRequest(BaseModel):
@@ -837,6 +880,7 @@ class HeartbeatRequest(BaseModel):
     agent_version: Optional[str] = Field(None, max_length=64)
     nginx_version: Optional[str] = Field(None, max_length=128)
     config_hash: Optional[str] = Field(None, max_length=128)
+    active_job_id: Optional[str] = Field(None, min_length=1, max_length=200)
     capabilities: List[str] = Field(default_factory=list)
     facts: Dict[str, Any] = Field(default_factory=dict)
 
@@ -898,6 +942,48 @@ class AdminJobRequest(BaseModel):
                 result.append(item)
                 seen.add(item)
         return result
+
+
+class OperationJobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str = Field(..., min_length=1, max_length=200)
+    action: ActionName
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class OperationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    site_id: str = Field(..., min_length=1, max_length=200)
+    request_id: Optional[str] = Field(None, min_length=16, max_length=128)
+    kind: Literal["validate", "publish", "delete", "transfer", "certificate", "inventory"]
+    base_version: int = Field(0, ge=0, le=1000000000)
+    candidate: Dict[str, Any] = Field(default_factory=dict)
+    jobs: List[OperationJobRequest] = Field(..., min_length=1, max_length=100)
+    ttl_seconds: Optional[int] = Field(None, ge=5, le=86400)
+
+    @field_validator("site_id")
+    def validate_site_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value or re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", value) is None:
+            raise ValueError("invalid site id")
+        return value
+
+    @field_validator("request_id")
+    def validate_request_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", value) is None:
+            raise ValueError("invalid request id")
+        return value
+
+    @field_validator("jobs")
+    def unique_operation_nodes(cls, value: List[OperationJobRequest]) -> List[OperationJobRequest]:
+        seen = set()
+        for item in value:
+            if item.node_id in seen:
+                raise ValueError("operation jobs must target each node at most once")
+            seen.add(item.node_id)
+        return value
 
 class UIStatePutRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -965,7 +1051,8 @@ class Database:
                     nginx_version TEXT,
                     config_hash TEXT,
                     capabilities_json TEXT NOT NULL DEFAULT '[]',
-                    facts_json TEXT NOT NULL DEFAULT '{}'
+                    facts_json TEXT NOT NULL DEFAULT '{}',
+                    revoked_at INTEGER
                 );
 
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -1010,6 +1097,53 @@ class Database:
                 INSERT OR IGNORE INTO ui_state(singleton_id, revision, state_json, updated_at)
                     VALUES(1, 0, '{}', 0);
 
+                CREATE TABLE IF NOT EXISTS site_revisions (
+                    id TEXT PRIMARY KEY,
+                    site_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    snapshot_sha256 TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    published_at INTEGER,
+                    UNIQUE(site_id, version)
+                );
+                CREATE INDEX IF NOT EXISTS site_revisions_list_idx
+                    ON site_revisions(site_id, version DESC);
+
+                CREATE TABLE IF NOT EXISTS operations (
+                    id TEXT PRIMARY KEY,
+                    site_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    base_version INTEGER NOT NULL,
+                    candidate_revision_id TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    completed_at INTEGER,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS operations_list_idx
+                    ON operations(updated_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS operations_site_idx
+                    ON operations(site_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS resources (
+                    kind TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    document_json TEXT NOT NULL,
+                    document_sha256 TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    updated_by TEXT NOT NULL,
+                    PRIMARY KEY(kind, id)
+                );
+                CREATE INDEX IF NOT EXISTS resources_order_idx
+                    ON resources(kind, position, id);
+
                 CREATE TABLE IF NOT EXISTS admin_users (
                     id TEXT PRIMARY KEY,
                     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -1040,7 +1174,8 @@ class Database:
                     csrf_hash TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     expires_at INTEGER NOT NULL,
-                    last_seen_at INTEGER NOT NULL
+                    last_seen_at INTEGER NOT NULL,
+                    role_checked_at INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS web_sessions_expiry_idx
                     ON web_sessions(expires_at);
@@ -1066,6 +1201,31 @@ class Database:
                     ON agent_enrollments(node_name COLLATE NOCASE, status);
                 """
             )
+            existing_job_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            job_migrations = {
+                "operation_id": "TEXT",
+                "lease_expires_at": "INTEGER",
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "created_by": "TEXT",
+            }
+            for column, definition in job_migrations.items():
+                if column not in existing_job_columns:
+                    connection.execute("ALTER TABLE jobs ADD COLUMN {} {}".format(column, definition))
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS jobs_operation_idx ON jobs(operation_id, created_at, id)"
+            )
+            existing_node_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(nodes)").fetchall()
+            }
+            if "revoked_at" not in existing_node_columns:
+                connection.execute("ALTER TABLE nodes ADD COLUMN revoked_at INTEGER")
+            existing_session_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(web_sessions)").fetchall()
+            }
+            if "role_checked_at" not in existing_session_columns:
+                connection.execute("ALTER TABLE web_sessions ADD COLUMN role_checked_at INTEGER NOT NULL DEFAULT 0")
 
     def bootstrap_admin(self, username: str, password: str, iterations: int) -> Dict[str, Any]:
         """Create the first Web administrator without exposing a runtime bootstrap secret."""
@@ -1117,7 +1277,7 @@ class Database:
     @staticmethod
     def expire_jobs(connection: sqlite3.Connection, now: int) -> int:
         rows = connection.execute(
-            "SELECT id FROM jobs WHERE status IN ('queued', 'running') AND expires_at <= ?", (now,)
+            "SELECT id, operation_id FROM jobs WHERE status IN ('queued', 'running') AND expires_at <= ?", (now,)
         ).fetchall()
         if not rows:
             return 0
@@ -1140,7 +1300,35 @@ class Database:
             None,
             {"count": len(rows)},
         )
+        for operation_id in {row["operation_id"] for row in rows if row["operation_id"]}:
+            _refresh_operation(connection, operation_id, now)
         return len(rows)
+
+    @staticmethod
+    def prune(connection: sqlite3.Connection, now: int, job_retention: int, audit_retention: int) -> Dict[str, int]:
+        job_cursor = connection.execute(
+            "DELETE FROM jobs WHERE status IN ('succeeded', 'failed', 'expired') "
+            "AND completed_at IS NOT NULL AND completed_at < ?",
+            (now - job_retention,),
+        )
+        operation_cursor = connection.execute(
+            "DELETE FROM operations WHERE status IN ('succeeded', 'failed', 'partial', 'expired') "
+            "AND completed_at IS NOT NULL AND completed_at < ?",
+            (now - job_retention,),
+        )
+        audit_cursor = connection.execute(
+            "DELETE FROM audit WHERE created_at < ?", (now - audit_retention,)
+        )
+        enrollment_cursor = connection.execute(
+            "DELETE FROM agent_enrollments WHERE status <> 'pending' AND updated_at < ?",
+            (now - job_retention,),
+        )
+        return {
+            "jobs": max(0, job_cursor.rowcount),
+            "operations": max(0, operation_cursor.rowcount),
+            "audit": max(0, audit_cursor.rowcount),
+            "enrollments": max(0, enrollment_cursor.rowcount),
+        }
 
 
 def _node_public(row: sqlite3.Row, now: int, online_after_seconds: int) -> Dict[str, Any]:
@@ -1149,6 +1337,7 @@ def _node_public(row: sqlite3.Row, now: int, online_after_seconds: int) -> Dict[
         last_seen is not None
         and now - int(last_seen) <= online_after_seconds
         and row["reported_status"] != "offline"
+        and row["revoked_at"] is None
     )
     return {
         "id": row["id"],
@@ -1164,6 +1353,7 @@ def _node_public(row: sqlite3.Row, now: int, online_after_seconds: int) -> Dict[
         "facts": json.loads(row["facts_json"]),
         "enrolled_at": _utc_iso(row["enrolled_at"]),
         "last_seen_at": _utc_iso(last_seen),
+        "revoked_at": _utc_iso(row["revoked_at"]),
     }
 
 
@@ -1172,6 +1362,7 @@ def _job_public(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "id": row["id"],
         "batch_id": row["batch_id"],
+        "operation_id": row["operation_id"] if "operation_id" in row.keys() else None,
         "node_id": row["node_id"],
         "node_name": row["node_name"] if "node_name" in row.keys() else None,
         "action": row["action"],
@@ -1181,10 +1372,84 @@ def _job_public(row: sqlite3.Row) -> Dict[str, Any]:
         "created_at": _utc_iso(row["created_at"]),
         "expires_at": _utc_iso(row["expires_at"]),
         "claimed_at": _utc_iso(row["claimed_at"]),
+        "lease_expires_at": _utc_iso(row["lease_expires_at"] if "lease_expires_at" in row.keys() else None),
+        "attempt_count": int(row["attempt_count"] or 0) if "attempt_count" in row.keys() else 0,
+        "created_by": row["created_by"] if "created_by" in row.keys() else None,
         "completed_at": _utc_iso(row["completed_at"]),
         "result": result_meta,
         "result_sha256": row["result_sha256"],
     }
+
+
+def _operation_public(row: sqlite3.Row) -> Dict[str, Any]:
+    metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+    return {
+        "id": row["id"],
+        "site_id": row["site_id"],
+        "kind": row["kind"],
+        "status": row["status"],
+        "base_version": int(row["base_version"]),
+        "candidate_revision_id": row["candidate_revision_id"],
+        "created_by": row["created_by"],
+        "created_at": _utc_iso(row["created_at"]),
+        "updated_at": _utc_iso(row["updated_at"]),
+        "completed_at": _utc_iso(row["completed_at"]),
+        "metadata": metadata,
+    }
+
+
+def _revision_public(row: sqlite3.Row, include_snapshot: bool = False) -> Dict[str, Any]:
+    result = {
+        "id": row["id"],
+        "site_id": row["site_id"],
+        "version": int(row["version"]),
+        "snapshot_sha256": row["snapshot_sha256"],
+        "note": row["note"],
+        "created_by": row["created_by"],
+        "created_at": _utc_iso(row["created_at"]),
+        "published_at": _utc_iso(row["published_at"]),
+    }
+    if include_snapshot:
+        result["snapshot"] = json.loads(row["snapshot_json"])
+    return result
+
+
+def _refresh_operation(connection: sqlite3.Connection, operation_id: Optional[str], now: int) -> None:
+    if not operation_id:
+        return
+    operation = connection.execute("SELECT * FROM operations WHERE id = ?", (operation_id,)).fetchone()
+    if operation is None:
+        return
+    rows = connection.execute(
+        "SELECT status FROM jobs WHERE operation_id = ? ORDER BY created_at, id", (operation_id,)
+    ).fetchall()
+    if not rows:
+        return
+    statuses = [row["status"] for row in rows]
+    if any(item in ACTIVE_JOB_STATES for item in statuses):
+        next_status = "running" if any(item == "running" for item in statuses) else "queued"
+        completed_at = None
+    elif all(item == "succeeded" for item in statuses):
+        next_status = "succeeded"
+        completed_at = now
+    elif all(item == "expired" for item in statuses):
+        next_status = "expired"
+        completed_at = now
+    elif any(item == "succeeded" for item in statuses):
+        next_status = "partial"
+        completed_at = now
+    else:
+        next_status = "failed"
+        completed_at = now
+    connection.execute(
+        "UPDATE operations SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?",
+        (next_status, now, completed_at, operation_id),
+    )
+    if next_status == "succeeded" and operation["kind"] == "publish" and operation["candidate_revision_id"]:
+        connection.execute(
+            "UPDATE site_revisions SET published_at = COALESCE(published_at, ?) WHERE id = ?",
+            (now, operation["candidate_revision_id"]),
+        )
 
 
 def _enrollment_public(row: sqlite3.Row) -> Dict[str, Any]:
@@ -1203,15 +1468,57 @@ def _enrollment_public(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def _load_ui_state_document(connection: sqlite3.Connection) -> Dict[str, Any]:
+    row = connection.execute(
+        "SELECT revision, state_json FROM ui_state WHERE singleton_id = 1"
+    ).fetchone()
+    state = json.loads(row["state_json"] or "{}")
+    resource_count = connection.execute("SELECT COUNT(*) FROM resources").fetchone()[0]
+    if resource_count or state.get("_resources_split_v1") is True:
+        for kind, state_key in (("site", "sites"), ("certificate", "certificates")):
+            resources = connection.execute(
+                "SELECT document_json FROM resources WHERE kind = ? ORDER BY position, id", (kind,)
+            ).fetchall()
+            state[state_key] = [json.loads(item["document_json"]) for item in resources]
+    return {"revision": row["revision"], "state": state}
+
+
 def create_app(
     settings: Optional[Settings] = None,
     ldap_authenticator: Optional[Callable[[Settings, str, str], Dict[str, str]]] = None,
+    ldap_role_checker: Optional[Callable[[Settings, str], Dict[str, str]]] = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.validate()
     authenticate_ldap = ldap_authenticator or _authenticate_ldap
+    check_ldap_role = ldap_role_checker or (lambda current_settings, username: _lookup_ldap_principal(
+        current_settings, username, None
+    ))
     database = Database(settings.db_path)
-    api = FastAPI(title="Nginx Manager", version="0.3.9", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_api: FastAPI) -> AsyncIterator[None]:
+        database.initialize()
+        with database.transaction() as connection:
+            now = int(time.time())
+            connection.execute("DELETE FROM admin_sessions WHERE expires_at <= ?", (now,))
+            connection.execute("DELETE FROM web_sessions WHERE expires_at <= ?", (now,))
+            Database.prune(
+                connection,
+                now,
+                settings.job_retention_seconds,
+                settings.audit_retention_seconds,
+            )
+        yield
+
+    api = FastAPI(
+        title="Nginx Manager",
+        version="0.4.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     api.state.settings = settings
     api.state.database = database
     secure_session_cookie = "__Host-nginx_manager_session"
@@ -1243,13 +1550,6 @@ def create_app(
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    @api.on_event("startup")
-    def startup() -> None:
-        database.initialize()
-        with database.transaction() as connection:
-            connection.execute("DELETE FROM admin_sessions WHERE expires_at <= ?", (int(time.time()),))
-            connection.execute("DELETE FROM web_sessions WHERE expires_at <= ?", (int(time.time()),))
-
     @api.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
         # FastAPI's default validation response can echo invalid payload values.
@@ -1262,24 +1562,73 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
         now = int(time.time())
         digest = _token_hash(candidate)
-        with database.transaction() as connection:
+        with database.connection() as connection:
             row = connection.execute(
                 "SELECT * FROM web_sessions WHERE session_hash = ?",
                 (digest,),
             ).fetchone()
-            if row is None or row["expires_at"] <= now or row["role"] not in WEB_ROLES:
+        if row is None or row["expires_at"] <= now or row["role"] not in WEB_ROLES:
+            with database.transaction() as connection:
                 connection.execute("DELETE FROM web_sessions WHERE session_hash = ?", (digest,))
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
-            if request.method not in {"GET", "HEAD", "OPTIONS"}:
-                expected_csrf = _derive_csrf_value(candidate)
-                if not x_csrf_token or not hmac.compare_digest(x_csrf_token, expected_csrf):
-                    raise HTTPException(status_code=403, detail="invalid request verification code")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            expected_csrf = _derive_csrf_value(candidate)
+            if not x_csrf_token or not hmac.compare_digest(x_csrf_token, expected_csrf):
+                raise HTTPException(status_code=403, detail="invalid request verification code")
+
+        principal = dict(row)
+        if (
+            principal["auth_source"] == "ldap"
+            and now - int(principal["role_checked_at"] or 0) >= settings.ldap_session_recheck_seconds
+        ):
+            try:
+                refreshed = check_ldap_role(settings, principal["username"])
+            except LDAPAuthenticationError:
+                with database.transaction() as connection:
+                    connection.execute("DELETE FROM web_sessions WHERE session_hash = ?", (digest,))
+                    Database.audit(
+                        connection,
+                        "ldap",
+                        principal["username"],
+                        "ldap_session_revoked",
+                        "web_principal",
+                        principal["principal_id"],
+                        {},
+                    )
+                raise HTTPException(status_code=401, detail="directory authorization was revoked")
+            except LDAPUnavailableError:
+                raise HTTPException(status_code=503, detail="directory authorization recheck is unavailable")
+            if (
+                refreshed.get("principal_id") != principal["principal_id"]
+                or refreshed.get("role") not in WEB_ROLES
+            ):
+                with database.transaction() as connection:
+                    connection.execute("DELETE FROM web_sessions WHERE session_hash = ?", (digest,))
+                    Database.audit(
+                        connection,
+                        "ldap",
+                        principal["username"],
+                        "ldap_session_revoked",
+                        "web_principal",
+                        principal["principal_id"],
+                        {"reason": "principal or role no longer authorized"},
+                    )
+                raise HTTPException(status_code=401, detail="directory authorization was revoked")
+            principal["role"] = refreshed["role"]
+            principal["role_checked_at"] = now
+
+        with database.transaction() as connection:
+            if principal["role"] != row["role"] or principal["role_checked_at"] != row["role_checked_at"]:
+                connection.execute(
+                    "UPDATE web_sessions SET role = ?, role_checked_at = ? WHERE session_hash = ?",
+                    (principal["role"], principal["role_checked_at"], digest),
+                )
             if now - row["last_seen_at"] >= 60:
                 connection.execute(
                     "UPDATE web_sessions SET last_seen_at = ? WHERE session_hash = ?",
                     (now, digest),
                 )
-        return dict(row)
+        return principal
 
     def require_operator(principal: Dict[str, Any] = Depends(require_session)) -> Dict[str, Any]:
         if principal["role"] not in {"admin", "operator"}:
@@ -1299,7 +1648,9 @@ def create_app(
             raise HTTPException(status_code=401, detail="invalid credentials", headers={"WWW-Authenticate": "Bearer"})
         digest = _token_hash(value.strip())
         with database.connection() as connection:
-            row = connection.execute("SELECT * FROM nodes WHERE token_hash = ?", (digest,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM nodes WHERE token_hash = ? AND revoked_at IS NULL", (digest,)
+            ).fetchone()
         if row is None:
             raise HTTPException(status_code=401, detail="invalid credentials", headers={"WWW-Authenticate": "Bearer"})
         return dict(row)
@@ -1393,9 +1744,9 @@ def create_app(
             connection.execute("DELETE FROM web_sessions WHERE expires_at <= ?", (now,))
             connection.execute(
                 """INSERT INTO web_sessions
-                   (session_hash, principal_id, username, role, auth_source, csrf_hash,
-                    created_at, expires_at, last_seen_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (session_hash, principal_id, username, role, auth_source, csrf_hash,
+                     created_at, expires_at, last_seen_at, role_checked_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     _token_hash(session_value),
                     principal["principal_id"],
@@ -1405,6 +1756,7 @@ def create_app(
                     _token_hash(csrf_value),
                     now,
                     expires_at,
+                    now,
                     now,
                 ),
             )
@@ -1572,6 +1924,7 @@ def create_app(
     @api.post("/api/v1/agent/heartbeat")
     def heartbeat(request: HeartbeatRequest, agent: Dict[str, Any] = Depends(require_agent)) -> Dict[str, Any]:
         now = int(time.time())
+        lease_renewed = False
         with database.transaction() as connection:
             connection.execute(
                 """UPDATE nodes
@@ -1590,7 +1943,20 @@ def create_app(
                     agent["id"],
                 ),
             )
-        return {"ok": True, "server_time": _utc_iso(now), "poll_interval_seconds": 5}
+            if request.active_job_id:
+                cursor = connection.execute(
+                    """UPDATE jobs
+                       SET lease_expires_at = MIN(expires_at, ?)
+                       WHERE id = ? AND node_id = ? AND status = 'running' AND expires_at > ?""",
+                    (now + settings.job_lease_seconds, request.active_job_id, agent["id"], now),
+                )
+                lease_renewed = cursor.rowcount == 1
+        return {
+            "ok": True,
+            "server_time": _utc_iso(now),
+            "poll_interval_seconds": 5,
+            "job_lease_renewed": lease_renewed,
+        }
 
     @api.post("/api/v1/agent/poll")
     def poll(
@@ -1603,21 +1969,21 @@ def create_app(
             Database.expire_jobs(connection, now)
             rows = connection.execute(
                 """SELECT * FROM jobs
-                   WHERE node_id = ? AND status = 'queued' AND expires_at > ?
+                   WHERE node_id = ?
+                     AND expires_at > ?
+                     AND (status = 'queued' OR (status = 'running' AND COALESCE(lease_expires_at, 0) <= ?))
                    ORDER BY created_at ASC, id ASC LIMIT ?""",
-                (agent["id"], now, request.limit),
+                (agent["id"], now, now, request.limit),
             ).fetchall()
             for row in rows:
                 payload = json.loads(row["payload_json"])
-                replacement = row["payload_json"]
-                if row["payload_sensitive"]:
-                    replacement = _canonical_json(
-                        {"redacted": True, "payload_sha256": row["payload_sha256"], "reason": "claimed"}
-                    )
                 cursor = connection.execute(
-                    """UPDATE jobs SET status = 'running', claimed_at = ?, payload_json = ?
-                       WHERE id = ? AND status = 'queued'""",
-                    (now, replacement, row["id"]),
+                    """UPDATE jobs
+                       SET status = 'running', claimed_at = COALESCE(claimed_at, ?),
+                           lease_expires_at = ?, attempt_count = attempt_count + 1
+                       WHERE id = ? AND expires_at > ?
+                         AND (status = 'queued' OR (status = 'running' AND COALESCE(lease_expires_at, 0) <= ?))""",
+                    (now, now + settings.job_lease_seconds, row["id"], now, now),
                 )
                 if cursor.rowcount != 1:
                     continue
@@ -1626,6 +1992,7 @@ def create_app(
                         "id": row["id"],
                         "action": row["action"],
                         "payload": payload,
+                        "operation_id": row["operation_id"],
                         "created_at": _utc_iso(row["created_at"]),
                         "expires_at": _utc_iso(row["expires_at"]),
                     }
@@ -1637,8 +2004,9 @@ def create_app(
                     "job_claimed",
                     "job",
                     row["id"],
-                    {"action": row["action"]},
+                    {"action": row["action"], "attempt": int(row["attempt_count"] or 0) + 1},
                 )
+                _refresh_operation(connection, row["operation_id"], now)
         return {
             "job": claimed[0] if claimed else None,
             "jobs": claimed,
@@ -1669,15 +2037,21 @@ def create_app(
                     return {"accepted": True, "idempotent": True, "status": row["status"]}
                 if row["status"] == "expired" and request.status == "expired":
                     return {"accepted": True, "idempotent": True, "status": "expired"}
-                raise HTTPException(status_code=409, detail="job is already terminal")
-            if row["status"] != "running":
+                late_result_allowed = (
+                    row["status"] == "expired"
+                    and row["claimed_at"] is not None
+                    and now <= int(row["expires_at"]) + settings.late_result_grace_seconds
+                )
+                if not late_result_allowed:
+                    raise HTTPException(status_code=409, detail="job is already terminal")
+            if row["status"] not in {"running", "expired"}:
                 raise HTTPException(status_code=409, detail="job has not been claimed")
 
             connection.execute(
                 """UPDATE jobs
                    SET status = ?, completed_at = ?, result_meta_json = ?, result_sha256 = ?,
                        payload_json = ?
-                   WHERE id = ? AND status = 'running'""",
+                   WHERE id = ? AND status IN ('running', 'expired')""",
                 (
                     request.status,
                     now,
@@ -1702,11 +2076,12 @@ def create_app(
                 connection,
                 "agent",
                 agent["id"],
-                "job_result_received",
+                "late_job_result_received" if row["status"] == "expired" else "job_result_received",
                 "job",
                 job_id,
                 {"status": request.status, "result_sha256": result_digest},
             )
+            _refresh_operation(connection, row["operation_id"], now)
         return {"accepted": True, "idempotent": False, "status": request.status}
 
     @api.get("/api/v1/admin/nodes")
@@ -1716,11 +2091,58 @@ def create_app(
             rows = connection.execute("SELECT * FROM nodes ORDER BY node_name COLLATE NOCASE").fetchall()
         return {"items": [_node_public(row, now, settings.online_after_seconds) for row in rows]}
 
+    @api.post("/api/v1/admin/nodes/{node_id}/revoke")
+    def revoke_node(
+        node_id: str,
+        admin: Dict[str, Any] = Depends(require_superadmin),
+    ) -> Dict[str, Any]:
+        now = int(time.time())
+        with database.transaction() as connection:
+            row = connection.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="node not found")
+            if row["revoked_at"] is not None:
+                return {"revoked": True, "idempotent": True, "node_id": node_id}
+            affected = connection.execute(
+                "SELECT DISTINCT operation_id FROM jobs WHERE node_id = ? AND status IN ('queued', 'running')",
+                (node_id,),
+            ).fetchall()
+            connection.execute(
+                """UPDATE nodes SET token_hash = ?, revoked_at = ?, reported_status = 'offline', updated_at = ?
+                   WHERE id = ?""",
+                (_token_hash(secrets.token_urlsafe(48)), now, now, node_id),
+            )
+            connection.execute(
+                """UPDATE jobs SET status = 'expired', completed_at = ?, payload_json = ?,
+                   result_meta_json = ? WHERE node_id = ? AND status IN ('queued', 'running')""",
+                (
+                    now,
+                    _canonical_json({"redacted": True, "reason": "node revoked"}),
+                    _canonical_json({"failure_code": "job_expired", "failure_stage": "queue"}),
+                    node_id,
+                ),
+            )
+            for item in affected:
+                _refresh_operation(connection, item["operation_id"], now)
+            Database.audit(
+                connection,
+                admin["auth_source"],
+                admin["username"],
+                "node_revoked",
+                "node",
+                node_id,
+                {"node_name": row["node_name"]},
+            )
+        return {"revoked": True, "idempotent": False, "node_id": node_id}
+
     @api.get("/api/v1/admin/jobs")
     def admin_jobs(
         job_status: Optional[str] = Query(None, alias="status"),
         action: Optional[str] = Query(None),
         node_id: Optional[str] = Query(None),
+        batch_id: Optional[str] = Query(None),
+        operation_id: Optional[str] = Query(None),
+        job_ids: Optional[str] = Query(None, alias="ids", max_length=20000),
         limit: int = Query(100, ge=1, le=500),
         admin: Dict[str, Any] = Depends(require_session),
     ) -> Dict[str, Any]:
@@ -1740,6 +2162,18 @@ def create_app(
         if node_id:
             conditions.append("j.node_id = ?")
             parameters.append(node_id)
+        if batch_id:
+            conditions.append("j.batch_id = ?")
+            parameters.append(batch_id)
+        if operation_id:
+            conditions.append("j.operation_id = ?")
+            parameters.append(operation_id)
+        if job_ids:
+            requested_ids = [item.strip() for item in job_ids.split(",") if item.strip()]
+            if not requested_ids or len(requested_ids) > 500 or any(len(item) > 200 for item in requested_ids):
+                raise HTTPException(status_code=400, detail="invalid job ids")
+            conditions.append("j.id IN (" + ",".join("?" for _ in requested_ids) + ")")
+            parameters.extend(requested_ids)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         parameters.append(limit)
         with database.transaction() as connection:
@@ -1783,8 +2217,8 @@ def create_app(
                 connection.execute(
                     """INSERT INTO jobs
                        (id, batch_id, node_id, action, status, payload_json, payload_sha256,
-                        payload_sensitive, created_at, expires_at)
-                       VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)""",
+                         payload_sensitive, created_at, expires_at, created_by)
+                       VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)""",
                     (
                         job_id,
                         batch_id,
@@ -1795,6 +2229,7 @@ def create_app(
                         1 if sensitive else 0,
                         now,
                         expires_at,
+                        admin["username"],
                     ),
                 )
                 created.append(
@@ -1818,6 +2253,244 @@ def create_app(
                 },
             )
         return {"batch_id": batch_id, "jobs": created}
+
+    @api.post("/api/v1/admin/operations", status_code=201)
+    def create_operation(
+        request: OperationCreateRequest,
+        admin: Dict[str, Any] = Depends(require_operator),
+    ) -> Dict[str, Any]:
+        raw_request = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+        request_digest = _sha256_text(_canonical_json(raw_request))
+        operation_id = request.request_id or str(uuid.uuid4())
+        now = int(time.time())
+        ttl = min(request.ttl_seconds or settings.default_job_ttl_seconds, settings.max_job_ttl_seconds)
+        candidate_json = _canonical_json(request.candidate)
+        if _contains_sensitive_material(request.candidate):
+            raise HTTPException(status_code=400, detail="operation candidate must not contain secrets or private keys")
+        if len(candidate_json.encode("utf-8")) > settings.max_ui_state_bytes:
+            raise HTTPException(status_code=413, detail="operation candidate is too large")
+        prepared_jobs: List[Tuple[OperationJobRequest, str, str, bool, int]] = []
+        total_payload_bytes = 0
+        for spec in request.jobs:
+            payload_json = _canonical_json(spec.payload)
+            payload_bytes = len(payload_json.encode("utf-8"))
+            if payload_bytes > settings.max_payload_bytes:
+                raise HTTPException(status_code=413, detail="job payload is too large")
+            total_payload_bytes += payload_bytes
+            sensitive = spec.action == "certificate_apply" or _contains_sensitive_material(spec.payload)
+            job_ttl = min(ttl, settings.sensitive_job_ttl_seconds) if sensitive else ttl
+            prepared_jobs.append((spec, payload_json, _sha256_text(payload_json), sensitive, job_ttl))
+        if total_payload_bytes > settings.max_payload_bytes * 4:
+            raise HTTPException(status_code=413, detail="operation payloads are too large")
+
+        created: List[Dict[str, Any]] = []
+        with database.transaction() as connection:
+            existing_operation = connection.execute(
+                "SELECT * FROM operations WHERE id = ?", (operation_id,)
+            ).fetchone()
+            if existing_operation is not None:
+                metadata = json.loads(existing_operation["metadata_json"] or "{}")
+                if metadata.get("request_sha256") != request_digest:
+                    raise HTTPException(status_code=409, detail="operation request id was reused with different content")
+                rows = connection.execute(
+                    "SELECT j.*, n.node_name FROM jobs j JOIN nodes n ON n.id = j.node_id "
+                    "WHERE j.operation_id = ? ORDER BY j.created_at, j.id",
+                    (operation_id,),
+                ).fetchall()
+                return {
+                    "operation": _operation_public(existing_operation),
+                    "jobs": [_job_public(row) for row in rows],
+                    "idempotent": True,
+                }
+
+            node_ids = [spec.node_id for spec, _payload, _digest, _sensitive, _ttl in prepared_jobs]
+            placeholders = ",".join("?" for _ in node_ids)
+            existing_nodes = connection.execute(
+                "SELECT id FROM nodes WHERE id IN (" + placeholders + ") AND revoked_at IS NULL",
+                node_ids,
+            ).fetchall()
+            existing_ids = {row["id"] for row in existing_nodes}
+            missing = [node_id for node_id in node_ids if node_id not in existing_ids]
+            if missing:
+                raise HTTPException(status_code=404, detail={"message": "unknown or revoked node ids", "node_ids": missing})
+
+            revision_id: Optional[str] = None
+            if request.kind == "publish":
+                latest = connection.execute(
+                    "SELECT MAX(version) AS version FROM site_revisions WHERE site_id = ? AND published_at IS NOT NULL",
+                    (request.site_id,),
+                ).fetchone()["version"]
+                if latest is not None and int(latest) != request.base_version:
+                    raise HTTPException(status_code=409, detail="site base version is stale")
+                revision_id = operation_id + ":revision"
+                revision_version = request.base_version + 1
+                snapshot_digest = _sha256_text(candidate_json)
+                existing_revision = connection.execute(
+                    "SELECT * FROM site_revisions WHERE site_id = ? AND version = ?",
+                    (request.site_id, revision_version),
+                ).fetchone()
+                if existing_revision is not None:
+                    active_owner = connection.execute(
+                        "SELECT id FROM operations WHERE candidate_revision_id = ? AND status IN ('queued', 'running')",
+                        (existing_revision["id"],),
+                    ).fetchone()
+                    if existing_revision["published_at"] is not None or active_owner is not None:
+                        raise HTTPException(status_code=409, detail="candidate site version already exists")
+                    connection.execute("DELETE FROM site_revisions WHERE id = ?", (existing_revision["id"],))
+                connection.execute(
+                    """INSERT INTO site_revisions
+                       (id, site_id, version, snapshot_json, snapshot_sha256, note, created_by, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        revision_id,
+                        request.site_id,
+                        revision_version,
+                        candidate_json,
+                        snapshot_digest,
+                        str(request.candidate.get("changeNote") or request.candidate.get("note") or "")[:1000],
+                        admin["username"],
+                        now,
+                    ),
+                )
+
+            metadata = {
+                "request_sha256": request_digest,
+                "job_count": len(prepared_jobs),
+                "node_ids": node_ids,
+            }
+            connection.execute(
+                """INSERT INTO operations
+                   (id, site_id, kind, status, base_version, candidate_revision_id, created_by,
+                    created_at, updated_at, metadata_json)
+                   VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)""",
+                (
+                    operation_id,
+                    request.site_id,
+                    request.kind,
+                    request.base_version,
+                    revision_id,
+                    admin["username"],
+                    now,
+                    now,
+                    _canonical_json(metadata),
+                ),
+            )
+            for spec, payload_json, payload_digest, sensitive, job_ttl in prepared_jobs:
+                job_id = str(uuid.uuid4())
+                expires_at = now + job_ttl
+                connection.execute(
+                    """INSERT INTO jobs
+                       (id, batch_id, operation_id, node_id, action, status, payload_json,
+                        payload_sha256, payload_sensitive, created_at, expires_at, created_by)
+                       VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)""",
+                    (
+                        job_id,
+                        operation_id,
+                        operation_id,
+                        spec.node_id,
+                        spec.action,
+                        payload_json,
+                        payload_digest,
+                        1 if sensitive else 0,
+                        now,
+                        expires_at,
+                        admin["username"],
+                    ),
+                )
+                created.append({
+                    "id": job_id,
+                    "node_id": spec.node_id,
+                    "status": "queued",
+                    "operation_id": operation_id,
+                    "expires_at": _utc_iso(expires_at),
+                })
+            Database.audit(
+                connection,
+                admin["auth_source"],
+                admin["username"],
+                "operation_created",
+                "operation",
+                operation_id,
+                {
+                    "site_id": request.site_id,
+                    "kind": request.kind,
+                    "base_version": request.base_version,
+                    "job_count": len(created),
+                    "request_sha256": request_digest,
+                },
+            )
+            operation = connection.execute("SELECT * FROM operations WHERE id = ?", (operation_id,)).fetchone()
+        return {"operation": _operation_public(operation), "jobs": created, "idempotent": False}
+
+    @api.get("/api/v1/admin/operations")
+    def list_operations(
+        operation_status: Optional[str] = Query(None, alias="status"),
+        site_id: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+        admin: Dict[str, Any] = Depends(require_session),
+    ) -> Dict[str, Any]:
+        if operation_status and operation_status not in OPERATION_STATES and operation_status != "active":
+            raise HTTPException(status_code=400, detail="invalid operation status")
+        conditions: List[str] = []
+        parameters: List[Any] = []
+        if operation_status == "active":
+            conditions.append("status IN ('queued', 'running')")
+        elif operation_status:
+            conditions.append("status = ?")
+            parameters.append(operation_status)
+        if site_id:
+            conditions.append("site_id = ?")
+            parameters.append(site_id)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        parameters.append(limit)
+        with database.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM operations" + where + " ORDER BY updated_at DESC, id DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+        return {"items": [_operation_public(row) for row in rows]}
+
+    @api.get("/api/v1/admin/operations/{operation_id}")
+    def get_operation(operation_id: str, admin: Dict[str, Any] = Depends(require_session)) -> Dict[str, Any]:
+        with database.connection() as connection:
+            operation = connection.execute("SELECT * FROM operations WHERE id = ?", (operation_id,)).fetchone()
+            if operation is None:
+                raise HTTPException(status_code=404, detail="operation not found")
+            jobs = connection.execute(
+                "SELECT j.*, n.node_name FROM jobs j JOIN nodes n ON n.id = j.node_id "
+                "WHERE j.operation_id = ? ORDER BY j.created_at, j.id",
+                (operation_id,),
+            ).fetchall()
+        return {"operation": _operation_public(operation), "jobs": [_job_public(row) for row in jobs]}
+
+    @api.get("/api/v1/admin/sites/{site_id}/revisions")
+    def list_site_revisions(
+        site_id: str,
+        limit: int = Query(100, ge=1, le=500),
+        admin: Dict[str, Any] = Depends(require_session),
+    ) -> Dict[str, Any]:
+        with database.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM site_revisions WHERE site_id = ? AND published_at IS NOT NULL "
+                "ORDER BY version DESC LIMIT ?",
+                (site_id, limit),
+            ).fetchall()
+        return {"items": [_revision_public(row) for row in rows]}
+
+    @api.get("/api/v1/admin/sites/{site_id}/revisions/{version}")
+    def get_site_revision(
+        site_id: str,
+        version: int,
+        admin: Dict[str, Any] = Depends(require_session),
+    ) -> Dict[str, Any]:
+        with database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM site_revisions WHERE site_id = ? AND version = ? AND published_at IS NOT NULL",
+                (site_id, version),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="published site revision not found")
+        return _revision_public(row, include_snapshot=True)
 
     @api.get("/api/v1/admin/enrollments")
     def list_enrollments(
@@ -1897,7 +2570,7 @@ def create_app(
                 connection.execute(
                     """UPDATE nodes
                        SET hostname = ?, labels_json = ?, token_hash = ?, enrolled_at = ?, updated_at = ?,
-                           last_seen_at = NULL, reported_status = 'offline'
+                           last_seen_at = NULL, reported_status = 'offline', revoked_at = NULL
                        WHERE id = ?""",
                     (
                         pending["hostname"],
@@ -1965,6 +2638,75 @@ def create_app(
             )
         return {"rejected": True, "idempotent": False}
 
+    @api.get("/api/v1/admin/audit")
+    def list_audit(
+        before_id: Optional[int] = Query(None, ge=1),
+        actor: Optional[str] = Query(None, max_length=128),
+        event: Optional[str] = Query(None, max_length=128),
+        limit: int = Query(100, ge=1, le=500),
+        admin: Dict[str, Any] = Depends(require_session),
+    ) -> Dict[str, Any]:
+        conditions: List[str] = []
+        parameters: List[Any] = []
+        if before_id is not None:
+            conditions.append("id < ?")
+            parameters.append(before_id)
+        if actor:
+            conditions.append("actor_id = ?")
+            parameters.append(actor)
+        if event:
+            conditions.append("event = ?")
+            parameters.append(event)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        parameters.append(limit)
+        with database.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM audit" + where + " ORDER BY id DESC LIMIT ?", parameters
+            ).fetchall()
+        return {
+            "items": [
+                {
+                    "id": row["id"],
+                    "created_at": _utc_iso(row["created_at"]),
+                    "actor_type": row["actor_type"],
+                    "actor_id": row["actor_id"],
+                    "event": row["event"],
+                    "target_type": row["target_type"],
+                    "target_id": row["target_id"],
+                    "detail": json.loads(row["detail_json"] or "{}"),
+                }
+                for row in rows
+            ],
+            "next_before_id": rows[-1]["id"] if len(rows) == limit else None,
+        }
+
+    @api.post("/api/v1/admin/maintenance/prune")
+    def prune_data(
+        vacuum: bool = Query(False),
+        admin: Dict[str, Any] = Depends(require_superadmin),
+    ) -> Dict[str, Any]:
+        now = int(time.time())
+        with database.transaction() as connection:
+            removed = Database.prune(
+                connection,
+                now,
+                settings.job_retention_seconds,
+                settings.audit_retention_seconds,
+            )
+            Database.audit(
+                connection,
+                admin["auth_source"],
+                admin["username"],
+                "maintenance_pruned",
+                "database",
+                None,
+                {"removed": removed, "vacuum": vacuum},
+            )
+        if vacuum:
+            with database.connection() as connection:
+                connection.execute("VACUUM")
+        return {"removed": removed, "vacuumed": vacuum}
+
     @api.get("/api/v1/admin/snapshot")
     def snapshot(admin: Dict[str, Any] = Depends(require_session)) -> Dict[str, Any]:
         now = int(time.time())
@@ -1991,30 +2733,95 @@ def create_app(
     @api.get("/api/v1/admin/ui-state")
     def get_ui_state(admin: Dict[str, Any] = Depends(require_session)) -> Dict[str, Any]:
         with database.connection() as connection:
-            row = connection.execute("SELECT revision, state_json FROM ui_state WHERE singleton_id = 1").fetchone()
-        return {"revision": row["revision"], "state": json.loads(row["state_json"])}
+            return _load_ui_state_document(connection)
 
     @api.put("/api/v1/admin/ui-state")
     def put_ui_state(request: UIStatePutRequest, admin: Dict[str, Any] = Depends(require_operator)) -> Any:
         if _contains_sensitive_material(request.state):
             raise HTTPException(status_code=400, detail="UI state must not contain tokens, secrets, passwords, or private keys")
-        state_json = _canonical_json(request.state)
-        if len(state_json.encode("utf-8")) > settings.max_ui_state_bytes:
+        full_state_json = _canonical_json(request.state)
+        if len(full_state_json.encode("utf-8")) > settings.max_ui_state_bytes:
             raise HTTPException(status_code=413, detail="UI state is too large")
+        resources: Dict[str, List[Tuple[str, str, str]]] = {"site": [], "certificate": []}
+        for kind, state_key in (("site", "sites"), ("certificate", "certificates")):
+            documents = request.state.get(state_key, [])
+            if not isinstance(documents, list):
+                raise HTTPException(status_code=400, detail=state_key + " must be an array")
+            seen_ids = set()
+            for document in documents:
+                if not isinstance(document, dict):
+                    raise HTTPException(status_code=400, detail=state_key + " contains an invalid document")
+                resource_id = str(document.get("id") or "")
+                if not resource_id:
+                    resource_id = "legacy-" + _sha256_text(_canonical_json(document))[:24]
+                if re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", resource_id) is None or resource_id in seen_ids:
+                    raise HTTPException(status_code=400, detail=state_key + " contains an invalid or duplicate id")
+                seen_ids.add(resource_id)
+                document_json = _canonical_json(document)
+                if len(document_json.encode("utf-8")) > settings.max_resource_bytes:
+                    raise HTTPException(status_code=413, detail=kind + " resource is too large")
+                resources[kind].append((resource_id, document_json, _sha256_text(document_json)))
+        compact_state = dict(request.state)
+        compact_state.pop("sites", None)
+        compact_state.pop("certificates", None)
+        compact_state["_resources_split_v1"] = True
+        state_json = _canonical_json(compact_state)
         now = int(time.time())
         with database.transaction() as connection:
             current = connection.execute(
                 "SELECT revision, state_json FROM ui_state WHERE singleton_id = 1"
             ).fetchone()
             if current["revision"] != request.revision:
+                authoritative = _load_ui_state_document(connection)
                 return JSONResponse(
                     status_code=409,
                     content={
                         "detail": "revision conflict",
-                        "revision": current["revision"],
-                        "state": json.loads(current["state_json"]),
+                        "revision": authoritative["revision"],
+                        "state": authoritative["state"],
                     },
                 )
+            for kind, documents in resources.items():
+                ids = [item[0] for item in documents]
+                if ids:
+                    connection.execute(
+                        "DELETE FROM resources WHERE kind = ? AND id NOT IN ("
+                        + ",".join("?" for _ in ids) + ")",
+                        [kind] + ids,
+                    )
+                else:
+                    connection.execute("DELETE FROM resources WHERE kind = ?", (kind,))
+                for position, (resource_id, document_json, document_digest) in enumerate(documents):
+                    existing = connection.execute(
+                        "SELECT revision, document_sha256 FROM resources WHERE kind = ? AND id = ?",
+                        (kind, resource_id),
+                    ).fetchone()
+                    if existing is None:
+                        connection.execute(
+                            """INSERT INTO resources
+                               (kind, id, revision, position, document_json, document_sha256, updated_at, updated_by)
+                               VALUES (?, ?, 1, ?, ?, ?, ?, ?)""",
+                            (kind, resource_id, position, document_json, document_digest, now, admin["username"]),
+                        )
+                    else:
+                        next_resource_revision = int(existing["revision"]) + (
+                            1 if existing["document_sha256"] != document_digest else 0
+                        )
+                        connection.execute(
+                            """UPDATE resources SET revision = ?, position = ?, document_json = ?,
+                               document_sha256 = ?, updated_at = ?, updated_by = ?
+                               WHERE kind = ? AND id = ?""",
+                            (
+                                next_resource_revision,
+                                position,
+                                document_json,
+                                document_digest,
+                                now,
+                                admin["username"],
+                                kind,
+                                resource_id,
+                            ),
+                        )
             next_revision = request.revision + 1
             connection.execute(
                 "UPDATE ui_state SET revision = ?, state_json = ?, updated_at = ? WHERE singleton_id = 1",
@@ -2027,7 +2834,7 @@ def create_app(
                 "ui_state_updated",
                 "ui_state",
                 "1",
-                {"revision": next_revision, "state_sha256": _sha256_text(state_json), "role": admin["role"]},
+                {"revision": next_revision, "state_sha256": _sha256_text(full_state_json), "role": admin["role"]},
             )
         return {"revision": next_revision, "state": request.state}
 

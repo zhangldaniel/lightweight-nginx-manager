@@ -3620,11 +3620,7 @@
           </div>
           <div class="form-field">
             <label for="cert-days">有效期</label>
-            <select class="select" id="cert-days" name="days">
-              <option value="90">90 天</option>
-              <option value="365">1 年</option>
-              <option value="30">30 天</option>
-            </select>
+            <input class="input" id="cert-days" value="上传后由 Agent 解析" disabled>
           </div>
           <div class="form-field full" id="cert-upload-fields">
             <label>新证书与私钥</label>
@@ -4105,6 +4101,7 @@
         state.certificates = Array.isArray(remoteState.certificates) ? remoteState.certificates : [];
         state.importedInventoryJobs = Array.isArray(remoteState.importedInventoryJobs) ? remoteState.importedInventoryJobs : [];
         state.importedCertificateInventoryJobs = Array.isArray(remoteState.importedCertificateInventoryJobs) ? remoteState.importedCertificateInventoryJobs : [];
+        state.processedOperationIds = Array.isArray(remoteState.processedOperationIds) ? remoteState.processedOperationIds : [];
         return normalizeSiteDeploymentStates(state.sites);
       }
 
@@ -4122,6 +4119,7 @@
           normalizeSiteDeploymentStates(parsed.sites);
           parsed.importedInventoryJobs = Array.isArray(parsed.importedInventoryJobs) ? parsed.importedInventoryJobs : [];
           parsed.importedCertificateInventoryJobs = Array.isArray(parsed.importedCertificateInventoryJobs) ? parsed.importedCertificateInventoryJobs : [];
+          parsed.processedOperationIds = Array.isArray(parsed.processedOperationIds) ? parsed.processedOperationIds : [];
           return parsed;
         } catch (error) {
           return clone(seedState);
@@ -4129,7 +4127,7 @@
       }
 
       var state = remoteMode
-        ? { nodes: [], certificates: [], sites: [], runs: [], importedInventoryJobs: [], importedCertificateInventoryJobs: [] }
+        ? { nodes: [], certificates: [], sites: [], runs: [], importedInventoryJobs: [], importedCertificateInventoryJobs: [], processedOperationIds: [] }
         : loadState();
 
       function saveState() {
@@ -4142,7 +4140,8 @@
           sites: state.sites,
           certificates: state.certificates,
           importedInventoryJobs: state.importedInventoryJobs || [],
-          importedCertificateInventoryJobs: state.importedCertificateInventoryJobs || []
+          importedCertificateInventoryJobs: state.importedCertificateInventoryJobs || [],
+          processedOperationIds: state.processedOperationIds || []
         };
       }
 
@@ -4172,6 +4171,26 @@
           throw apiError;
         }
         return body;
+      }
+
+      async function submitOperation(operationBody) {
+        try {
+          return await apiRequest('/api/v1/admin/operations', {
+            method: 'POST',
+            body: operationBody
+          });
+        } catch (submissionError) {
+          try {
+            var recovered = await apiRequest(
+              '/api/v1/admin/operations/' + encodeURIComponent(operationBody.request_id)
+            );
+            recovered.recovered_after_uncertain_submit = true;
+            return recovered;
+          } catch (lookupError) {
+            submissionError.operationRequestId = operationBody.request_id;
+            throw submissionError;
+          }
+        }
       }
 
       function scheduleRemoteSave() {
@@ -4518,13 +4537,21 @@
           status: job.status === 'succeeded' ? 'success' : (job.status === 'failed' || job.status === 'expired' ? 'failed' : 'running'),
           time: job.created_at ? new Date(job.created_at).toLocaleString('zh-CN', { hour12: false }) : '刚刚',
           duration: result.duration_ms != null ? (Number(result.duration_ms) / 1000).toFixed(1) + 's' : '—',
-          user: '控制端',
+          user: job.created_by || '控制端',
           note: failure ? failure.reason : '任务 ' + job.id.slice(0, 8) + ' · ' + job.status,
           failureReason: failure ? failure.reason : '',
           failureStage: failure ? failure.stageLabel : '',
           rollbackStatus: failure ? failure.rollback : '',
           log: log.length ? log : ['详细输出仅保留摘要和校验值，避免泄露敏感配置。']
         };
+      }
+
+      function rememberProcessedOperation(operationId) {
+        if (!operationId || (state.processedOperationIds || []).includes(operationId)) return false;
+        state.processedOperationIds = state.processedOperationIds || [];
+        state.processedOperationIds.push(operationId);
+        state.processedOperationIds = state.processedOperationIds.slice(-2000);
+        return true;
       }
 
       function applyRemoteJobOutcomes(jobs) {
@@ -4550,7 +4577,9 @@
               var job = byId[item.id];
               if (!job || job.status !== 'succeeded') return;
               if (job.result && job.result.config_hash) site.nodeHashes[item.nodeId] = job.result.config_hash;
-              if (item.path) site.nodeConfigPaths[item.nodeId] = item.path;
+              if (item.path || (job.result && job.result.path)) {
+                site.nodeConfigPaths[item.nodeId] = item.path || job.result.path;
+              }
               delete site.nodeConfigs[item.nodeId];
             });
           }
@@ -4626,12 +4655,23 @@
           } else if (pending.publish) {
             site.version += 1;
             site.status = 'published';
-            site.updatedAt = '刚刚';
+            site.updatedAt = related[0] && related[0].completed_at
+              ? new Date(related[0].completed_at).toLocaleString('zh-CN', { hour12: false })
+              : new Date().toLocaleString('zh-CN', { hour12: false });
             site.history = site.history || [];
-            site.history.unshift({ version: site.version, note: site.changeNote || '发布配置', time: '刚刚', user: '控制端' });
+            site.history.unshift({
+              version: site.version,
+              revisionId: pending.candidateRevisionId || '',
+              note: site.changeNote || '发布配置',
+              time: site.updatedAt,
+              user: (related[0] && related[0].created_by)
+                || (typeof currentUsername === 'string' && currentUsername)
+                || '控制端'
+            });
           } else {
             site.status = 'draft';
           }
+          rememberProcessedOperation(pending.operationId);
           delete site.pendingRemote;
           changed = true;
         });
@@ -4650,8 +4690,17 @@
                 certificateHash: job.result.certificate_sha256,
                 keyHash: job.result.key_material_sha256
               };
+              if (Array.isArray(job.result.certificate_domains) && job.result.certificate_domains.length) {
+                certificate.domains = job.result.certificate_domains.slice();
+                certificate.domain = certificate.domains[0];
+              }
+              if (job.result.certificate_issuer) certificate.issuer = job.result.certificate_issuer;
+              if (job.result.certificate_not_after) certificate.notAfter = job.result.certificate_not_after;
+              if (job.result.certificate_fingerprint) certificate.fingerprint = job.result.certificate_fingerprint;
+              certificate.days = certificateDays(certificate);
             }
           });
+          rememberProcessedOperation(pending.operationId);
           delete certificate.pendingRemote;
           changed = true;
         });
@@ -4977,15 +5026,73 @@
         var requests = [
           apiRequest('/api/v1/admin/nodes'),
           apiRequest('/api/v1/admin/jobs?limit=100'),
-          apiRequest('/api/v1/admin/enrollments?status=pending&limit=100')
+          apiRequest('/api/v1/admin/enrollments?status=pending&limit=100'),
+          apiRequest('/api/v1/admin/operations?limit=500')
         ];
         if (includeUiState) requests.push(apiRequest('/api/v1/admin/ui-state'));
         var responses = await Promise.all(requests);
         if (includeUiState) {
-          normalizedDeploymentState = applyRemoteUiStateDocument(responses[3] || { revision: 0, state: {} });
+          normalizedDeploymentState = applyRemoteUiStateDocument(responses[4] || { revision: 0, state: {} });
         }
         pendingEnrollments = (responses[2] && responses[2].items) || [];
         var rawJobs = responses[1].items || [];
+        var activeOperations = ((responses[3] && responses[3].items) || []).filter(function (operation) {
+          return ['queued', 'running'].includes(operation.status)
+            || !(state.processedOperationIds || []).includes(operation.id);
+        });
+        if (activeOperations.length) {
+          var operationDocuments = await Promise.all(activeOperations.map(function (operation) {
+            return apiRequest('/api/v1/admin/operations/' + encodeURIComponent(operation.id));
+          }));
+          operationDocuments.forEach(function (document) {
+            var operation = document.operation || {};
+            if (operation.kind === 'certificate') {
+              var certificateId = String(operation.site_id || '').replace(/^certificate:/, '');
+              var certificate = getCert(certificateId);
+              if (!certificate && !['queued', 'running'].includes(operation.status)) {
+                normalizedDeploymentState = rememberProcessedOperation(operation.id) || normalizedDeploymentState;
+              }
+              if (certificate && !certificate.pendingRemote && Array.isArray(document.jobs) && document.jobs.length) {
+                certificate.pendingRemote = {
+                  operationId: operation.id,
+                  jobs: document.jobs.map(function (job) { return { id: job.id, nodeId: job.node_id }; })
+                };
+              }
+              return;
+            }
+            var site = getSite(operation.site_id);
+            if (!site && !['queued', 'running'].includes(operation.status)) {
+              normalizedDeploymentState = rememberProcessedOperation(operation.id) || normalizedDeploymentState;
+            }
+            if (!site || site.pendingRemote || !Array.isArray(document.jobs) || !document.jobs.length) return;
+            site.pendingRemote = {
+              operationId: operation.id,
+              candidateRevisionId: operation.candidate_revision_id,
+              jobs: document.jobs.map(function (job) {
+                return { id: job.id, nodeId: job.node_id };
+              }),
+              operation: operation.kind,
+              publish: operation.kind === 'publish',
+              deleteConfig: operation.kind === 'delete',
+              transfer: operation.kind === 'transfer',
+              baseStatus: operation.kind === 'validate' ? validationBaseStatus(site) : site.status
+            };
+            if (operation.kind === 'publish') site.status = 'publishing';
+          });
+        }
+        var pendingJobIds = [];
+        state.sites.concat(state.certificates).forEach(function (resource) {
+          var pending = resource && resource.pendingRemote;
+          (pending && Array.isArray(pending.jobs) ? pending.jobs : []).forEach(function (job) {
+            if (job.id && !pendingJobIds.includes(job.id)) pendingJobIds.push(job.id);
+          });
+        });
+        if (pendingJobIds.length) {
+          var pendingResponse = await apiRequest('/api/v1/admin/jobs?limit=500&ids=' + encodeURIComponent(pendingJobIds.join(',')));
+          var jobsById = {};
+          rawJobs.concat(pendingResponse.items || []).forEach(function (job) { jobsById[job.id] = job; });
+          rawJobs = Object.keys(jobsById).map(function (jobId) { return jobsById[jobId]; });
+        }
         state.nodes = (responses[0].items || []).map(mapRemoteNode);
         normalizedDeploymentState = normalizeNoopDraftStates(state.sites) || normalizedDeploymentState;
         if (siteNodeFilter !== 'all' && !getNode(siteNodeFilter)) siteNodeFilter = 'all';
@@ -5192,11 +5299,20 @@
         return { label: '成功', className: '' };
       }
 
+      function certificateDays(cert) {
+        if (cert && cert.notAfter) {
+          var expiresAt = Date.parse(cert.notAfter);
+          if (Number.isFinite(expiresAt)) return Math.floor((expiresAt - Date.now()) / 86400000);
+        }
+        return Number(cert && cert.days || 0);
+      }
+
       function certStatus(cert) {
+        var days = certificateDays(cert);
         if (cert.pendingRemote) return { label: '部署中', className: 'draft' };
         if (cert.deployStatus === 'failed') return { label: '部署失败', className: 'danger' };
-        if (cert.days <= 7) return { label: cert.days + ' 天后到期', className: 'danger' };
-        if (cert.days <= 30) return { label: cert.days + ' 天后到期', className: 'warn' };
+        if (days <= 7) return { label: days + ' 天后到期', className: 'danger' };
+        if (days <= 30) return { label: days + ' 天后到期', className: 'warn' };
         return { label: '正常', className: '' };
       }
 
@@ -5286,7 +5402,7 @@
       }
 
       function renderSummary() {
-        var expiring = state.certificates.filter(function (cert) { return cert.days <= 30; }).length;
+        var expiring = state.certificates.filter(function (cert) { return certificateDays(cert) <= 30; }).length;
         var drift = state.sites.filter(function (site) { return site.status === 'drift' || site.status === 'failed' || hasValidationFailure(site); }).length;
         var deployedSites = state.sites.filter(function (site) { return (site.nodeIds || []).length > 0; }).length;
         return [
@@ -5357,7 +5473,7 @@
             '<div class="table-row ' + (site.id === selectedSiteId ? 'selected' : '') + '" data-site-select="' + escapeHtml(site.id) + '">',
             '  <div class="table-cell primary" data-label="站点"><button class="site-open" type="button" data-site-select="' + escapeHtml(site.id) + '"><span class="cell-title">' + escapeHtml(site.domain) + '</span><span class="cell-sub">' + escapeHtml(site.note || formatSiteType(site.type)) + '</span></button></div>',
             '  <div class="table-cell" data-label="目标节点"><div class="chips">' + nodeChips + '</div></div>',
-            '  <div class="table-cell" data-label="证书"><span class="cell-title">' + escapeHtml(cert ? cert.domain : (confTls ? 'Conf 内定义' : '未绑定')) + '</span><span class="cell-sub">' + (cert ? '剩余 ' + cert.days + ' 天' : (confTls ? 'TLS 路径由配置提供' : '仅 HTTP')) + '</span></div>',
+            '  <div class="table-cell" data-label="证书"><span class="cell-title">' + escapeHtml(cert ? cert.domain : (confTls ? 'Conf 内定义' : '未绑定')) + '</span><span class="cell-sub">' + (cert ? '剩余 ' + certificateDays(cert) + ' 天' : (confTls ? 'TLS 路径由配置提供' : '仅 HTTP')) + '</span></div>',
             '  <div class="table-cell" data-label="配置版本"><span class="cell-title">' + siteVersionLabel(site) + '</span><span class="cell-sub">' + escapeHtml(site.updatedAt) + '</span></div>',
             '  <div class="table-cell" data-label="状态"><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
             '</div>'
@@ -5479,7 +5595,7 @@
           '    <div class="detail-block"><span class="detail-label">配置预览' + (previewNode ? ' · ' + escapeHtml(previewNode.name) : '') + '</span><div class="config-preview-meta"><span>' + previewSource + ' · SHA-256 ' + escapeHtml(previewHash) + '</span><code>' + escapeHtml(previewPath) + '</code></div><pre class="config-preview">' + escapeHtml(previewConfig) + '</pre></div>',
           '    <div class="detail-block"><span class="detail-label">配置备注</span><div class="detail-value">' + escapeHtml(site.note || '暂无备注') + '</div><span class="cell-sub">最近变更：' + escapeHtml(site.changeNote || '暂无') + '</span></div>',
           '    <div class="detail-block"><span class="detail-label">部署节点</span><div class="node-mini-list">' + nodeRows + '</div></div>',
-          '    <div class="detail-block"><span class="detail-label">证书</span><div class="detail-value">' + (cert ? escapeHtml(cert.domain) + ' · ' + escapeHtml(cert.issuer) : (confTls ? 'Conf 内已定义 TLS' : '未绑定证书')) + (certificateDomainMismatch ? ' <span class="status-pill danger">域名不匹配</span>' : '') + '</div><span class="cell-sub">' + (cert ? (certificateDomainMismatch ? '该证书不覆盖 ' + escapeHtml(site.domain) + '，请在编辑配置中更换' : '剩余 ' + cert.days + ' 天 · ' + escapeHtml(cert.source)) : (confTls ? '证书与私钥路径由配置正文提供' : '当前仅 HTTP')) + '</span></div>',
+          '    <div class="detail-block"><span class="detail-label">证书</span><div class="detail-value">' + (cert ? escapeHtml(cert.domain) + ' · ' + escapeHtml(cert.issuer) : (confTls ? 'Conf 内已定义 TLS' : '未绑定证书')) + (certificateDomainMismatch ? ' <span class="status-pill danger">域名不匹配</span>' : '') + '</div><span class="cell-sub">' + (cert ? (certificateDomainMismatch ? '该证书不覆盖 ' + escapeHtml(site.domain) + '，请在编辑配置中更换' : '剩余 ' + certificateDays(cert) + ' 天 · ' + escapeHtml(cert.source)) : (confTls ? '证书与私钥路径由配置正文提供' : '当前仅 HTTP')) + '</span></div>',
           '    <div class="detail-block"><span class="detail-label">版本记录</span><div class="node-mini-list">' + history + '</div></div>',
           '  </div>',
           '</aside>'
@@ -5524,8 +5640,9 @@
       function renderCertificates() {
         var rows = state.certificates.map(function (cert) {
           var status = certStatus(cert);
-          var width = Math.max(5, Math.min(100, Math.round(cert.days / 90 * 100)));
-          var barClass = cert.days <= 7 ? 'danger' : (cert.days <= 30 ? 'warn' : '');
+          var days = certificateDays(cert);
+          var width = Math.max(5, Math.min(100, Math.round(days / 90 * 100)));
+          var barClass = days <= 7 ? 'danger' : (days <= 30 ? 'warn' : '');
           var sites = (cert.siteIds || []).map(getSite).filter(Boolean);
           var locations = (cert.nodeIds || []).map(function (nodeId) {
             var node = getNode(nodeId);
@@ -5537,7 +5654,7 @@
             '<div class="table-row">',
             '  <div class="table-cell primary" data-label="证书"><span class="cell-title">' + escapeHtml(cert.name) + '</span><span class="cell-sub">' + escapeHtml(cert.domain) + '</span><span class="cell-sub">' + escapeHtml(cert.source) + ' · ' + escapeHtml(cert.issuer) + '</span><span class="cell-sub">人工替换 · ' + sites.length + ' 个站点 · ' + (cert.nodeIds || []).length + ' 个节点</span></div>',
             '  <div class="table-cell" data-label="节点与证书文件">' + (locations ? '<div class="cert-location-list">' + locations + '</div>' : '<span class="cert-location-empty">尚未写入节点</span>') + '</div>',
-            '  <div class="table-cell" data-label="有效期"><div class="cert-progress"><div class="progress-track"><i class="' + barClass + '" style="width:' + width + '%"></i></div><span class="cell-sub">' + cert.days + ' 天</span></div></div>',
+            '  <div class="table-cell" data-label="有效期"><div class="cert-progress"><div class="progress-track"><i class="' + barClass + '" style="width:' + width + '%"></i></div><span class="cell-sub">' + days + ' 天</span></div></div>',
             '  <div class="table-cell" data-label="状态"><span class="status-pill ' + status.className + '">' + status.label + '</span></div>',
             '  <div class="table-cell" data-label="操作"><div class="cert-actions"><button class="cert-action" type="button" data-action="replace-cert" data-cert-id="' + escapeHtml(cert.id) + '">替换证书</button></div></div>',
             '</div>'
@@ -5725,7 +5842,7 @@
               : (cert.pendingRemote
               ? ' · 仍在部署中'
               : (available ? ' · 域名和节点均匹配' : ' · 缺少：' + missingNames.join('、'))));
-          return '<option value="' + escapeHtml(cert.id) + '"' + (available ? '' : ' disabled') + '>' + escapeHtml(cert.domain) + ' · 剩余 ' + cert.days + ' 天' + escapeHtml(suffix) + '</option>';
+          return '<option value="' + escapeHtml(cert.id) + '"' + (available ? '' : ' disabled') + '>' + escapeHtml(cert.domain) + ' · 剩余 ' + certificateDays(cert) + ' 天' + escapeHtml(suffix) + '</option>';
         }).join('');
         var previousCert = previousValue ? getCert(previousValue) : null;
         if (previousCert && selectedNodeIds.length && !certificateMissingNodeIds(previousCert, selectedNodeIds).length
@@ -5968,7 +6085,7 @@
               ? ' · 不覆盖 ' + site.domain
               : (cert.pendingRemote ? ' · 仍在部署中' : ' · 部分节点缺少'));
           return '<option value="' + escapeHtml(cert.id) + '"' + ((!certState.available && !current) ? ' disabled' : '') + '>'
-            + escapeHtml(cert.domain) + ' · 剩余 ' + cert.days + ' 天' + escapeHtml(suffix) + '</option>';
+            + escapeHtml(cert.domain) + ' · 剩余 ' + certificateDays(cert) + ' 天' + escapeHtml(suffix) + '</option>';
         }).join('');
         select.value = currentId;
         select.dataset.original = currentId;
@@ -6553,6 +6670,8 @@
           : null;
         if (!willPublish) site.status = baseStatus;
         try {
+          var operationJobs = [];
+          var jobMetadataByNode = {};
           for (var index = 0; index < targets.length; index += 1) {
             var node = targets[index];
             var targetPath = managedConfigPath(site, node);
@@ -6566,25 +6685,19 @@
               unchangedNodes.push(node);
               continue;
             }
-            var response = await apiRequest('/api/v1/admin/jobs', {
-              method: 'POST',
-              body: {
-                node_ids: [node.id],
-                action: 'config_apply',
-                ttl_seconds: 300,
-                payload: {
+            operationJobs.push({
+              node_id: node.id,
+              action: 'config_apply',
+              payload: {
                   path: targetPath,
                   content: candidateContent,
                   expected_sha256: knownHash || 'missing',
                   new_sha256: candidateHash,
                   validate_only: !willPublish,
                   reload: Boolean(willPublish)
-                }
               }
             });
-            (response.jobs || []).forEach(function (job) {
-              queued.push({ id: job.id, nodeId: job.node_id, path: targetPath, candidateHash: candidateHash });
-            });
+            jobMetadataByNode[node.id] = { path: targetPath, candidateHash: candidateHash };
           }
           if (willPublish && !queued.length && unchangedNodes.length === targets.length) {
             delete site.pendingRemote;
@@ -6595,10 +6708,34 @@
             render();
             return;
           }
+          if (!operationJobs.length) throw new Error('控制端没有创建任何目标任务');
+          var candidateSnapshot = clone(site);
+          delete candidateSnapshot.pendingRemote;
+          delete candidateSnapshot.lastFailure;
+          var response = await submitOperation({
+              request_id: uid('operation'),
+              site_id: site.id,
+              kind: operation,
+              base_version: Number(site.version || 0),
+              candidate: candidateSnapshot,
+              jobs: operationJobs,
+              ttl_seconds: 300
+          });
+          (response.jobs || []).forEach(function (job) {
+            var metadata = jobMetadataByNode[job.node_id] || {};
+            queued.push({
+              id: job.id,
+              nodeId: job.node_id,
+              path: metadata.path || '',
+              candidateHash: metadata.candidateHash || ''
+            });
+          });
           if (!queued.length) throw new Error('控制端没有创建任何目标任务');
           delete site.lastFailure;
           site.pendingRemote = {
             jobs: queued,
+            operationId: response.operation && response.operation.id,
+            candidateRevisionId: response.operation && response.operation.candidate_revision_id,
             publish: Boolean(willPublish),
             operation: operation,
             baseStatus: baseStatus,
@@ -6636,32 +6773,42 @@
         var targets = nodeIds.map(getNode).filter(Boolean);
         var queued = [];
         try {
+          var transferJobs = [];
+          var transferPaths = {};
           for (var index = 0; index < targets.length; index += 1) {
             var node = targets[index];
             var targetPath = migrationConfigPath(site, node);
-            var response = await apiRequest('/api/v1/admin/jobs', {
-              method: 'POST',
-              body: {
-                node_ids: [node.id],
-                action: 'config_apply',
-                ttl_seconds: 300,
-                payload: {
+            transferPaths[node.id] = targetPath;
+            transferJobs.push({
+              node_id: node.id,
+              action: 'config_apply',
+              payload: {
                   path: targetPath,
                   content: managedConfigContent(site, node),
                   expected_sha256: mode === 'replace' ? 'present' : 'missing',
                   validate_only: false,
                   reload: true
-                }
               }
             });
-            (response.jobs || []).forEach(function (job) {
-              queued.push({ id: job.id, nodeId: job.node_id, path: targetPath });
-            });
           }
+          var response = await submitOperation({
+              request_id: uid('operation'),
+              site_id: site.id,
+              kind: 'transfer',
+              base_version: Number(site.version || 0),
+              candidate: { mode: mode, targetNodeIds: nodeIds.slice() },
+              jobs: transferJobs,
+              ttl_seconds: 300
+          });
+          (response.jobs || []).forEach(function (job) {
+            queued.push({ id: job.id, nodeId: job.node_id, path: transferPaths[job.node_id] || '' });
+          });
           if (!queued.length) throw new Error('控制端没有创建任何目标任务');
           delete site.lastFailure;
           site.pendingRemote = {
             jobs: queued,
+            operationId: response.operation && response.operation.id,
+            operation: 'transfer',
             publish: false,
             transfer: true,
             transferMode: mode,
@@ -6694,33 +6841,43 @@
         var targets = nodeIds.map(getNode).filter(Boolean);
         var queued = [];
         try {
+          var deleteJobs = [];
+          var deletePaths = {};
           for (var index = 0; index < targets.length; index += 1) {
             var node = targets[index];
             var knownHash = site.nodeHashes && site.nodeHashes[node.id];
             if (!knownHash) throw new Error(node.name + ' 缺少当前配置 Hash，已停止删除');
             if (!versionAtLeast(node.agent, 0, 4, 0)) throw new Error(node.name + ' 需要升级到 Agent 0.4.0+');
             var targetPath = managedConfigPath(site, node);
-            var response = await apiRequest('/api/v1/admin/jobs', {
-              method: 'POST',
-              body: {
-                node_ids: [node.id],
-                action: 'config_delete',
-                ttl_seconds: 300,
-                payload: {
+            deletePaths[node.id] = targetPath;
+            deleteJobs.push({
+              node_id: node.id,
+              action: 'config_delete',
+              payload: {
                   path: targetPath,
                   expected_sha256: knownHash,
                   reload: true
-                }
               }
             });
-            (response.jobs || []).forEach(function (job) {
-              queued.push({ id: job.id, nodeId: job.node_id, path: targetPath });
-            });
           }
+          var response = await submitOperation({
+              request_id: uid('operation'),
+              site_id: site.id,
+              kind: 'delete',
+              base_version: Number(site.version || 0),
+              candidate: { targetNodeIds: nodeIds.slice() },
+              jobs: deleteJobs,
+              ttl_seconds: 300
+          });
+          (response.jobs || []).forEach(function (job) {
+            queued.push({ id: job.id, nodeId: job.node_id, path: deletePaths[job.node_id] || '' });
+          });
           if (!queued.length) throw new Error('控制端没有创建任何删除任务');
           delete site.lastFailure;
           site.pendingRemote = {
             jobs: queued,
+            operationId: response.operation && response.operation.id,
+            operation: 'delete',
             publish: false,
             deleteConfig: true,
             targetNodeIds: nodeIds.slice()
@@ -6962,6 +7119,32 @@
         showHistoricalRun(run);
       }
 
+      async function restorePublishedRevision(site, version) {
+        if (!remoteConnected) {
+          notify('演示模式没有服务端不可变版本，无法执行真实回滚');
+          return;
+        }
+        try {
+          var revision = await apiRequest(
+            '/api/v1/admin/sites/' + encodeURIComponent(site.id) + '/revisions/' + encodeURIComponent(String(version))
+          );
+          var snapshot = revision.snapshot || {};
+          ['domain', 'type', 'target', 'configMode', 'config', 'certificateId', 'environment', 'note'].forEach(function (key) {
+            if (Object.prototype.hasOwnProperty.call(snapshot, key)) site[key] = clone(snapshot[key]);
+          });
+          site.changeNote = '恢复历史 v' + version + '（快照 ' + String(revision.snapshot_sha256 || '').slice(0, 12) + '）';
+          site.status = 'draft';
+          site.rollbackSourceRevisionId = revision.id;
+          saveState();
+          notify('已载入历史 v' + version + ' 的真实配置快照，请校验后发布');
+          openConfigEditor(site.id);
+        } catch (error) {
+          notify(error.status === 404
+            ? '该版本产生于升级前，没有可恢复的配置快照'
+            : '读取历史版本失败：' + error.message);
+        }
+      }
+
       document.addEventListener('close', function (event) {
         if (event.target && event.target.tagName === 'DIALOG') restoreDialogToast(event.target);
       }, true);
@@ -7054,11 +7237,7 @@
           var rollbackSite = getSite(siteId);
           var version = Number(actionTarget.getAttribute('data-version'));
           if (rollbackSite) {
-            rollbackSite.changeNote = '基于历史 v' + version + ' 创建回滚发布';
-            rollbackSite.status = 'draft';
-            saveState();
-            notify('已创建回滚草稿，仍需重新校验和发布');
-            openConfigEditor(rollbackSite.id);
+            restorePublishedRevision(rollbackSite, version);
           }
         }
         else if (action === 'import-drift') {
@@ -7114,7 +7293,9 @@
           document.getElementById('cert-domain').value = cert.domain;
           document.getElementById('cert-domain').readOnly = true;
           document.getElementById('cert-source').value = '手动上传';
-          document.getElementById('cert-days').value = ['30', '90', '365'].includes(String(cert.days)) ? String(cert.days) : '90';
+          document.getElementById('cert-days').value = cert.notAfter
+            ? '到期：' + new Date(cert.notAfter).toLocaleString('zh-CN', { hour12: false })
+            : '替换后由 Agent 重新解析';
           document.getElementById('cert-note').value = cert.note || '';
           document.getElementById('cert-upload-fields').hidden = false;
           document.getElementById('cert-pem-file').required = true;
@@ -7412,7 +7593,7 @@
         var selectedNodeIds = Array.from(document.querySelectorAll('input[name="cert-node"]:checked')).map(function (input) { return input.value; });
         var existingCertificate = editingCertificateId ? getCert(editingCertificateId) : null;
         var replacingCertificate = Boolean(existingCertificate);
-        var cert = existingCertificate || {
+        var cert = existingCertificate ? clone(existingCertificate) : {
           id: uid('cert'),
           siteIds: [],
           nodeHashes: {},
@@ -7422,7 +7603,7 @@
           name: String(form.get('name')).trim(),
           domain: String(form.get('domain')).trim(),
           issuer: replacingCertificate ? (cert.issuer || '待重新识别') : '待识别',
-          days: Number(form.get('days')),
+          days: replacingCertificate ? certificateDays(existingCertificate) : 0,
           source: '手动上传',
           autoRenew: false,
           nodeIds: replacingCertificate ? (cert.nodeIds || []).slice() : selectedNodeIds.slice(),
@@ -7453,6 +7634,7 @@
           }
           var queuedCertificates = [];
           try {
+            var certificateJobs = [];
             for (var certNodeIndex = 0; certNodeIndex < selectedNodeIds.length; certNodeIndex += 1) {
               var certNode = getNode(selectedNodeIds[certNodeIndex]);
               var targetPaths = certificateTargetPaths(cert, certNode);
@@ -7467,29 +7649,53 @@
               if (replacingCertificate && (!expectedCertificateHash || !expectedKeyHash)) {
                 throw new Error((certNode ? certNode.name : selectedNodeIds[certNodeIndex]) + ' 缺少旧证书校验值，请先确认该节点的上次部署结果');
               }
-              var certResponse = await apiRequest('/api/v1/admin/jobs', {
-                method: 'POST',
-                body: {
-                  node_ids: [selectedNodeIds[certNodeIndex]],
-                  action: 'certificate_apply',
-                  ttl_seconds: 300,
-                  payload: {
+              certificateJobs.push({
+                node_id: selectedNodeIds[certNodeIndex],
+                action: 'certificate_apply',
+                payload: {
                     certificate: { path: certificatePath, pem: certificatePem, expected_sha256: expectedCertificateHash || 'missing' },
                     private_key: { path: privateKeyPath, pem: privateKeyPem, expected_sha256: expectedKeyHash || 'missing' },
+                    expected_domain: cert.domain,
                     reload: true
-                  }
                 }
               });
-              (certResponse.jobs || []).forEach(function (job) {
-                queuedCertificates.push({ id: job.id, nodeId: job.node_id });
-              });
             }
-            cert.pendingRemote = { jobs: queuedCertificates };
+            var certificateOperationId = uid('operation');
+            var certResponse = await submitOperation({
+                request_id: certificateOperationId,
+                site_id: 'certificate:' + cert.id,
+                kind: 'certificate',
+                base_version: 0,
+                candidate: {
+                  id: cert.id,
+                  domain: cert.domain,
+                  name: cert.name,
+                  nodeIds: selectedNodeIds,
+                  note: cert.note
+                },
+                jobs: certificateJobs,
+                ttl_seconds: 300
+            });
+            (certResponse.jobs || []).forEach(function (job) {
+              queuedCertificates.push({ id: job.id, nodeId: job.node_id });
+            });
+            cert.pendingRemote = {
+              operationId: certResponse.operation && certResponse.operation.id,
+              jobs: queuedCertificates
+            };
           } catch (error) {
+            if (!queuedCertificates.length && !error.status) {
+              cert.deployStatus = 'failed';
+              cert.submissionRequestId = error.operationRequestId || certificateOperationId || '';
+              if (existingCertificate) Object.assign(existingCertificate, cert);
+              else if (!getCert(cert.id)) state.certificates.unshift(cert);
+              saveState();
+            }
             if (queuedCertificates.length) {
               cert.pendingRemote = { jobs: queuedCertificates };
               cert.deployStatus = 'failed';
-              if (!existingCertificate) state.certificates.unshift(cert);
+              if (existingCertificate) Object.assign(existingCertificate, cert);
+              else state.certificates.unshift(cert);
               editingCertificateId = null;
               closeDialog('certificate-dialog');
               saveState();
@@ -7504,7 +7710,8 @@
             privateKeyPem = '';
           }
         }
-        if (!existingCertificate) state.certificates.unshift(cert);
+        if (existingCertificate) Object.assign(existingCertificate, cert);
+        else state.certificates.unshift(cert);
         editingCertificateId = null;
         closeDialog('certificate-dialog');
         saveState();

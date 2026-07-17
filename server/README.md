@@ -41,6 +41,8 @@ Agent 接入：
 - `POST /api/v1/agent/poll`
 - `POST /api/v1/agent/jobs/{job_id}/result`
 
+Agent 在执行长任务时通过 heartbeat 携带当前任务 ID 续租；结果提交使用幂等摘要。网络中断后 Agent 会从本地 outbox 重送，控制端允许已领取任务在保留期内回补真实结果。
+
 Web 管理 API：
 
 - `GET /api/v1/admin/enrollments`
@@ -48,10 +50,19 @@ Web 管理 API：
 - `POST /api/v1/admin/enrollments/{id}/reject`
 - `GET /api/v1/admin/nodes`
 - `GET|POST /api/v1/admin/jobs`
+- `GET|POST /api/v1/admin/operations`
+- `GET /api/v1/admin/operations/{id}`
+- `GET /api/v1/admin/sites/{id}/revisions`
+- `GET /api/v1/admin/sites/{id}/revisions/{version}`
+- `POST /api/v1/admin/nodes/{id}/revoke`
+- `GET /api/v1/admin/audit`
+- `POST /api/v1/admin/maintenance/prune`
 - `GET /api/v1/admin/snapshot`
 - `GET|PUT /api/v1/admin/ui-state`
 
 管理 API 不返回 Agent 的机器凭据、任务敏感 payload 或原始输出。UI 状态接口拒绝私钥、密码和常见秘密字段。
+
+发布、校验、复制、删除和证书替换使用操作单一次性创建全部逐节点任务，避免只创建了一半。成功发布会形成不可变配置快照；失败或部分成功不会冒充已发布版本。UI 中的站点和证书资源在 SQLite 内分开保存，读取接口仍兼容原来的单文档格式。
 
 `auditor` 可读；`operator` 还可保存 UI 状态和创建固定任务；只有 `admin` 能批准或拒绝 Agent 接入。权限由 API 服务端强制执行。
 

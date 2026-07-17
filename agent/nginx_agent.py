@@ -59,7 +59,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.6.3"
+VERSION = "0.7.0"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -766,6 +766,77 @@ class JobStore:
 
     def _save(self) -> None:
         _atomic_json(self.path, self.records)
+
+
+class ResultOutbox:
+    """Durable Agent-to-Server result queue.
+
+    A privileged action may already be committed when the network disappears.
+    Results therefore have to survive Agent restarts and are removed only after
+    the control plane acknowledges them.
+    """
+
+    def __init__(self, path: Path, limit: int = 2000):
+        self.path = path
+        self.limit = limit
+        self._lock = threading.RLock()
+        self.records: Dict[str, Dict[str, Any]] = {}
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            if isinstance(raw, dict):
+                self.records = raw
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError):
+            LOG.warning("result outbox is unreadable; moving it aside")
+            with contextlib.suppress(OSError):
+                os.replace(str(path), str(path) + ".corrupt-" + str(int(time.time())))
+
+    def put(self, job_id: str, result: Dict[str, Any]) -> None:
+        with self._lock:
+            if job_id not in self.records and len(self.records) >= self.limit:
+                raise AgentError("result outbox is full; refusing to poll more privileged work")
+            self.records[job_id] = {
+                "job_id": job_id,
+                "result": result,
+                "stored_at": utc_now(),
+            }
+            _atomic_json(self.path, self.records)
+
+    def pending(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dict(value) for value in self.records.values()]
+
+    def acknowledge(self, job_id: str) -> None:
+        with self._lock:
+            if self.records.pop(job_id, None) is not None:
+                _atomic_json(self.path, self.records)
+
+    def reject(self, job_id: str, reason: str) -> None:
+        """Move a permanently rejected result to a durable dead-letter ledger."""
+        with self._lock:
+            record = self.records.pop(job_id, None)
+            if record is None:
+                return
+            dead_letter_path = self.path.with_name(self.path.stem + "-rejected.json")
+            rejected: Dict[str, Dict[str, Any]] = {}
+            try:
+                with dead_letter_path.open("r", encoding="utf-8") as handle:
+                    value = json.load(handle)
+                if isinstance(value, dict):
+                    rejected = value
+            except (FileNotFoundError, OSError, ValueError):
+                pass
+            record["rejected_at"] = utc_now()
+            record["reason"] = reason[:1000]
+            rejected[job_id] = record
+            if len(rejected) > self.limit:
+                ordered = sorted(rejected.items(), key=lambda pair: pair[1].get("rejected_at", ""))
+                for old_id, _old_record in ordered[: len(rejected) - self.limit]:
+                    rejected.pop(old_id, None)
+            _atomic_json(dead_letter_path, rejected)
+            _atomic_json(self.path, self.records)
 
 
 class JobExecutor:
@@ -1527,7 +1598,20 @@ class JobExecutor:
             raise ActionError("certificate_pem does not contain a PEM certificate")
         if b"PRIVATE KEY-----" not in key_data:
             raise ActionError("private_key_pem does not contain a PEM private key")
-        certificate_fingerprint = self._verify_certificate_pair(cert_data, key_data)
+        certificate_metadata = self._verify_certificate_pair(cert_data, key_data)
+        if isinstance(certificate_metadata, str):  # Compatibility with older helpers and test doubles.
+            certificate_metadata = {
+                "fingerprint": certificate_metadata,
+                "domains": [],
+                "issuer": "Unknown",
+                "not_after": None,
+            }
+        expected_domain = str(payload.get("expected_domain") or "").strip().lower().rstrip(".")
+        if expected_domain and not any(
+            self._certificate_domain_matches(item, expected_domain)
+            for item in certificate_metadata.get("domains", [])
+        ):
+            raise ActionError("certificate does not cover expected domain")
         expected_cert = cert_spec.get("expected_sha256", payload.get("expected_cert_sha256"))
         expected_key = key_spec.get("expected_sha256", payload.get("expected_key_sha256"))
         previous_cert = self._check_expected(cert_path, expected_cert)
@@ -1551,14 +1635,30 @@ class JobExecutor:
             "previous_private_key_sha256": previous_key,
             "certificate_sha256": hashlib.sha256(cert_data).hexdigest(),
             "private_key_sha256": hashlib.sha256(key_data).hexdigest(),
-            "certificate_fingerprint": certificate_fingerprint,
+            "certificate_fingerprint": certificate_metadata["fingerprint"],
+            "certificate_domains": certificate_metadata["domains"],
+            "certificate_issuer": certificate_metadata["issuer"],
+            "certificate_not_after": certificate_metadata["not_after"],
             "validated": True,
             "applied": not validate_only,
             "reloaded": bool(payload.get("reload", False)) and not validate_only,
             **transaction,
         }
 
-    def _verify_certificate_pair(self, certificate: bytes, private_key: bytes) -> str:
+    @staticmethod
+    def _certificate_domain_matches(pattern: Any, domain: str) -> bool:
+        candidate = str(pattern or "").strip().lower().rstrip(".")
+        domain = str(domain or "").strip().lower().rstrip(".")
+        if not candidate or not domain:
+            return False
+        if candidate == domain:
+            return True
+        if candidate.startswith("*."):
+            suffix = candidate[2:]
+            return domain.endswith("." + suffix) and len(domain.split(".")) == len(suffix.split(".")) + 1
+        return False
+
+    def _verify_certificate_pair(self, certificate: bytes, private_key: bytes) -> Dict[str, Any]:
         state_dir = Path(self.settings.state_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
         cert_fd, cert_name = tempfile.mkstemp(prefix="certificate-", suffix=".pem", dir=str(state_dir))
@@ -1579,9 +1679,7 @@ class JobExecutor:
             if not hashlib.sha256(cert_public).digest() == hashlib.sha256(key_public).digest():
                 raise ActionError("certificate does not match private key")
             self._openssl(["x509", "-in", cert_name, "-checkend", "0", "-noout"])
-            fingerprint = self._openssl(["x509", "-in", cert_name, "-fingerprint", "-sha256", "-noout"])
-            text = fingerprint.decode("utf-8", errors="replace").strip()
-            return text.split("=", 1)[-1][:256]
+            return self._certificate_metadata(Path(cert_name), certificate)
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(cert_name)
@@ -2288,6 +2386,61 @@ class AgentService:
         self.stop_event = stop_event
         self.api = ApiClient(settings)
         self.identity_path = Path(settings.state_dir) / "identity.json"
+        self.result_outbox = ResultOutbox(Path(settings.state_dir) / "result-outbox.json")
+
+    def _deliver_result_outbox(self, identity: Dict[str, str]) -> None:
+        for pending in self.result_outbox.pending():
+            job_id = str(pending.get("job_id", ""))
+            result = pending.get("result")
+            if not job_id or not isinstance(result, dict):
+                raise AgentError("result outbox contains an invalid record")
+            try:
+                self.api.post(
+                    "/api/v1/agent/jobs/{}/result".format(urllib.parse.quote(job_id, safe="")),
+                    result,
+                    identity["machine_credential"],
+                )
+            except ApiError as exc:
+                if exc.status_code in (404, 409):
+                    LOG.error(
+                        "control plane permanently rejected stored result job=%s status=%s; "
+                        "moving it to the rejected-result ledger to unblock the Agent",
+                        job_id[:200], exc.status_code,
+                    )
+                    self.result_outbox.reject(
+                        job_id,
+                        "control plane rejected result with HTTP {}".format(exc.status_code),
+                    )
+                    continue
+                raise
+            self.result_outbox.acknowledge(job_id)
+
+    def _execute_with_heartbeats(
+        self,
+        executor: Any,
+        job: Dict[str, Any],
+        identity: Dict[str, str],
+    ) -> Dict[str, Any]:
+        heartbeat_stop = threading.Event()
+
+        def heartbeat_worker() -> None:
+            interval = max(3.0, min(self.settings.heartbeat_interval, 30.0))
+            while not heartbeat_stop.wait(interval):
+                if self.stop_event.is_set():
+                    return
+                try:
+                    self._heartbeat(identity, str(job.get("id", "")) or None)
+                except AgentError as exc:
+                    LOG.warning("heartbeat during job execution failed: %s", exc)
+
+        worker = threading.Thread(target=heartbeat_worker, name="nginx-manager-job-heartbeat")
+        worker.daemon = True
+        worker.start()
+        try:
+            return executor.execute(job)
+        finally:
+            heartbeat_stop.set()
+            worker.join(timeout=2.0)
 
     def _read_identity_document(self) -> Optional[Dict[str, Any]]:
         try:
@@ -2426,6 +2579,7 @@ class AgentService:
         failures = 0
         while not self.stop_event.is_set():
             try:
+                self._deliver_result_outbox(identity)
                 now = time.monotonic()
                 if now - last_heartbeat >= self.settings.heartbeat_interval:
                     self._heartbeat(identity)
@@ -2441,7 +2595,7 @@ class AgentService:
                     action = str(job.get("action", ""))
                     LOG.info("received job id=%s action=%s", job_id[:200], action[:100])
                     try:
-                        result = executor.execute(job)
+                        result = self._execute_with_heartbeats(executor, job, identity)
                     except AgentError as exc:
                         result = JobExecutor._response(
                             job_id,
@@ -2451,7 +2605,8 @@ class AgentService:
                             **_failure_metadata(exc, action=action)
                         )
                     server_result = _to_server_result(result)
-                    self.api.post("/api/v1/agent/jobs/{}/result".format(urllib.parse.quote(job_id, safe="")), server_result, identity["machine_credential"])
+                    self.result_outbox.put(job_id, server_result)
+                    self._deliver_result_outbox(identity)
                 failures = 0
                 if once:
                     return
@@ -2463,21 +2618,24 @@ class AgentService:
                     raise
                 self.stop_event.wait(min(30.0, max(self.settings.poll_interval, 2 ** min(failures, 5))))
 
-    def _heartbeat(self, identity: Dict[str, str]) -> None:
+    def _heartbeat(self, identity: Dict[str, str], active_job_id: Optional[str] = None) -> None:
         observation = self._local_observation()
+        payload = {
+            "agent_id": identity["agent_id"],
+            "node_name": self.settings.node_name,
+            "hostname": self.settings.hostname,
+            "labels": self.settings.labels,
+            "agent_version": VERSION,
+            "capabilities": list(CAPABILITIES),
+            "status": "online",
+            "timestamp": utc_now(),
+            **observation,
+        }
+        if active_job_id:
+            payload["active_job_id"] = active_job_id
         self.api.post(
             "/api/v1/agent/heartbeat",
-            {
-                "agent_id": identity["agent_id"],
-                "node_name": self.settings.node_name,
-                "hostname": self.settings.hostname,
-                "labels": self.settings.labels,
-                "agent_version": VERSION,
-                "capabilities": list(CAPABILITIES),
-                "status": "online",
-                "timestamp": utc_now(),
-                **observation,
-            },
+            payload,
             identity["machine_credential"],
         )
 
@@ -2598,6 +2756,9 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
             "certificate_sha256": raw.get("certificate_sha256"),
             "key_material_sha256": raw.get("private_key_sha256"),
             "certificate_fingerprint": raw.get("certificate_fingerprint"),
+            "certificate_domains": raw.get("certificate_domains"),
+            "certificate_issuer": raw.get("certificate_issuer"),
+            "certificate_not_after": raw.get("certificate_not_after"),
             "syntax_ok": bool(raw.get("validated")) and succeeded,
             "applied": bool(raw.get("applied")),
             "validate_only": bool(raw.get("validate_only")),

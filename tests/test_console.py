@@ -11,6 +11,10 @@ class ConsoleTestCase(unittest.TestCase):
         script = r"""
 const fs = require("fs");
 const html = fs.readFileSync(process.argv[1], "utf8");
+const inlineStart = html.lastIndexOf("<script>");
+const inlineEnd = html.lastIndexOf("</script>");
+if (inlineStart < 0 || inlineEnd <= inlineStart) throw new Error("inline script not found");
+new Function(html.slice(inlineStart + "<script>".length, inlineEnd));
 if (!html.includes('id="toast" role="status" aria-live="polite" popover="manual"')
     || !html.includes("toast.showPopover()")) {
   throw new Error("toast is not promoted into the browser top layer");
@@ -39,7 +43,7 @@ eval(take("function normalizeProxyTarget", "function defaultConfig"));
 eval(take("function defaultConfig", "function configCertificateState"));
 eval(take("function rewriteConfigCertificatePaths", "function openConfigEditor"));
 eval(take("function canDeleteSiteRecord", "async function deletePlatformSiteRecord"));
-eval(take("function applyRemoteJobOutcomes", "function stripNginxComments"));
+eval(take("function rememberProcessedOperation", "function stripNginxComments"));
 eval(take("function managedConfigContent", "async function startRemoteConfigRun"));
 
 const node = { id: "node-1", managedCertificateRoot: "/apps/nginx/cert" };

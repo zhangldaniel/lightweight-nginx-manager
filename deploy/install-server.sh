@@ -19,6 +19,7 @@ SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 CREDENTIALS_FILE="/root/${APP_NAME}-credentials.txt"
 DEFAULT_PORT="8443"
 PYTHON_BIN="python3"
+RELEASE_RETENTION="${NGINX_MANAGER_RELEASE_RETENTION:-3}"
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PACKAGE_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -1089,6 +1090,29 @@ configure_firewall() {
   fi
 }
 
+prune_old_releases() {
+  local current_release release_name release_path kept
+  local -a releases=()
+  [[ "${RELEASE_RETENTION}" =~ ^[1-9][0-9]*$ ]] || die "NGINX_MANAGER_RELEASE_RETENTION 必须是正整数"
+  current_release="$(readlink -f -- "${CURRENT_LINK}")"
+  mapfile -t releases < <(
+    find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+      | grep -E '^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}(-[0-9]+)?$' \
+      | sort -r
+  )
+  kept=0
+  for release_name in "${releases[@]}"; do
+    release_path="${RELEASES_DIR}/${release_name}"
+    if [[ "$(readlink -f -- "${release_path}")" == "${current_release}" || "${kept}" -lt "${RELEASE_RETENTION}" ]]; then
+      kept=$((kept + 1))
+      continue
+    fi
+    [[ "${release_path}" == "${RELEASES_DIR}/"* ]] || die "拒绝清理异常 release 路径：${release_path}"
+    rm -rf -- "${release_path}"
+    log "已清理旧 release：${release_name}"
+  done
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host)
@@ -1293,6 +1317,7 @@ ROLLBACK_DIR=""
 if ! configure_firewall; then
   warn "控制端已部署成功，但自动配置防火墙失败；请人工放行 ${LISTEN_PORT}/tcp"
 fi
+prune_old_releases
 
 log "部署完成；当前版本：$(readlink -f "${CURRENT_LINK}")"
 echo
