@@ -1,6 +1,6 @@
 # Lightweight Nginx Manager（轻量级 Nginx 管理平台）
 
-一个轻量、自托管的多节点 Nginx 管理平台。通过 Web 控制台统一管理 Linux 节点上的站点配置与 TLS 证书，支持现有配置导入、编辑、复制、逐节点校验、发布、回滚和审计。
+一个轻量、自托管的多节点 Nginx 管理平台。通过 Web 控制台统一管理 Linux 节点上的域名站点、通用 HTTP Conf 与 TLS 证书，支持现有配置导入、编辑、复制、逐节点校验、发布、回滚和审计。
 
 Server 基于 FastAPI、SQLite 和单文件 Web 控制台；Agent 主动连接 Server，无需开放管理端口，也不提供任意 Shell。适合从少量节点开始部署并逐步扩展。
 
@@ -60,7 +60,7 @@ sudo bash -s -- \
   --nginx-service nginx.service
 ```
 
-安装完成后进入 Web 的“节点 Agent”批准申请，不需要注册令牌。然后分别点击“导入节点现有站点”和证书页的“扫描节点证书”。扫描只读，私钥内容不会离开节点。
+安装完成后进入 Web 的“节点 Agent”批准申请，不需要注册令牌。然后分别点击“导入节点现有配置”和证书页的“扫描节点证书”。扫描只读，私钥内容不会离开节点。
 
 “站点与配置”顶部可按 Agent 切换列表；右侧会显示所选节点的实际配置路径、Hash 和配置预览。升级后重新导入一次，可补齐旧站点的节点配置快照。
 
@@ -71,6 +71,8 @@ sudo bash -s -- \
 ```nginx
 server {
     listen 127.0.0.1:18080;
+    server_name localhost;
+    access_log off;
     location = /nginx_status {
         stub_status;
         allow 127.0.0.1;
@@ -81,19 +83,29 @@ server {
 
 “运行监控”每 15 秒采集宿主机、Nginx 进程和 Stub Status；原始数据保留 2 小时，分钟级历史保留 24 小时。“实时日志”一次查看一个节点上的一个文件，浏览器最多保留 5,000 行。
 
+## 三种配置方式
+
+“新增站点”中统一提供三种入口：
+
+- **向导站点**：填写域名和上游，由平台生成基础配置。
+- **站点 Conf**：直接编写包含业务 `server_name` 的站点配置，可绑定证书。
+- **通用 Conf**：托管 `upstream`、`map`、`geo`、限流区和本机 Stub Status 等 HTTP 片段，不要求域名或证书。
+
+通用 Conf 只填写安全的 `.conf` 文件名，完整目录使用每个 Agent 的 `--managed-config-dir`。如果目标节点已有同名文件，必须先“导入节点现有配置”取得路径和 SHA-256，平台不会盲目覆盖。`map`/`geo` 需要 Agent `0.9.0+`。
+
 ## 最容易踩的坑
 
 | 现象 | 原因与处理 |
 | --- | --- |
 | `/apps/nginx` 存在，但提示未发现 Nginx | 自动探测不覆盖自定义目录；使用上面的完整 `/apps/nginx` 参数。 |
 | 配置已经导入，但证书页为空 | `--managed-cert-dir` 必须指向真实目录；`cert` 和 `certs` 是两个不同路径。修改参数后重新安装 Agent，再点击“扫描节点证书”。 |
-| 配置没改，重复发布却显示失败 | 先升级 Server；新版会比较逐节点 SHA-256，内容一致时直接恢复为“已发布”，不重复写文件或 reload。真正修改后仍失败时，检查配置中的 `ssl_certificate` 路径是否位于 `--managed-cert-dir`。 |
+| 配置没改，重复发布却显示失败 | 先升级 Server；新版会比较逐节点 SHA-256，内容一致时只执行 `nginx -t` 与 reload，不写文件、不增加版本。真正修改后仍失败时，检查配置中的 `ssl_certificate` 路径是否位于 `--managed-cert-dir`。 |
 | 页面显示候选配置校验失败，但手工 `nginx -t` 成功 | 页面若同时显示“原文件已自动恢复”，手工检查的是恢复后的旧配置，这是正常现象。`proxy_pass` 必须带 `http://` 或 `https://`；向导模式会自动补齐简单的 IP、主机名和 upstream。新版也会显示候选配置的安全分类原因和大致行号。 |
 | 绑定证书后发布失败或浏览器报域名不匹配 | 证书必须同时存在于目标节点并覆盖站点域名；`*.itbkcmdb.int.example.com` 不覆盖 `test.int.example.com`。在“编辑配置”中更换绑定证书会自动更新证书路径。 |
 | `nginx -t` 报 `bind() to 0.0.0.0:80 failed (13: Permission denied)` | 部分自编译 Nginx 在测试配置时也会绑定低端口；升级 Agent，安装器会为受限 helper/recover 单元保留 `CAP_NET_BIND_SERVICE`。 |
 | `00-nginx-manager.conf has unexpected content` | 旧 include 文件和新托管目录冲突；先检查其内容。直接托管 `conf.d` 时不要再传 `--managed-include-file`。 |
 | 托管 `conf.d` 后出现递归 include | 不要在 `conf.d` 中创建一个再次 include `conf.d/*.conf` 的文件；必须使用 `--managed-config-already-included`。 |
-| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应至少显示 `0.8.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
+| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应至少显示 `0.9.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
 | “实时日志”没有节点或文件 | Agent 至少应为 `0.8.0`，并在安装时传入真实的 `--nginx-log-dir`。HTTP 管理网还要添加 `--allow-plaintext-log-stream`，然后等待一次心跳并刷新页面。 |
 | 监控显示 Stub Status 不可用 | 检查 `curl http://127.0.0.1:18080/nginx_status` 是否返回 Active connections / Reading / Writing / Waiting；采集失败不会影响配置和证书操作。 |
 | `find /apps/nginx/conf/nginx-manager.d` 为空 | 如果托管目录已经改为 `conf.d`，这是正常的；应检查 `/apps/nginx/conf/conf.d`。 |

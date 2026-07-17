@@ -50,6 +50,13 @@ if (!html.includes('class="smart-select-menu"')
     || !html.includes("['site-node-filter', 'site-status-filter', 'config-certificate']")) {
   throw new Error("the high-frequency filters are missing the accessible smart-select interaction");
 }
+if (!html.includes('data-site-create-mode="generic"')
+    || !html.includes('value="generic-stub-status"')
+    || !html.includes('value="upstream-https"')
+    || !html.includes('value="websocket-long"')
+    || !html.includes('data-action="convert-generic"')) {
+  throw new Error("the unified site/generic Conf workflow or sanitized templates are missing");
+}
 if ((html.match(/'delete-config', 'delete-site-record'/g) || []).length < 2) {
   throw new Error("platform record deletion is not protected by both action and visibility permissions");
 }
@@ -64,6 +71,7 @@ function take(startName, endName) {
 }
 eval(take("function sha256Hex", "function roleLabel"));
 eval(take("function safeResourceName", "function managedConfigFilename"));
+eval(take("function managedConfigFilename", "function migrationConfigPath"));
 eval(take("function managedCertificateRoot", "function certificateTargetPaths"));
 eval(take("function certificateTargetPaths", "function renderCertificateNodeChoices"));
 eval(take("function certificateCoversDomain", "function getSite"));
@@ -75,6 +83,8 @@ eval(take("function defaultConfig", "function configCertificateState"));
 eval(take("function rewriteConfigCertificatePaths", "function openConfigEditor"));
 eval(take("function canDeleteSiteRecord", "async function deletePlatformSiteRecord"));
 eval(take("function rememberProcessedOperation", "function stripNginxComments"));
+eval(take("function stripNginxComments", "function nginxStatements"));
+eval(take("function nginxStatements", "function importInventoryFile"));
 eval(take("function managedConfigContent", "async function startRemoteConfigRun"));
 
 const node = { id: "node-1", managedCertificateRoot: "/apps/nginx/cert" };
@@ -107,6 +117,32 @@ function buildSiteFailure(jobs, pending) {
 }
 function saveState() {}
 function notify() {}
+
+const statusMetadata = inventorySiteMetadata({
+  path: "/apps/nginx/conf/conf.d/nginx-status.conf",
+  content: "server { listen 127.0.0.1:18080; server_name localhost; location = /nginx_status { stub_status; } }"
+});
+if (statusMetadata.resourceType !== "generic" || statusMetadata.name !== "Nginx Status") {
+  throw new Error("a loopback stub_status fragment was imported as a fake domain site");
+}
+const upstreamMetadata = inventorySiteMetadata({
+  path: "/apps/nginx/conf/conf.d/backend-pool.conf",
+  content: "upstream backend_pool { server 192.0.2.21:8080; }"
+});
+if (upstreamMetadata.resourceType !== "generic") {
+  throw new Error("an upstream-only fragment was not classified as generic Conf");
+}
+const businessMetadata = inventorySiteMetadata({
+  path: "/apps/nginx/conf/conf.d/api.conf",
+  content: "upstream backend { server 192.0.2.21:8080; } server { listen 443 ssl; server_name api.example.com; }"
+});
+if (businessMetadata.resourceType !== "site" || businessMetadata.domain !== "api.example.com") {
+  throw new Error("a business server_name configuration was not classified as a site Conf");
+}
+const genericRecord = { resourceType: "generic", name: "Nginx Status", filename: "nginx-status.conf" };
+if (resourceTitle(genericRecord) !== "Nginx Status" || managedConfigFilename(genericRecord) !== "nginx-status.conf") {
+  throw new Error("generic Conf identity or safe filename was lost");
+}
 
 const staleValidationDraft = {
   id: "site-stale-validation-draft",

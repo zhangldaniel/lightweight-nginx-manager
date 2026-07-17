@@ -1013,6 +1013,60 @@ class AgentTestCase(unittest.TestCase):
         )
         self.assertEqual("succeeded", response["status"])
 
+    def test_managed_config_policy_allows_safe_generic_http_fragments(self):
+        fragments = {
+            "status": """server {
+  listen 127.0.0.1:18080;
+  server_name localhost;
+  access_log off;
+  location = /nginx_status { stub_status; allow 127.0.0.1; deny all; }
+}
+""",
+            "upstream": """upstream backend_pool {
+  least_conn;
+  server 192.0.2.21:8080 max_fails=3 fail_timeout=10s;
+  server 192.0.2.22:8080;
+  keepalive 32;
+}
+""",
+            "map": """map $http_upgrade $connection_upgrade {
+  default upgrade;
+  '' close;
+}
+""",
+            "geo": """geo $office_network {
+  default 0;
+  192.0.2.0/24 1;
+}
+""",
+        }
+        for index, (name, content) in enumerate(fragments.items()):
+            target = self.config_root / (name + ".conf")
+            response = self.executor.execute(
+                self.job(
+                    "job-generic-policy-{}".format(index),
+                    "config_apply",
+                    {"path": str(target), "content": content, "expected_sha256": "missing"},
+                )
+            )
+            self.assertEqual("succeeded", response["status"], name)
+
+    def test_managed_config_policy_rejects_unsafe_map_and_geo_entries(self):
+        for index, content in enumerate((
+            "map $host $target { include /etc/nginx/map.conf; }",
+            "geo $office { server { listen 80; } }",
+        )):
+            target = self.config_root / ("unsafe-generic-{}.conf".format(index))
+            response = self.executor.execute(
+                self.job(
+                    "job-unsafe-generic-policy-{}".format(index),
+                    "config_apply",
+                    {"path": str(target), "content": content, "expected_sha256": "missing"},
+                )
+            )
+            self.assertEqual("failed", response["status"])
+            self.assertFalse(target.exists())
+
     def test_python36_compatibility_contract(self):
         source = (AGENT_DIR / "nginx_agent.py").read_text(encoding="utf-8")
         installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")

@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -1189,7 +1189,7 @@ class JobExecutor:
         if not tokens:
             raise ActionError("managed configuration cannot be empty")
 
-        allowed_top_blocks = {"server", "upstream"}
+        allowed_top_blocks = {"server", "upstream", "map", "geo"}
         allowed_top_directives = {
             "limit_req_zone", "limit_conn_zone", "log_format",
             "server_names_hash_bucket_size", "variables_hash_bucket_size", "variables_hash_max_size",
@@ -1248,16 +1248,25 @@ class JobExecutor:
         }
         depth = 0
         statement: List[str] = []
+        block_stack: List[str] = []
 
         def unquote(value: str) -> str:
             if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
                 return value[1:-1]
             return value
 
-        def validate_statement(is_block: bool, statement_depth: int) -> None:
+        def validate_statement(is_block: bool, statement_depth: int) -> str:
             if not statement:
                 raise ActionError("managed configuration contains an empty statement")
             directive = statement[0].lower()
+            parent_block = block_stack[-1] if block_stack else ""
+            if parent_block in ("map", "geo"):
+                if is_block:
+                    raise ActionError("nested blocks are not allowed inside '{}'".format(parent_block))
+                parameter = unquote(statement[0]).lower()
+                if parameter == "include" or parameter in forbidden:
+                    raise ActionError("directive '{}' is not allowed inside '{}'".format(parameter, parent_block))
+                return parameter
             if not DIRECTIVE_RE.fullmatch(directive):
                 raise ActionError("invalid directive name in managed configuration")
             if directive not in allowed_directives:
@@ -1281,10 +1290,11 @@ class JobExecutor:
                 if "$" in certificate_path:
                     raise ActionError("variables are not allowed in managed certificate paths")
                 self._certificate_path(certificate_path)
+            return directive
 
         for token in tokens:
             if token == "{":
-                validate_statement(True, depth)
+                block_stack.append(validate_statement(True, depth))
                 statement = []
                 depth += 1
             elif token == ";":
@@ -1296,9 +1306,12 @@ class JobExecutor:
                 depth -= 1
                 if depth < 0:
                     raise ActionError("managed configuration has an unexpected closing brace")
+                if not block_stack:
+                    raise ActionError("managed configuration block stack is inconsistent")
+                block_stack.pop()
             else:
                 statement.append(token)
-        if statement or depth != 0:
+        if statement or depth != 0 or block_stack:
             raise ActionError("managed configuration has unbalanced braces or a missing semicolon")
 
     def _decode_content(self, payload: Dict[str, Any], text_key: str = "content", b64_key: str = "content_base64") -> bytes:
