@@ -61,6 +61,15 @@ if (!html.includes("applySiteConfTemplate(true, event.target.value, false)")
     || !html.includes("event.target.value = previousTemplate")) {
   throw new Error("selecting a Conf template must apply it immediately and restore the previous choice when cancelled");
 }
+if (!html.includes("width: min(1120px, calc(100vw - 32px))")
+    || html.includes('#site-dialog[data-mode="conf"] {\n      width:')) {
+  throw new Error("the create-site dialog width must remain stable across creation modes");
+}
+if (!html.includes("restoreRenderViewport(content, viewport)")
+    || !html.includes("restoreElementScroll(dialogBody, dialogScroll)")
+    || !html.includes("terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight <= 48")) {
+  throw new Error("page, dialog, and live-log scroll positions are not preserved across UI updates");
+}
 if ((html.match(/'delete-config', 'delete-site-record'/g) || []).length < 2) {
   throw new Error("platform record deletion is not protected by both action and visibility permissions");
 }

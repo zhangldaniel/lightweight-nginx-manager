@@ -2621,10 +2621,6 @@
     }
 
     #site-dialog {
-      width: min(820px, calc(100vw - 32px));
-    }
-
-    #site-dialog[data-mode="conf"] {
       width: min(1120px, calc(100vw - 32px));
     }
 
@@ -7023,6 +7019,51 @@
         if (dialog && dialog.open) dialog.close();
       }
 
+      function captureElementScroll(element) {
+        return element ? { top: element.scrollTop, left: element.scrollLeft } : null;
+      }
+
+      function restoreElementScroll(element, position) {
+        if (!element || !position) return;
+        function restore() {
+          if (!element.isConnected) return;
+          element.scrollTop = position.top;
+          element.scrollLeft = position.left;
+        }
+        restore();
+        window.requestAnimationFrame(restore);
+      }
+
+      function captureRenderViewport(content) {
+        var terminal = document.getElementById('live-log-output');
+        return {
+          view: content && content.dataset ? content.dataset.renderedView : '',
+          pageX: window.scrollX || window.pageXOffset || 0,
+          pageY: window.scrollY || window.pageYOffset || 0,
+          terminalPresent: Boolean(terminal),
+          terminalTop: terminal ? terminal.scrollTop : 0,
+          terminalAtEnd: terminal
+            ? terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight <= 48
+            : true
+        };
+      }
+
+      function restoreRenderViewport(content, viewport) {
+        var sameView = viewport && viewport.view === activeView;
+        function restore() {
+          var terminal = document.getElementById('live-log-output');
+          if (sameView) window.scrollTo(viewport.pageX, viewport.pageY);
+          if (activeView === 'logs' && terminal) {
+            terminal.scrollTop = !sameView || !viewport.terminalPresent || viewport.terminalAtEnd
+              ? terminal.scrollHeight
+              : viewport.terminalTop;
+          }
+        }
+        restore();
+        window.requestAnimationFrame(restore);
+        if (content && content.dataset) content.dataset.renderedView = activeView;
+      }
+
       function pageHead(title, copy, actions) {
         return [
           '<div class="page-head">',
@@ -7612,6 +7653,7 @@
       function render() {
         updateChrome();
         var content = document.getElementById('app-content');
+        var viewport = captureRenderViewport(content);
         var titleMap = { sites: '站点与配置', certificates: '证书', nodes: '节点 Agent', logs: '实时日志', monitoring: '运行监控', runs: '执行记录' };
         document.getElementById('breadcrumb-current').textContent = titleMap[activeView];
         document.querySelectorAll('[data-nav]').forEach(function (button) {
@@ -7627,6 +7669,7 @@
         updateSessionBadge();
         bindViewControls();
         enhanceSmartSelects(content);
+        restoreRenderViewport(content, viewport);
       }
 
       function smartSelectMeta(select, option) {
@@ -7882,8 +7925,10 @@
         var output = document.getElementById('live-log-output');
         var stats = document.getElementById('live-log-stats');
         if (output && !logPaused) {
+          var previousTop = output.scrollTop;
+          var followTail = !output.textContent || output.scrollHeight - output.scrollTop - output.clientHeight <= 48;
           output.textContent = logLines.join('\n');
-          output.scrollTop = output.scrollHeight;
+          output.scrollTop = followTail ? output.scrollHeight : previousTop;
         }
         if (stats) stats.textContent = '读取 ' + logStats.read + ' · 显示 ' + logStats.sent + ' · 过滤 ' + logStats.dropped;
       }
@@ -8184,16 +8229,25 @@
 
       function applySiteConfTemplate(askBeforeReplace, requestedTemplateKey, silent) {
         var editor = document.getElementById('site-conf-editor');
+        var dialogBody = document.querySelector('#site-dialog .dialog-body');
+        var dialogScroll = captureElementScroll(dialogBody);
         if (askBeforeReplace && editor.dataset.dirty === 'true' && editor.value.trim()
-            && !window.confirm('应用模板会替换当前 Conf 内容，是否继续？')) return false;
+            && !window.confirm('应用模板会替换当前 Conf 内容，是否继续？')) {
+          restoreElementScroll(dialogBody, dialogScroll);
+          return false;
+        }
         var templateKey = requestedTemplateKey || document.getElementById('site-conf-template').value;
         var content = siteConfTemplate(templateKey, silent);
-        if (content === null) return false;
+        if (content === null) {
+          restoreElementScroll(dialogBody, dialogScroll);
+          return false;
+        }
         editor.value = content;
         editor.dataset.dirty = 'false';
         editor.dataset.templateKey = templateKey;
         document.getElementById('site-conf-template-button').textContent = '重新应用模板';
         document.getElementById('site-conf-template-summary').textContent = siteConfTemplateSummary(templateKey, false);
+        restoreElementScroll(dialogBody, dialogScroll);
         return true;
       }
 
@@ -8222,6 +8276,8 @@
         var confMode = siteCreateMode !== 'guided';
         var genericMode = siteCreateMode === 'generic';
         var dialog = document.getElementById('site-dialog');
+        var dialogBody = dialog.querySelector('.dialog-body');
+        var dialogScroll = captureElementScroll(dialogBody);
         dialog.dataset.mode = siteCreateMode;
         dialog.querySelectorAll('[data-site-create-mode]').forEach(function (button) {
           var active = button.dataset.siteCreateMode === siteCreateMode;
@@ -8280,6 +8336,7 @@
         document.getElementById('site-conf-template-summary').textContent = siteConfTemplateSummary(templateSelect.value, false);
         if (confMode && !editor.value.trim() && templateSelect.value !== 'generic-blank') applySiteConfTemplate(false);
         updateSiteCertificateOptions();
+        restoreElementScroll(dialogBody, dialogScroll);
       }
 
       function normalizeProxyTarget(value) {
