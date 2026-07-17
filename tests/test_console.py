@@ -57,6 +57,10 @@ if (!html.includes('data-site-create-mode="generic"')
     || !html.includes('data-action="convert-generic"')) {
   throw new Error("the unified site/generic Conf workflow or sanitized templates are missing");
 }
+if (!html.includes("applySiteConfTemplate(true, event.target.value, false)")
+    || !html.includes("event.target.value = previousTemplate")) {
+  throw new Error("selecting a Conf template must apply it immediately and restore the previous choice when cancelled");
+}
 if ((html.match(/'delete-config', 'delete-site-record'/g) || []).length < 2) {
   throw new Error("platform record deletion is not protected by both action and visibility permissions");
 }

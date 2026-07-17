@@ -8185,15 +8185,16 @@
       function applySiteConfTemplate(askBeforeReplace, requestedTemplateKey, silent) {
         var editor = document.getElementById('site-conf-editor');
         if (askBeforeReplace && editor.dataset.dirty === 'true' && editor.value.trim()
-            && !window.confirm('应用模板会替换当前 Conf 内容，是否继续？')) return;
+            && !window.confirm('应用模板会替换当前 Conf 内容，是否继续？')) return false;
         var templateKey = requestedTemplateKey || document.getElementById('site-conf-template').value;
         var content = siteConfTemplate(templateKey, silent);
-        if (content === null) return;
+        if (content === null) return false;
         editor.value = content;
         editor.dataset.dirty = 'false';
         editor.dataset.templateKey = templateKey;
         document.getElementById('site-conf-template-button').textContent = '重新应用模板';
         document.getElementById('site-conf-template-summary').textContent = siteConfTemplateSummary(templateKey, false);
+        return true;
       }
 
       function refreshCleanSiteConfTemplate(pathsChanged) {
@@ -8264,6 +8265,7 @@
           editor.value = '';
           editor.dataset.dirty = 'false';
           editor.dataset.templateKey = templateSelect.value;
+          document.getElementById('site-conf-template-button').textContent = '应用模板';
         }
         document.getElementById('site-conf-guide-copy').textContent = genericMode
           ? '适合 upstream、map、geo、限流区和本机状态页等 http-context 片段。'
@@ -9916,7 +9918,8 @@
       });
 
       document.getElementById('site-conf-template').addEventListener('change', function (event) {
-        document.getElementById('site-conf-template-summary').textContent = siteConfTemplateSummary(event.target.value, true);
+        var editor = document.getElementById('site-conf-editor');
+        var previousTemplate = editor.dataset.templateKey || (siteCreateMode === 'generic' ? 'generic-blank' : 'proxy-http');
         if (siteCreateMode === 'generic' && event.target.value === 'generic-stub-status') {
           var nameInput = document.getElementById('site-config-name');
           var filenameInput = document.getElementById('site-config-filename');
@@ -9925,6 +9928,11 @@
             filenameInput.value = 'nginx-status.conf';
             filenameInput.dataset.manual = 'false';
           }
+        }
+        document.getElementById('site-conf-template-summary').textContent = siteConfTemplateSummary(event.target.value, true);
+        if (!applySiteConfTemplate(true, event.target.value, false)) {
+          event.target.value = previousTemplate;
+          document.getElementById('site-conf-template-summary').textContent = siteConfTemplateSummary(previousTemplate, false);
         }
       });
 
