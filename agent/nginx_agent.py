@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -1731,7 +1731,10 @@ class JobExecutor:
     def _action_config_apply(self, payload: Dict[str, Any], job_id: str) -> Dict[str, Any]:
         path = self._configuration_path(payload.get("path"))
         data = self._decode_content(payload)
-        self._validate_managed_config(data)
+        # Nginx is the configuration authority. Do not parse or allowlist
+        # directives here: the transactional apply below installs the candidate,
+        # runs the target node's real `nginx -t`, and restores the old file on
+        # every validation, reload, or health-check failure.
         actual = self._check_expected(path, payload.get("expected_sha256"))
         new_sha = hashlib.sha256(data).hexdigest()
         requested_new_sha = payload.get("new_sha256")

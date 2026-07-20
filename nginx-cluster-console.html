@@ -4894,7 +4894,7 @@
                 <ul>
                   <li>正文不做格式重写，保存为可编辑草稿。</li>
                   <li>发布前仍会在每个目标 Agent 执行 nginx -t。</li>
-                  <li>仅允许 Agent 安全白名单内的 http-context 指令。</li>
+                  <li>平台不限制 Nginx 指令，配置有效性以目标节点执行的 nginx -t 为准。</li>
                   <li id="site-conf-cert-guide">已绑定证书的路径会按目标节点自动适配。</li>
                 </ul>
                 <div class="site-conf-template-summary" id="site-conf-template-summary" aria-live="polite">HTTP 反向代理模板 · 监听 80 端口</div>
@@ -5901,7 +5901,7 @@
           permission_denied: 'Agent 对目标文件或目录权限不足',
           path_rejected: '目标路径不在 Agent 允许的托管目录内',
           concurrent_change: '节点文件已被其他操作修改，Hash 校验冲突',
-          config_policy_rejected: 'Conf 格式不完整或包含不允许托管的指令',
+          config_policy_rejected: '旧版 Agent 拒绝了该 Conf，请升级节点 Agent 后重试',
           certificate_validation_failed: '证书格式、私钥匹配或有效性校验失败',
           nginx_config_test_failed: 'Nginx 配置校验未通过',
           nginx_reload_failed: '配置已完成校验，但 Nginx reload 未成功',

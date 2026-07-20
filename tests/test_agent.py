@@ -979,28 +979,30 @@ class AgentTestCase(unittest.TestCase):
             identity,
         )
 
-    def test_managed_config_policy_blocks_privilege_escape_directives(self):
-        blocked = {
+    def test_config_apply_defers_all_directive_validation_to_nginx(self):
+        configurations = {
+            "basic-auth": (
+                'server { listen 8066 default_server; server_name _; '
+                'auth_basic "Live Stream"; auth_basic_user_file /etc/nginx/.htpasswd; }'
+            ),
             "include": "server { include /etc/nginx/other.conf; }",
             "lua": "server { content_by_lua_block { return 1; } }",
-            "log": "server { access_log /etc/cron.d/nginx-manager; }",
-            "main": "http { server { listen 80; } }",
-            "certificate": "server { ssl_certificate /etc/passwd; }",
+            "log": "server { access_log /var/log/nginx/custom.log; }",
             "third-party": "server { passenger_enabled on; passenger_user root; }",
         }
-        for index, (name, content) in enumerate(blocked.items()):
+        for index, (name, content) in enumerate(configurations.items()):
             target = self.config_root / (name + ".conf")
             response = self.executor.execute(
                 self.job(
-                    "job-policy-{}".format(index),
+                    "job-direct-nginx-validation-{}".format(index),
                     "config_apply",
                     {"path": str(target), "content": content, "expected_sha256": "missing"},
                 )
             )
-            self.assertEqual("failed", response["status"], name)
-            self.assertFalse(target.exists(), name)
+            self.assertEqual("succeeded", response["status"], name)
+            self.assertEqual(content.encode("utf-8"), target.read_bytes(), name)
 
-    def test_managed_config_policy_allows_certificate_paths_in_managed_root(self):
+    def test_config_apply_supports_certificate_paths_in_managed_root(self):
         target = self.config_root / "tls.conf"
         certificate = self.certificate_root / "example.crt"
         private_key = self.certificate_root / "example.key"
@@ -1017,7 +1019,7 @@ class AgentTestCase(unittest.TestCase):
         )
         self.assertEqual("succeeded", response["status"])
 
-    def test_managed_config_policy_allows_safe_generic_http_fragments(self):
+    def test_config_apply_supports_generic_http_fragments(self):
         fragments = {
             "status": """server {
   listen 127.0.0.1:18080;
@@ -1055,7 +1057,7 @@ class AgentTestCase(unittest.TestCase):
             )
             self.assertEqual("succeeded", response["status"], name)
 
-    def test_managed_config_policy_rejects_unsafe_map_and_geo_entries(self):
+    def test_config_apply_does_not_parse_map_and_geo_entries(self):
         for index, content in enumerate((
             "map $host $target { include /etc/nginx/map.conf; }",
             "geo $office { server { listen 80; } }",
@@ -1068,8 +1070,8 @@ class AgentTestCase(unittest.TestCase):
                     {"path": str(target), "content": content, "expected_sha256": "missing"},
                 )
             )
-            self.assertEqual("failed", response["status"])
-            self.assertFalse(target.exists())
+            self.assertEqual("succeeded", response["status"])
+            self.assertEqual(content.encode("utf-8"), target.read_bytes())
 
     def test_python36_compatibility_contract(self):
         source = (AGENT_DIR / "nginx_agent.py").read_text(encoding="utf-8")

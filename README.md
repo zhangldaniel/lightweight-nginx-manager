@@ -91,7 +91,9 @@ server {
 - **站点 Conf**：直接编写包含业务 `server_name` 的站点配置，可绑定证书。
 - **通用 Conf**：托管 `upstream`、`map`、`geo`、限流区和本机 Stub Status 等 HTTP 片段，不要求域名或证书。
 
-通用 Conf 只填写安全的 `.conf` 文件名，完整目录使用每个 Agent 的 `--managed-config-dir`。如果目标节点已有同名文件，必须先“导入节点现有配置”取得路径和 SHA-256，平台不会盲目覆盖。`map`/`geo` 需要 Agent `0.9.0+`。
+平台不解析或限制 Conf 中的 Nginx 指令，`auth_basic`、第三方模块和其他合法指令均直接交给目标节点的真实 `nginx -t` 校验。Agent 仍只允许写入 `--managed-config-dir`，并保留 SHA-256 并发保护、原子替换、失败恢复与 reload 回滚。使用 `include`、动态模块或其他高权限指令时，安全责任由操作者承担。
+
+通用 Conf 只填写 `.conf` 文件名，完整目录使用每个 Agent 的 `--managed-config-dir`。如果目标节点已有同名文件，必须先“导入节点现有配置”取得路径和 SHA-256，平台不会盲目覆盖。取消指令预检需要 Agent `0.9.2+`。
 
 ## 最容易踩的坑
 
@@ -101,6 +103,7 @@ server {
 | 配置已经导入，但证书页为空 | `--managed-cert-dir` 必须指向真实目录；`cert` 和 `certs` 是两个不同路径。修改参数后重新安装 Agent，再点击“扫描节点证书”。 |
 | 配置没改，重复发布却显示失败 | 先升级 Server；新版会比较逐节点 SHA-256，内容一致时只执行 `nginx -t` 与 reload，不写文件、不增加版本。真正修改后仍失败时，检查配置中的 `ssl_certificate` 路径是否位于 `--managed-cert-dir`。 |
 | 页面显示候选配置校验失败，但手工 `nginx -t` 成功 | 页面若同时显示“原文件已自动恢复”，手工检查的是恢复后的旧配置，这是正常现象。`proxy_pass` 必须带 `http://` 或 `https://`；向导模式会自动补齐简单的 IP、主机名和 upstream。新版也会显示候选配置的安全分类原因和大致行号。 |
+| 发布前提示“Conf 格式不完整或包含不允许托管的指令” | 节点仍在运行旧版 Agent 的指令白名单；升级 Agent 到 `0.9.2+` 后重试，配置将直接交给目标节点的 `nginx -t`。 |
 | 绑定证书后发布失败或浏览器报域名不匹配 | 证书必须同时存在于目标节点并覆盖站点域名；`*.itbkcmdb.int.example.com` 不覆盖 `test.int.example.com`。在“编辑配置”中更换绑定证书会自动更新证书路径。 |
 | `nginx -t` 报 `bind() to 0.0.0.0:80 failed (13: Permission denied)` | 部分自编译 Nginx 在测试配置时也会绑定低端口；升级 Agent，安装器会为受限 helper/recover 单元保留 `CAP_NET_BIND_SERVICE`。 |
 | `00-nginx-manager.conf has unexpected content` | 旧 include 文件和新托管目录冲突；先检查其内容。直接托管 `conf.d` 时不要再传 `--managed-include-file`。 |
