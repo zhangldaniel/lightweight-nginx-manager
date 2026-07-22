@@ -25,6 +25,23 @@ if (!html.includes('class="certificate-grid"')
     || !html.includes('summary-card--certificates')) {
   throw new Error("node and certificate risk cards are missing from the operations dashboard theme");
 }
+const embeddedFontMatch = html.match(/data:font\/woff2;base64,([A-Za-z0-9+/=]+)/);
+const embeddedFont = embeddedFontMatch ? Buffer.from(embeddedFontMatch[1], "base64") : Buffer.alloc(0);
+if (!html.includes('id="interaction-polish-v1"')
+    || !html.includes('font-family: "Inter Embedded";')
+    || embeddedFont.length < 10000
+    || embeddedFont.slice(0, 4).toString("ascii") !== "wOF2"
+    || html.includes("fonts.googleapis.com")
+    || html.includes("fonts.gstatic.com")) {
+  throw new Error("the readable offline font layer is missing, invalid, or still depends on an external font service");
+}
+if (!html.includes('@keyframes ops-dialog-in')
+    || !html.includes('@keyframes ops-menu-in')
+    || !html.includes('.status-pill::before')
+    || !html.includes('--motion-base: 190ms')
+    || !html.includes('animation: none !important;')) {
+  throw new Error("the restrained interaction motion, semantic tags, or reduced-motion fallback is incomplete");
+}
 if (!html.includes('data-nav="logs"')
     || !html.includes('data-nav="monitoring"')
     || !html.includes('id="live-log-output"')
