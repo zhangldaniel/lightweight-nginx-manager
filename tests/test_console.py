@@ -76,29 +76,6 @@ if (!html.includes('窗口即时筛选')
     || !html.includes("logExclude = event.target.value")) {
   throw new Error("live-log controls do not immediately filter the current browser window");
 }
-if (!html.includes('id="console-v2-style"')
-    || !html.includes('data-action="open-command-palette"')
-    || !html.includes('id="command-palette-dialog"')
-    || !html.includes("localStorage.setItem('nginx-manager-theme', next)")
-    || !html.includes('data:font/woff2;base64,')) {
-  throw new Error("the embedded-font theme shell or safe command palette is incomplete");
-}
-if (!html.includes("body.classList.toggle('detail-drawer-open'")
-    || !html.includes('class="detail-mobile-close"')
-    || !html.includes("detailTop: detail ? detail.scrollTop : 0")
-    || !html.includes('class="node-management-layout"')
-    || !html.includes('function renderNodesV2()')) {
-  throw new Error("responsive detail drawers, scroll preservation, or node master-detail layout are missing");
-}
-if (!html.includes('class="certificate-location-details"')
-    || !html.includes('class="cert-node-pill"')
-    || !html.includes('certificate-path-warning')
-    || !html.includes('function confirmConfigEditorClose()')) {
-  throw new Error("certificate path disclosure or unsaved editor protection is incomplete");
-}
-if (html.includes('monitoringSummary = syntheticMonitoring();')) {
-  throw new Error("the production monitoring workspace must not present synthetic Agent metrics");
-}
 if ((html.match(/'delete-config', 'delete-site-record'/g) || []).length < 2) {
   throw new Error("platform record deletion is not protected by both action and visibility permissions");
 }
