@@ -18,8 +18,29 @@
   "nginx_config": "/etc/nginx/nginx.conf",
   "nginx_root": "/etc/nginx",
   "allowed_config_roots": [
-    "/etc/nginx/nginx-manager.d"
+    "/etc/nginx/conf.d",
+    "/etc/nginx/stream.d"
   ],
+  "config_entries": [
+    {
+      "id": "http-default",
+      "context": "http",
+      "directory": "/etc/nginx/conf.d",
+      "suffix": ".conf",
+      "default": true,
+      "label": "HTTP · /etc/nginx/conf.d"
+    },
+    {
+      "id": "stream-default",
+      "context": "stream",
+      "directory": "/etc/nginx/stream.d",
+      "suffix": ".stream",
+      "default": true,
+      "label": "Stream · /etc/nginx/stream.d"
+    }
+  ],
+  "allow_main_config_edit": false,
+  "verify_config_entries_loaded": true,
   "allowed_certificate_roots": [
     "/etc/nginx/ssl/nginx-manager"
   ],

@@ -865,7 +865,7 @@
 
     .node-grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 16px;
     }
 
@@ -2921,8 +2921,18 @@
       line-height: 1.5;
     }
 
-    #site-node-checks {
+    #site-node-checks,
+    #site-entry-targets {
       grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+
+    #site-entry-targets .check-card {
+      display: grid;
+      gap: 7px;
+    }
+
+    #site-entry-targets .select {
+      width: 100%;
     }
 
     .check-card {
@@ -4798,7 +4808,7 @@
     <form class="dialog-shell" id="site-form">
       <header class="dialog-head">
         <div>
-          <h2>新增站点</h2>
+          <h2>新增配置</h2>
           <p id="site-dialog-subtitle">填写站点信息，平台自动生成基础 Nginx 配置</p>
         </div>
         <button class="icon-button" type="button" data-close-dialog="site-dialog" aria-label="关闭">×</button>
@@ -4817,6 +4827,10 @@
             <b>通用 Conf</b>
             <span>托管 upstream、map、状态页等 HTTP 片段</span>
           </button>
+          <button class="site-mode-button" type="button" aria-pressed="false" data-site-create-mode="stream">
+            <b>Stream Conf</b>
+            <span>直接托管 TCP/UDP 的 *.stream 配置</span>
+          </button>
         </div>
         <div class="form-grid site-form-grid">
           <div class="form-field span-2 site-domain-field">
@@ -4831,7 +4845,7 @@
           <div class="form-field site-generic-field" hidden>
             <label for="site-config-filename">目标文件名</label>
             <input class="input" id="site-config-filename" name="config_filename" placeholder="nginx-status.conf" disabled>
-            <span class="field-help">只能填写安全的 .conf 文件名；目录由各 Agent 决定。</span>
+            <span class="field-help" id="site-config-filename-help">只能填写安全的 .conf 文件名；目录由各 Agent 决定。</span>
           </div>
           <div class="form-field site-guided-field">
             <label for="site-type">站点类型</label>
@@ -4848,6 +4862,11 @@
           <div class="form-field full site-nodes-field">
             <span class="fieldset-title">部署节点</span>
             <div class="check-grid" id="site-node-checks"></div>
+          </div>
+          <div class="form-field full site-nodes-field">
+            <span class="fieldset-title">目标配置入口</span>
+            <div class="check-grid" id="site-entry-targets"></div>
+            <span class="field-help">每个节点独立选择写入目录；默认入口会自动选中。这里只显示 Agent 安装时显式登记并经 Nginx 加载确认的入口。</span>
           </div>
           <div class="form-field span-2 site-cert-field">
             <label for="site-cert">绑定证书</label>
@@ -5007,7 +5026,7 @@
     <form class="dialog-shell" id="config-transfer-form">
       <header class="dialog-head">
         <div>
-          <h2 id="config-transfer-title">复制配置到其他节点</h2>
+          <h2 id="config-transfer-title">复制或迁移配置</h2>
           <p id="config-transfer-subtitle"></p>
         </div>
         <button class="icon-button" type="button" data-close-dialog="config-transfer-dialog" aria-label="关闭">×</button>
@@ -5019,7 +5038,7 @@
             <div class="deploy-summary transfer-source" id="config-transfer-source"></div>
           </div>
           <div class="form-field full">
-            <span class="fieldset-title">目标节点与写入目录</span>
+            <span class="fieldset-title">目标节点与配置入口</span>
             <div class="check-grid" id="transfer-node-checks"></div>
           </div>
           <div class="form-field full">
@@ -5031,13 +5050,13 @@
             <span class="field-help">替换模式要求目标 Agent 0.3.0 或更高版本，并会记录被替换文件的原始 Hash。</span>
           </div>
           <div class="form-field full">
-            <div class="notice"><span>!</span><div>每个目标节点都会先暂存配置并执行 nginx -t，通过后才原子写入和 reload；失败自动恢复。成功节点会加入此站点的托管范围，原节点配置不会删除。若配置引用证书，请先确保目标节点已有对应证书。</div></div>
+            <div class="notice"><span>!</span><div>复制到新节点时保留源文件；同一节点切换入口时，Agent 会在一个事务中写入目标并删除源文件，再执行 nginx -t 和 reload，任一步失败都会同时恢复。HTTP 与 Stream 入口不能互相迁移。</div></div>
           </div>
         </div>
       </div>
       <footer class="dialog-foot">
         <button class="button" type="button" data-close-dialog="config-transfer-dialog">取消</button>
-        <button class="button primary" type="submit">校验并写入目标节点</button>
+        <button class="button primary" type="submit">校验并执行</button>
       </footer>
     </form>
   </dialog>
@@ -5283,6 +5302,7 @@
       var pendingTransferSiteId = null;
       var pendingDeleteSiteId = null;
       var pendingRecordDeleteSiteId = null;
+      var pendingMainConfigNodeId = null;
       var activeRunTimer = null;
       var toastTimer = null;
       var toastHideTimer = null;
@@ -5416,7 +5436,7 @@
         var adminActions = ['add-node', 'approve-enrollment', 'reject-enrollment'];
         var operatorActions = [
           'add-site', 'add-certificate', 'edit-config', 'validate-site', 'import-drift', 'convert-generic',
-          'deploy-site', 'transfer-config', 'delete-config', 'delete-site-record', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
+          'deploy-site', 'transfer-config', 'delete-config', 'delete-site-record', 'replace-cert', 'inspect-node', 'edit-main-config', 'test-node', 'reload-node',
           'rollback', 'import-sites', 'import-certificates'
         ];
         if (adminActions.includes(action)) return canAdminister();
@@ -5429,7 +5449,7 @@
         var protectedActions = [
           'add-node', 'approve-enrollment', 'reject-enrollment',
           'add-site', 'add-certificate', 'edit-config', 'validate-site', 'import-drift', 'convert-generic',
-          'deploy-site', 'transfer-config', 'delete-config', 'delete-site-record', 'replace-cert', 'inspect-node', 'test-node', 'reload-node',
+          'deploy-site', 'transfer-config', 'delete-config', 'delete-site-record', 'replace-cert', 'inspect-node', 'edit-main-config', 'test-node', 'reload-node',
           'rollback', 'import-sites', 'import-certificates'
         ];
         document.querySelectorAll('[data-action]').forEach(function (button) {
@@ -5645,6 +5665,10 @@
         var remoteState = (uiDocument && uiDocument.state) || {};
         remoteRevision = Number((uiDocument && uiDocument.revision) || 0);
         state.sites = Array.isArray(remoteState.sites) ? remoteState.sites : [];
+        state.sites.forEach(function (site) {
+          if (!site.context) site.context = 'http';
+          site.nodeConfigEntryIds = site.nodeConfigEntryIds || {};
+        });
         state.certificates = Array.isArray(remoteState.certificates) ? remoteState.certificates : [];
         state.importedInventoryJobs = Array.isArray(remoteState.importedInventoryJobs) ? remoteState.importedInventoryJobs : [];
         state.importedCertificateInventoryJobs = Array.isArray(remoteState.importedCertificateInventoryJobs) ? remoteState.importedCertificateInventoryJobs : [];
@@ -5662,6 +5686,13 @@
             if (!node.managedConfigRoot) {
               node.managedConfigRoot = String(node.root || '/etc/nginx').replace(/\/+$/, '') + '/nginx-manager.d';
             }
+            normalizeNodeConfigEntries(node);
+            if (!node.nginxConfig) node.nginxConfig = String(node.root || '/etc/nginx').replace(/\/+$/, '') + '/nginx.conf';
+            node.mainConfigEditable = Boolean(node.mainConfigEditable);
+          });
+          parsed.sites.forEach(function (site) {
+            if (!site.context) site.context = 'http';
+            site.nodeConfigEntryIds = site.nodeConfigEntryIds || {};
           });
           normalizeSiteDeploymentStates(parsed.sites);
           parsed.importedInventoryJobs = Array.isArray(parsed.importedInventoryJobs) ? parsed.importedInventoryJobs : [];
@@ -5867,7 +5898,7 @@
         var facts = node.facts || {};
         var labelText = Object.keys(labels).map(function (key) { return labels[key]; }).filter(Boolean).join(' · ');
         var hash = node.config_hash || '';
-        return {
+        var mapped = {
           id: node.id,
           name: node.node_name || node.hostname || node.id,
           ip: node.hostname || '—',
@@ -5877,17 +5908,22 @@
           nginx: node.nginx_version || '待探测',
           root: facts.nginx_root || '/etc/nginx',
           managedConfigRoot: facts.managed_config_root || '/etc/nginx/nginx-manager.d',
+          configEntries: Array.isArray(facts.config_entries) ? facts.config_entries.slice() : [],
+          nginxConfig: facts.nginx_config || String(facts.nginx_root || '/etc/nginx').replace(/\/+$/, '') + '/nginx.conf',
+          mainConfigEditable: Boolean(facts.main_config_editable),
           managedCertificateRoot: facts.managed_certificate_root || '/etc/nginx/ssl/nginx-manager',
           logRoots: Array.isArray(facts.log_roots) ? facts.log_roots.slice() : [],
           logFiles: Array.isArray(facts.log_files) ? facts.log_files.slice() : [],
           stubStatusUrl: facts.stub_status_url || '',
           logStreamTransport: facts.log_stream_transport || '',
           capabilities: Array.isArray(node.capabilities) ? node.capabilities.slice() : [],
-          sites: state.sites.filter(function (site) { return site.nodeIds.includes(node.id); }).length,
+          sites: state.sites.filter(function (site) { return siteContext(site) !== 'main' && site.nodeIds.includes(node.id); }).length,
           drift: false,
           lastSeen: relativeTime(node.last_seen_at),
           configVersion: hash ? hash.slice(0, 10) : '待探测'
         };
+        normalizeNodeConfigEntries(mapped);
+        return mapped;
       }
 
       function jobFailureInfo(job) {
@@ -5953,7 +5989,7 @@
           reason = 'Nginx reload 未成功';
           stage = stage || 'reload';
         }
-        if (!reason && ['config_apply', 'config_delete'].includes(job && job.action)) {
+        if (!reason && ['config_apply', 'config_move', 'config_delete'].includes(job && job.action)) {
           if (result.syntax_ok === true && result.reloaded === false) {
             reason = '配置校验已通过，但 reload 未成功';
             stage = stage || 'reload';
@@ -6068,6 +6104,7 @@
           certificate_inventory: '扫描现有证书',
           config_hash: '配置 Hash',
           config_apply: '配置发布',
+          config_move: '配置入口迁移',
           config_delete: '移除节点配置',
           certificate_apply: '证书写入 / 替换'
         };
@@ -6110,6 +6147,7 @@
         var byId = {};
         jobs.forEach(function (job) { byId[job.id] = job; });
         var changed = false;
+        var removedSiteIds = [];
         state.sites.forEach(function (site) {
           var pending = site.pendingRemote;
           if (!pending || !Array.isArray(pending.jobs) || !pending.jobs.length) return;
@@ -6138,6 +6176,7 @@
           if (pending.deleteConfig) {
             site.nodeHashes = site.nodeHashes || {};
             site.nodeConfigPaths = site.nodeConfigPaths || {};
+            site.nodeConfigEntryIds = site.nodeConfigEntryIds || {};
             site.nodeConfigs = site.nodeConfigs || {};
             var removedNodes = [];
             pending.jobs.forEach(function (item) {
@@ -6146,6 +6185,7 @@
               site.nodeIds = site.nodeIds.filter(function (nodeId) { return nodeId !== item.nodeId; });
               delete site.nodeHashes[item.nodeId];
               delete site.nodeConfigPaths[item.nodeId];
+              delete site.nodeConfigEntryIds[item.nodeId];
               delete site.nodeConfigs[item.nodeId];
               var removedNode = getNode(item.nodeId);
               if (removedNode) {
@@ -6166,20 +6206,24 @@
             }
             site.status = failed ? 'failed' : (site.nodeIds.length ? 'published' : 'unassigned');
             if (!failed && removedNodes.length) {
+              if (!site.nodeIds.length) removedSiteIds.push(site.id);
               notify(site.nodeIds.length
                 ? '所选节点配置已移除，该配置仍部署在其他节点'
-                : '全部节点配置已移除；如不再需要，可继续删除平台配置记录');
+                : '全部节点配置已移除；该配置已退出活动列表，执行记录仍保留');
             }
           } else if (pending.transfer) {
             site.nodeHashes = site.nodeHashes || {};
             site.nodeConfigPaths = site.nodeConfigPaths || {};
+            site.nodeConfigEntryIds = site.nodeConfigEntryIds || {};
             site.nodeConfigs = site.nodeConfigs || {};
             var transferredNodes = [];
+            var migratedNodes = [];
             pending.jobs.forEach(function (item) {
               var job = byId[item.id];
               if (!job || job.status !== 'succeeded') return;
               if (job.result && job.result.config_hash) site.nodeHashes[item.nodeId] = job.result.config_hash;
               if (item.path) site.nodeConfigPaths[item.nodeId] = item.path;
+              if (item.entryId) site.nodeConfigEntryIds[item.nodeId] = item.entryId;
               delete site.nodeConfigs[item.nodeId];
               if (!site.nodeIds.includes(item.nodeId)) {
                 site.nodeIds.push(item.nodeId);
@@ -6187,14 +6231,20 @@
                 if (addedNode) addedNode.sites = Number(addedNode.sites || 0) + 1;
               }
               var transferredNode = getNode(item.nodeId);
-              if (transferredNode) transferredNodes.push(transferredNode.name);
+              if (transferredNode) {
+                if (item.migration) migratedNodes.push(transferredNode.name);
+                else transferredNodes.push(transferredNode.name);
+              }
             });
-            if (transferredNodes.length) {
+            if (transferredNodes.length || migratedNodes.length) {
               site.updatedAt = '刚刚';
               site.history = site.history || [];
               site.history.unshift({
                 version: site.version,
-                note: '复制配置到 ' + transferredNodes.join('、'),
+                note: [
+                  transferredNodes.length ? '复制配置到 ' + transferredNodes.join('、') : '',
+                  migratedNodes.length ? '迁移配置入口：' + migratedNodes.join('、') : ''
+                ].filter(Boolean).join('；'),
                 time: '刚刚',
                 user: '控制端'
               });
@@ -6227,6 +6277,10 @@
           delete site.pendingRemote;
           changed = true;
         });
+        if (removedSiteIds.length) {
+          state.sites = state.sites.filter(function (site) { return !removedSiteIds.includes(site.id); });
+          if (removedSiteIds.includes(selectedSiteId)) selectedSiteId = null;
+        }
         state.certificates.forEach(function (certificate) {
           var pending = certificate.pendingRemote;
           if (!pending || !Array.isArray(pending.jobs) || !pending.jobs.length) return;
@@ -6341,8 +6395,33 @@
 
       function inventorySiteMetadata(file) {
         var path = String(file.path || '');
-        var filename = path.split('/').pop() || 'imported.conf';
+        var context = file.context === 'main' ? 'main' : (file.context === 'stream' || /\.stream$/i.test(path) ? 'stream' : 'http');
+        var filename = path.split('/').pop() || (context === 'stream' ? 'imported.stream' : 'imported.conf');
         var content = String(file.content || '');
+        if (context === 'main') {
+          return {
+            resourceType: 'main',
+            context: 'main',
+            name: 'Nginx 主配置',
+            domain: 'Nginx 主配置',
+            aliases: [],
+            type: 'custom',
+            target: path,
+            filename: filename
+          };
+        }
+        if (context === 'stream') {
+          return {
+            resourceType: 'generic',
+            context: 'stream',
+            name: filename.replace(/\.stream$/i, ''),
+            domain: filename.replace(/\.stream$/i, ''),
+            aliases: [],
+            type: 'custom',
+            target: 'Stream 配置',
+            filename: filename
+          };
+        }
         var serverNames = nginxDirectiveValues(content, 'server_name').join(' ').split(/\s+/).map(function (name) {
           return name.replace(/^["']|["']$/g, '');
         }).filter(Boolean);
@@ -6366,6 +6445,7 @@
         var roots = nginxDirectiveValues(content, 'root');
         return {
           resourceType: resourceType,
+          context: 'http',
           name: resourceType === 'generic' ? (hasStubStatus ? 'Nginx Status' : baseName) : domain,
           domain: domain,
           aliases: businessNames.slice(1),
@@ -6384,8 +6464,10 @@
         var metadata = inventorySiteMetadata(file);
         if (!site) {
           site = state.sites.find(function (candidate) {
-            return candidate.importedFileName === metadata.filename
+            return metadata.context !== 'main'
+              && candidate.importedFileName === metadata.filename
               && candidate.resourceType === metadata.resourceType
+              && siteContext(candidate) === metadata.context
               && resourceTitle(candidate) === metadata.name;
           });
         }
@@ -6393,6 +6475,7 @@
           site = {
             id: uid('site'),
             resourceType: metadata.resourceType,
+            context: metadata.context,
             name: metadata.name,
             filename: metadata.filename,
             domain: metadata.domain,
@@ -6412,6 +6495,8 @@
             importedFileName: metadata.filename,
             nodeHashes: {},
             nodeConfigPaths: {},
+            nodeConfigEntryIds: {},
+            nodeReadOnly: {},
             nodeConfigs: {},
             history: [{ version: 1, note: '从节点导入现有配置（未修改节点文件）', time: '刚刚', user: '控制端' }]
           };
@@ -6419,6 +6504,8 @@
         }
         site.nodeHashes = site.nodeHashes || {};
         site.nodeConfigPaths = site.nodeConfigPaths || {};
+        site.nodeConfigEntryIds = site.nodeConfigEntryIds || {};
+        site.nodeReadOnly = site.nodeReadOnly || {};
         site.nodeConfigs = site.nodeConfigs || {};
         var changed = site.nodeHashes[node.id] !== file.sha256
           || site.nodeConfigPaths[node.id] !== path
@@ -6426,6 +6513,8 @@
           || (file.content === site.config && Object.prototype.hasOwnProperty.call(site.nodeConfigs, node.id));
         site.nodeHashes[node.id] = file.sha256;
         site.nodeConfigPaths[node.id] = path;
+        if (file.entry_id) site.nodeConfigEntryIds[node.id] = file.entry_id;
+        site.nodeReadOnly[node.id] = Boolean(file.read_only);
         if (file.content === site.config) delete site.nodeConfigs[node.id];
         else site.nodeConfigs[node.id] = file.content;
         if (!site.nodeIds.includes(node.id)) {
@@ -6462,15 +6551,35 @@
           }
           var inventory = job.result.config_inventory;
           var node = getNode(job.node_id);
+          if (node && Array.isArray(inventory.config_entries) && inventory.config_entries.length) {
+            node.configEntries = inventory.config_entries.slice();
+            normalizeNodeConfigEntries(node);
+          }
           (inventory.files || []).forEach(function (file) {
             if (importInventoryFile(file, node)) importedCount += 1;
           });
+          if (inventory.main_config && node) {
+            var mainFile = Object.assign({}, inventory.main_config, {
+              context: 'main',
+              entry_id: 'main-config'
+            });
+            if (importInventoryFile(mainFile, node)) importedCount += 1;
+          }
           skippedCount += Number(inventory.skipped_count || 0);
           truncated = truncated || Boolean(inventory.truncated);
         });
         if (!changed) return;
         state.importedInventoryJobs = Array.from(processed).slice(-200);
         saveState();
+        if (pendingMainConfigNodeId) {
+          var requestedMain = state.sites.find(function (site) {
+            return siteContext(site) === 'main' && (site.nodeIds || []).includes(pendingMainConfigNodeId);
+          });
+          if (requestedMain) {
+            pendingMainConfigNodeId = null;
+            setTimeout(function () { openConfigEditor(requestedMain.id); }, 0);
+          }
+        }
         if (failedCount) {
           notify('部分节点配置扫描失败，请到“执行记录”查看详情');
         } else if (importedCount) {
@@ -6637,11 +6746,23 @@
               normalizedDeploymentState = rememberProcessedOperation(operation.id) || normalizedDeploymentState;
             }
             if (!site || site.pendingRemote || !Array.isArray(document.jobs) || !document.jobs.length) return;
+            var transferTargets = operation.metadata && Array.isArray(operation.metadata.transfer_targets)
+              ? operation.metadata.transfer_targets
+              : [];
             site.pendingRemote = {
               operationId: operation.id,
               candidateRevisionId: operation.candidate_revision_id,
               jobs: document.jobs.map(function (job) {
-                return { id: job.id, nodeId: job.node_id };
+                var transferTarget = transferTargets.find(function (item) {
+                  return item.node_id === job.node_id;
+                });
+                return {
+                  id: job.id,
+                  nodeId: job.node_id,
+                  path: transferTarget ? transferTarget.path : '',
+                  entryId: transferTarget ? transferTarget.entry_id : '',
+                  migration: Boolean(transferTarget && transferTarget.migration)
+                };
               }),
               operation: operation.kind,
               publish: operation.kind === 'publish',
@@ -6811,7 +6932,13 @@
       }
 
       function isGenericResource(site) {
-        return Boolean(site && (site.resourceType === 'generic' || site.configMode === 'generic'));
+        return Boolean(site && (
+          site.resourceType === 'generic'
+          || site.resourceType === 'main'
+          || site.configMode === 'generic'
+          || siteContext(site) === 'stream'
+          || siteContext(site) === 'main'
+        ));
       }
 
       function resourceTitle(site) {
@@ -6820,7 +6947,9 @@
       }
 
       function resourceKindLabel(site) {
-        return isGenericResource(site) ? '通用 Conf' : formatSiteType(site && site.type);
+        if (siteContext(site) === 'main') return 'Nginx 主配置';
+        if (siteContext(site) === 'stream') return 'Stream Conf';
+        return isGenericResource(site) ? 'HTTP Conf' : formatSiteType(site && site.type);
       }
 
       function getSite(id) {
@@ -7078,12 +7207,13 @@
       }
 
       function renderSummary() {
+        var managedSites = state.sites.filter(function (site) { return siteContext(site) !== 'main'; });
         var expiring = state.certificates.filter(function (cert) { return certificateDays(cert) <= 30; }).length;
-        var drift = state.sites.filter(function (site) { return site.status === 'drift' || site.status === 'failed' || hasValidationFailure(site); }).length;
-        var deployedSites = state.sites.filter(function (site) { return (site.nodeIds || []).length > 0; }).length;
+        var drift = managedSites.filter(function (site) { return site.status === 'drift' || site.status === 'failed' || hasValidationFailure(site); }).length;
+        var deployedSites = managedSites.filter(function (site) { return (site.nodeIds || []).length > 0; }).length;
         return [
           '<div class="summary-grid">',
-          '  <div class="summary-card summary-card--sites"><span class="summary-icon blue" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"></rect><rect x="4" y="14" width="16" height="6" rx="1.5"></rect><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"></path></svg></span><span class="summary-copy"><span class="summary-label">已部署配置</span><strong class="summary-value">' + deployedSites + '</strong><span class="summary-hint">平台记录共 ' + state.sites.length + ' 条</span></span></div>',
+          '  <div class="summary-card summary-card--sites"><span class="summary-icon blue" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"></rect><rect x="4" y="14" width="16" height="6" rx="1.5"></rect><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"></path></svg></span><span class="summary-copy"><span class="summary-label">已部署配置</span><strong class="summary-value">' + deployedSites + '</strong><span class="summary-hint">平台记录共 ' + managedSites.length + ' 条</span></span></div>',
           '  <div class="summary-card summary-card--nodes"><button type="button" data-nav-jump="nodes"><span class="summary-icon green" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6" rx="1.5"></rect><rect x="3.5" y="14" width="17" height="6" rx="1.5"></rect><path d="M7.5 7h.01M7.5 17h.01M11 7h6M11 17h6"></path></svg></span><span class="summary-copy"><span class="summary-label">在线 Agent</span><strong class="summary-value">' + onlineNodes().length + ' / ' + state.nodes.length + '</strong><span class="summary-hint">主动出站连接</span></span></button></div>',
           '  <div class="summary-card summary-card--certificates"><button type="button" data-nav-jump="certificates"><span class="summary-icon amber" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 19 7v5c0 4.6-2.9 7.3-7 9-4.1-1.7-7-4.4-7-9V7l7-4Z"></path><path d="M12 8v5M12 16.5h.01"></path></svg></span><span class="summary-copy"><span class="summary-label">即将到期证书</span><strong class="summary-value">' + expiring + '</strong><span class="summary-hint ' + (expiring ? 'warn' : '') + '">' + (expiring ? '需要处理' : '暂无风险') + '</span></span></button></div>',
           '  <div class="summary-card"><button type="button" data-site-filter="attention"><span class="summary-icon red" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 21 19H3L12 3.5Z"></path><path d="M12 9v4M12 16.5h.01"></path></svg></span><span class="summary-copy"><span class="summary-label">漂移 / 失败</span><strong class="summary-value">' + drift + '</strong><span class="summary-hint ' + (drift ? 'danger' : '') + '">' + (drift ? '点击查看异常站点' : '全部一致') + '</span></span></button></div>',
@@ -7094,6 +7224,7 @@
       function filteredSites() {
         var query = siteQuery.trim().toLowerCase();
         return state.sites.filter(function (site) {
+          if (siteContext(site) === 'main') return false;
           var matchesQuery = !query || [resourceTitle(site), site.domain, site.filename, site.note, site.changeNote, site.environment].join(' ').toLowerCase().indexOf(query) >= 0;
           var matchesFilter = siteFilter === 'all' ||
             (siteFilter === 'attention' && (site.status === 'drift' || site.status === 'failed' || hasValidationFailure(site))) ||
@@ -7225,8 +7356,9 @@
         var previewHasDrift = previewSource === '节点实际配置';
         var nodeRows = nodes.map(function (node) {
           var nodeHasDrift = Boolean(node.drift || (site.nodeConfigs && typeof site.nodeConfigs[node.id] === 'string'));
-          var nodeState = !node.online ? '离线' : (nodeHasDrift ? 'Hash 不一致' : 'v' + site.version + ' 一致');
-          var chipClass = !node.online ? 'danger' : (nodeHasDrift ? 'warn' : '');
+          var entryRemoved = siteNodeEntryRemoved(site, node);
+          var nodeState = entryRemoved ? '入口已移除' : (!node.online ? '离线' : (nodeHasDrift ? 'Hash 不一致' : 'v' + site.version + ' 一致'));
+          var chipClass = entryRemoved || !node.online ? 'danger' : (nodeHasDrift ? 'warn' : '');
           return [
             '<div class="node-mini">',
             '  <div><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(node.ip) + ' · ' + escapeHtml(node.lastSeen) + '</span><span title="' + escapeHtml(managedConfigPath(site, node)) + '">' + escapeHtml(managedConfigPath(site, node)) + ' · Hash ' + escapeHtml(site.nodeHashes && site.nodeHashes[node.id] ? String(site.nodeHashes[node.id]).slice(0, 12) : '待探测') + '</span></div>',
@@ -7259,7 +7391,7 @@
           '    <div class="detail-actions">',
           failureNotice,
           '      <button class="button" type="button" data-action="edit-config" data-site-id="' + escapeHtml(site.id) + '">编辑配置</button>',
-          '      <button class="button" type="button" data-action="transfer-config" data-site-id="' + escapeHtml(site.id) + '">复制到其他节点</button>',
+          '      <button class="button" type="button" data-action="transfer-config" data-site-id="' + escapeHtml(site.id) + '">复制 / 迁移入口</button>',
           '      <button class="button" type="button" data-action="validate-site" data-site-id="' + escapeHtml(site.id) + '"' + (site.nodeIds.length && !site.pendingRemote ? '' : ' disabled') + '>逐节点校验</button>',
           previewHasDrift ? '<button class="button" type="button" data-action="import-drift" data-site-id="' + escapeHtml(site.id) + '">导入节点配置</button>' : '<button class="button" type="button" data-action="view-runs" data-site-id="' + escapeHtml(site.id) + '">查看记录</button>',
           !generic && inventorySiteMetadata({ path: managedConfigFilename(site), content: site.config }).resourceType === 'generic'
@@ -7636,6 +7768,13 @@
         var cards = state.nodes.map(function (node) {
           var statusClass = !node.online ? 'danger' : (node.drift ? 'warn' : '');
           var statusText = !node.online ? '离线' : (node.drift ? '配置漂移' : '在线');
+          var configEntries = normalizeNodeConfigEntries(node);
+          var entrySummary = configEntries.map(function (entry) {
+            return entry.context.toUpperCase() + (entry.default ? ' 默认' : '') + ' · ' + entry.directory + '/*' + entry.suffix;
+          }).join('\n');
+          var mainSite = state.sites.find(function (site) {
+            return siteContext(site) === 'main' && (site.nodeIds || []).includes(node.id);
+          });
           return [
             '<article class="node-card ' + (!node.online ? 'node-card--offline' : (node.drift ? 'node-card--warn' : 'node-card--online')) + '">',
             '  <div class="node-card-head">',
@@ -7646,13 +7785,14 @@
             '  <div class="node-facts">',
             '    <div class="fact"><label>Agent</label><strong>v' + escapeHtml(node.agent) + ' · ' + escapeHtml(node.lastSeen) + '</strong></div>',
             '    <div class="fact"><label>Nginx</label><strong>' + escapeHtml(node.nginx) + '</strong></div>',
-            '    <div class="fact"><label>配置根目录</label><strong>' + escapeHtml(node.root) + '</strong></div>',
+            '    <div class="fact"><label>配置入口</label><strong title="' + escapeHtml(entrySummary) + '">' + configEntries.length + ' 个 · HTTP ' + nodeConfigEntries(node, 'http').length + ' / Stream ' + nodeConfigEntries(node, 'stream').length + '</strong></div>',
             '    <div class="fact"><label>托管站点</label><strong>' + node.sites + ' 个 · ' + escapeHtml(node.configVersion) + '</strong></div>',
             '  </div>',
             '  <div class="node-actions">',
             '    <button type="button" data-action="view-node-monitoring" data-node-id="' + escapeHtml(node.id) + '">运行监控</button>',
             '    <button type="button" data-action="view-node-logs" data-node-id="' + escapeHtml(node.id) + '" ' + (nodeSupports(node, 'log_stream_v1') && node.online ? '' : 'disabled') + '>实时日志</button>',
             '    <button type="button" data-action="inspect-node" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>重新探测</button>',
+            '    <button type="button" data-action="edit-main-config" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>' + (mainSite ? (node.mainConfigEditable ? '编辑主配置' : '查看主配置') : '读取主配置') + '</button>',
             '    <button type="button" data-action="test-node" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>nginx -t</button>',
             '    <button type="button" data-action="reload-node" data-node-id="' + escapeHtml(node.id) + '" ' + (node.online ? '' : 'disabled') + '>平滑 reload</button>',
             node.drift ? '<button type="button" data-action="resolve-node-drift" data-node-id="' + escapeHtml(node.id) + '">处理漂移</button>' : '',
@@ -8108,6 +8248,54 @@
         window.scrollTo({ top: 0, behavior: 'smooth' });
       }
 
+      function siteCreateContext() {
+        return siteCreateMode === 'stream' ? 'stream' : 'http';
+      }
+
+      function renderSiteEntryTargets() {
+        var container = document.getElementById('site-entry-targets');
+        if (!container) return;
+        var previous = {};
+        container.querySelectorAll('select[data-entry-node-id]').forEach(function (select) {
+          previous[select.dataset.entryNodeId] = select.value;
+        });
+        var context = siteCreateContext();
+        var selectedIds = selectedSiteNodeIds();
+        if (!selectedIds.length) {
+          container.innerHTML = '<span class="field-help">请先选择部署节点。</span>';
+          return;
+        }
+        container.innerHTML = selectedIds.map(function (nodeId) {
+          var node = getNode(nodeId);
+          if (!node) return '';
+          var entries = nodeConfigEntries(node, context);
+          var selected = nodeConfigEntry(node, previous[nodeId], context) || defaultNodeConfigEntry(node, context);
+          var options = entries.map(function (entry) {
+            return '<option value="' + escapeHtml(entry.id) + '"' + (selected && selected.id === entry.id ? ' selected' : '') + '>'
+              + escapeHtml(entry.label) + (entry.default ? '（默认）' : '') + ' · *' + escapeHtml(entry.suffix) + '</option>';
+          }).join('');
+          return '<label class="check-card"><span><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(context.toUpperCase()) + ' 写入入口</span></span>'
+            + '<select class="select" data-entry-node-id="' + escapeHtml(node.id) + '">' + options + '</select></label>';
+        }).join('');
+      }
+
+      function renderSiteNodeChoices(preserveSelection) {
+        var nodeChecks = document.getElementById('site-node-checks');
+        if (!nodeChecks) return;
+        var selected = preserveSelection ? new Set(selectedSiteNodeIds()) : new Set();
+        var context = siteCreateContext();
+        nodeChecks.innerHTML = state.nodes.map(function (node) {
+          var entries = nodeConfigEntries(node, context);
+          var available = node.online && entries.length > 0;
+          var checked = available && selected.has(node.id) ? ' checked' : '';
+          var disabled = available ? '' : ' disabled';
+          var detail = !node.online ? '离线' : (entries.length ? entries.length + ' 个 ' + context.toUpperCase() + ' 入口' : '未登记 ' + context.toUpperCase() + ' 入口');
+          return '<label class="check-card"><input type="checkbox" name="site-node" value="' + escapeHtml(node.id) + '"' + checked + disabled
+            + '><span><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(node.ip) + ' · ' + escapeHtml(detail) + '</span></span></label>';
+        }).join('');
+        renderSiteEntryTargets();
+      }
+
       function prepareSiteDialog() {
         document.getElementById('site-form').reset();
         document.getElementById('site-config-filename').dataset.manual = 'false';
@@ -8118,10 +8306,7 @@
         document.getElementById('site-conf-template').value = 'proxy-http';
         document.getElementById('site-conf-template-button').textContent = '应用模板';
         setSiteCreateMode('guided');
-        var nodeChecks = document.getElementById('site-node-checks');
-        nodeChecks.innerHTML = state.nodes.map(function (node) {
-          return '<label class="check-card"><input type="checkbox" name="site-node" value="' + escapeHtml(node.id) + '" ' + (!node.online ? 'disabled' : '') + '><span><b>' + escapeHtml(node.name) + '</b><span>' + escapeHtml(node.ip) + ' · ' + (node.online ? '在线' : '离线') + '</span></span></label>';
-        }).join('');
+        renderSiteNodeChoices(false);
         updateSiteCertificateOptions();
         openDialog('site-dialog');
       }
@@ -8187,13 +8372,38 @@
           'generic-blank': '空白 HTTP 片段 · 请直接编写配置',
           'generic-stub-status': 'Nginx Stub Status · 仅监听 127.0.0.1:18080',
           'generic-upstream': 'Upstream 池 · 使用脱敏示例地址',
-          'generic-map': 'Map 变量 · WebSocket Connection 映射'
+          'generic-map': 'Map 变量 · WebSocket Connection 映射',
+          'stream-blank': '空白 Stream 片段 · 文件使用 .stream 后缀',
+          'stream-proxy': 'TCP 反向代理 · 单后端示例',
+          'stream-upstream': 'TCP 负载均衡 · 双后端示例'
         };
         return (pending ? '待应用：' : '') + (summaries[templateKey] || summaries['proxy-http']);
       }
 
       function siteConfTemplate(templateKey, silent) {
-        if (templateKey === 'generic-blank') return '';
+        if (templateKey === 'generic-blank' || templateKey === 'stream-blank') return '';
+        if (templateKey === 'stream-proxy') {
+          return [
+            'server {',
+            '  listen 9000;',
+            '  proxy_pass 192.0.2.21:9000;',
+            '}'
+          ].join('\n');
+        }
+        if (templateKey === 'stream-upstream') {
+          return [
+            'upstream tcp_backend {',
+            '  least_conn;',
+            '  server 192.0.2.21:9000;',
+            '  server 192.0.2.22:9000;',
+            '}',
+            '',
+            'server {',
+            '  listen 9000;',
+            '  proxy_pass tcp_backend;',
+            '}'
+          ].join('\n');
+        }
         if (templateKey === 'generic-stub-status') {
           return [
             'server {',
@@ -8346,9 +8556,12 @@
 
       function setSiteCreateMode(mode) {
         var previousMode = siteCreateMode;
-        siteCreateMode = ['conf', 'generic'].includes(mode) ? mode : 'guided';
+        var previousContext = previousMode === 'stream' ? 'stream' : 'http';
+        siteCreateMode = ['conf', 'generic', 'stream'].includes(mode) ? mode : 'guided';
         var confMode = siteCreateMode !== 'guided';
         var genericMode = siteCreateMode === 'generic';
+        var streamMode = siteCreateMode === 'stream';
+        var namedFileMode = genericMode || streamMode;
         var dialog = document.getElementById('site-dialog');
         var dialogBody = dialog.querySelector('.dialog-body');
         var dialogScroll = captureElementScroll(dialogBody);
@@ -8365,21 +8578,33 @@
           });
         });
         dialog.querySelectorAll('.site-generic-field').forEach(function (field) {
-          field.hidden = !genericMode;
+          field.hidden = !namedFileMode;
           field.querySelectorAll('input, select, textarea').forEach(function (control) {
-            control.disabled = !genericMode;
+            control.disabled = !namedFileMode;
           });
         });
         var domainField = dialog.querySelector('.site-domain-field');
-        domainField.hidden = genericMode;
+        domainField.hidden = namedFileMode;
         var domainInput = document.getElementById('site-domain');
-        domainInput.disabled = genericMode;
-        domainInput.required = !genericMode;
+        domainInput.disabled = namedFileMode;
+        domainInput.required = !namedFileMode;
         var certificateField = dialog.querySelector('.site-cert-field');
-        certificateField.hidden = genericMode;
-        document.getElementById('site-cert').disabled = genericMode;
-        document.getElementById('site-config-name').required = genericMode;
-        document.getElementById('site-config-filename').required = genericMode;
+        certificateField.hidden = namedFileMode;
+        document.getElementById('site-cert').disabled = namedFileMode;
+        document.getElementById('site-config-name').required = namedFileMode;
+        document.getElementById('site-config-filename').required = namedFileMode;
+        var filenameInput = document.getElementById('site-config-filename');
+        filenameInput.placeholder = streamMode ? 'tcp-gateway.stream' : 'nginx-status.conf';
+        if (previousContext !== siteCreateContext()) filenameInput.dataset.manual = 'false';
+        if (namedFileMode && filenameInput.dataset.manual !== 'true') {
+          filenameInput.value = suggestedConfigFilename(
+            document.getElementById('site-config-name').value,
+            siteCreateContext()
+          );
+        }
+        document.getElementById('site-config-filename-help').textContent = streamMode
+          ? '只能填写安全的 .stream 文件名；目录由各 Agent 的 Stream 入口决定。'
+          : '只能填写安全的 .conf 文件名；目录由各 Agent 的 HTTP 入口决定。';
         var target = document.getElementById('site-target');
         target.required = siteCreateMode === 'guided';
         var confField = document.getElementById('site-conf-field');
@@ -8388,28 +8613,37 @@
         editor.disabled = !confMode;
         editor.required = confMode;
         var templateSelect = document.getElementById('site-conf-template');
-        templateSelect.innerHTML = genericMode
-          ? '<option value="generic-blank">空白 HTTP 片段</option><option value="generic-stub-status">Nginx Stub Status</option><option value="generic-upstream">Upstream 池</option><option value="generic-map">Map 变量</option>'
-          : '<option value="proxy-http">HTTP 反向代理</option><option value="standard-https">标准 HTTPS 反向代理</option><option value="upstream-https">负载均衡 HTTPS 反向代理</option><option value="websocket-long">WebSocket 长连接反向代理</option><option value="static">静态站点</option>';
+        templateSelect.innerHTML = streamMode
+          ? '<option value="stream-blank">空白 Stream 配置</option><option value="stream-proxy">TCP 反向代理</option><option value="stream-upstream">TCP 负载均衡</option>'
+          : (genericMode
+            ? '<option value="generic-blank">空白 HTTP 片段</option><option value="generic-stub-status">Nginx Stub Status</option><option value="generic-upstream">Upstream 池</option><option value="generic-map">Map 变量</option>'
+            : '<option value="proxy-http">HTTP 反向代理</option><option value="standard-https">标准 HTTPS 反向代理</option><option value="upstream-https">负载均衡 HTTPS 反向代理</option><option value="websocket-long">WebSocket 长连接反向代理</option><option value="static">静态站点</option>');
         if (previousMode !== siteCreateMode) {
           editor.value = '';
           editor.dataset.dirty = 'false';
           editor.dataset.templateKey = templateSelect.value;
           document.getElementById('site-conf-template-button').textContent = '应用模板';
         }
-        document.getElementById('site-conf-guide-copy').textContent = genericMode
-          ? '适合 upstream、map、geo、限流区和本机状态页等 http-context 片段。'
-          : '适合已有 server 配置或需要细调指令的场景。';
-        document.getElementById('site-conf-cert-guide').textContent = genericMode
-          ? '通用 Conf 不绑定证书，也不要求配置名称出现在正文中。'
-          : '已绑定证书的路径会按目标节点自动适配。';
-        document.getElementById('site-dialog-subtitle').textContent = genericMode
-          ? '直接托管通用 HTTP 配置片段；文件目录由目标 Agent 决定'
-          : (confMode ? '直接编写站点级 Conf，仍通过 Agent 逐节点校验与发布' : '填写站点信息，平台自动生成基础 Nginx 配置');
+        document.getElementById('site-conf-guide-copy').textContent = streamMode
+          ? '适合 TCP/UDP 代理、负载均衡等 stream-context 片段；文件固定使用 .stream 后缀。'
+          : (genericMode
+            ? '适合 upstream、map、geo、限流区和本机状态页等 http-context 片段。'
+            : '适合已有 server 配置或需要细调指令的场景。');
+        document.getElementById('site-conf-cert-guide').textContent = streamMode
+          ? 'Stream Conf 不做证书资产绑定；TLS 证书路径直接写在配置正文中。'
+          : (genericMode
+            ? '通用 Conf 不绑定证书，也不要求配置名称出现在正文中。'
+            : '已绑定证书的路径会按目标节点自动适配。');
+        document.getElementById('site-dialog-subtitle').textContent = streamMode
+          ? '直接托管 Stream 配置；每个节点可选择一个已登记的 *.stream 入口'
+          : (genericMode
+            ? '直接托管通用 HTTP 配置片段；文件目录由目标 Agent 决定'
+            : (confMode ? '直接编写站点级 Conf，仍通过 Agent 逐节点校验与发布' : '填写站点信息，平台自动生成基础 Nginx 配置'));
         document.getElementById('site-submit-button').textContent = confMode ? '保存 Conf 草稿' : '创建草稿';
         document.getElementById('site-conf-template-summary').textContent = siteConfTemplateSummary(templateSelect.value, false);
-        if (confMode && !editor.value.trim() && templateSelect.value !== 'generic-blank') applySiteConfTemplate(false);
+        if (confMode && !editor.value.trim() && !['generic-blank', 'stream-blank'].includes(templateSelect.value)) applySiteConfTemplate(false);
         updateSiteCertificateOptions();
+        renderSiteNodeChoices(previousContext === siteCreateContext());
         restoreElementScroll(dialogBody, dialogScroll);
       }
 
@@ -8545,6 +8779,9 @@
       function openConfigEditor(siteId) {
         var site = getSite(siteId);
         if (!site) return;
+        var mainConfig = siteContext(site) === 'main';
+        var mainNode = mainConfig && site.nodeIds.length ? getNode(site.nodeIds[0]) : null;
+        var mainEditable = Boolean(mainConfig && mainNode && mainNode.mainConfigEditable && !(site.nodeReadOnly && site.nodeReadOnly[mainNode.id]));
         editingSiteId = site.id;
         document.getElementById('config-dialog-title').textContent = '编辑 ' + resourceTitle(site);
         document.getElementById('config-dialog-subtitle').textContent = '当前发布版本 v' + site.version + ' · ' + site.nodeIds.length + ' 个目标节点';
@@ -8554,11 +8791,24 @@
         document.getElementById('change-note').value = site.status === 'draft' ? site.changeNote.replace(/^草稿：/, '') : '';
         document.getElementById('config-editor').value = site.config;
         document.getElementById('config-editor').dataset.original = site.config;
+        document.getElementById('config-editor').readOnly = mainConfig && !mainEditable;
+        document.getElementById('config-note').readOnly = mainConfig && !mainEditable;
         document.getElementById('config-node-chips').innerHTML = site.nodeIds.map(function (id) {
           var node = getNode(id);
           return node ? '<span class="chip ' + (node.online ? 'green' : 'red') + '">' + escapeHtml(node.name) + '</span>' : '';
         }).join('');
         updateDiffBadge();
+        if (mainConfig) {
+          document.getElementById('config-draft-button').hidden = !mainEditable;
+          document.getElementById('config-validate-button').hidden = !mainEditable;
+          document.getElementById('config-publish-button').hidden = !mainEditable;
+          document.getElementById('config-editor-notice').textContent = mainEditable
+            ? '这是受保护的 Nginx 主配置。发布仍会逐节点执行 nginx -t、原子替换和 reload；禁止删除、复制或迁移。'
+            : '该节点未启用 --allow-main-config-edit，主配置仅供查看。请在确认风险后重新安装 Agent 显式授权。';
+        } else {
+          document.getElementById('config-editor').readOnly = false;
+          document.getElementById('config-note').readOnly = false;
+        }
         openDialog('config-dialog');
       }
 
@@ -8606,6 +8856,13 @@
       function saveConfig(mode) {
         var site = getSite(editingSiteId);
         if (!site) return;
+        if (siteContext(site) === 'main') {
+          var mainNode = site.nodeIds.length ? getNode(site.nodeIds[0]) : null;
+          if (!mainNode || !mainNode.mainConfigEditable || (site.nodeReadOnly && site.nodeReadOnly[mainNode.id])) {
+            notify('该节点的 Nginx 主配置是只读的');
+            return;
+          }
+        }
         var editor = document.getElementById('config-editor');
         var noteInput = document.getElementById('config-note');
         var nextConfig = site.configMode === 'guided' && site.type === 'proxy'
@@ -8726,37 +8983,61 @@
           notify('请先校验并发布当前站点配置，再复制已发布版本');
           return;
         }
-        var candidates = state.nodes.filter(function (node) { return !site.nodeIds.includes(node.id); });
+        var candidates = state.nodes.filter(function (node) {
+          var entries = nodeConfigEntries(node, siteContext(site));
+          if (!site.nodeIds.includes(node.id)) return entries.length > 0;
+          if (siteNodeEntryRemoved(site, node)) return false;
+          var currentEntry = siteNodeConfigEntry(site, node);
+          return entries.some(function (entry) {
+            return !currentEntry || entry.id !== currentEntry.id;
+          });
+        });
         if (!candidates.length) {
-          notify('该配置已经托管到全部节点');
+          notify('没有可复制的新节点，也没有可迁移的同类型配置入口');
           return;
         }
         var boundCertificate = getCert(site.certificateId);
         pendingTransferSiteId = site.id;
         var sourceNames = site.nodeIds.map(getNode).filter(Boolean).map(function (node) { return node.name; });
-        document.getElementById('config-transfer-title').textContent = '复制 ' + resourceTitle(site) + ' 到其他节点';
-        document.getElementById('config-transfer-subtitle').textContent = '复制已发布配置 v' + site.version + '，原节点文件保持不变';
+        document.getElementById('config-transfer-title').textContent = '复制或迁移 ' + resourceTitle(site);
+        document.getElementById('config-transfer-subtitle').textContent = '新节点执行复制；已部署节点可原子迁移到另一个 ' + siteContext(site).toUpperCase() + ' 入口';
         document.getElementById('config-transfer-source').innerHTML = [
           '<div><strong>' + escapeHtml(resourceTitle(site)) + ' · 配置 v' + site.version + '</strong><span>源节点：' + escapeHtml(sourceNames.join('、') || '平台草稿') + '</span></div>',
           '<span class="status-pill">已发布</span>',
           '<div class="transfer-path">目标文件名：' + escapeHtml(managedConfigFilename(site)) + '</div>'
         ].join('');
         document.getElementById('transfer-node-checks').innerHTML = candidates.map(function (node) {
+          var moving = site.nodeIds.includes(node.id);
+          var currentEntry = moving ? siteNodeConfigEntry(site, node) : null;
           var hasBoundCertificate = !boundCertificate || (!boundCertificate.pendingRemote && certificateAvailableOnNode(boundCertificate, node.id));
-          var selectable = node.online && hasBoundCertificate;
+          var entries = nodeConfigEntries(node, siteContext(site)).filter(function (entry) {
+            return !moving || !currentEntry || entry.id !== currentEntry.id;
+          });
+          var defaultEntry = entries.find(function (entry) { return entry.default; }) || entries[0] || null;
+          var moveSupported = !moving || nodeSupports(node, 'config_move');
+          var selectable = node.online && hasBoundCertificate && entries.length > 0 && moveSupported;
           var disabled = selectable ? '' : ' disabled';
           var stateCopy = !node.online
             ? 'Agent 离线，本次不可写入'
-            : (hasBoundCertificate ? '在线 · Agent ' + node.agent : '缺少绑定证书 ' + boundCertificate.domain);
+            : (!entries.length ? '未登记 ' + siteContext(site).toUpperCase() + ' 配置入口'
+              : (!moveSupported ? '需要升级 Agent 以支持原子迁移'
+                : (hasBoundCertificate
+                  ? (moving ? '迁移源：' + (currentEntry ? currentEntry.label : managedConfigPath(site, node)) : '复制到新节点 · Agent ' + node.agent)
+                  : '缺少绑定证书 ' + boundCertificate.domain)));
           var blockingCopy = !node.online
             ? '<span class="cert-target-state">节点离线</span>'
-            : (!hasBoundCertificate ? '<span class="cert-target-state">请先在该节点部署绑定证书</span>' : '');
+            : (!moveSupported
+              ? '<span class="cert-target-state">请先升级该节点 Agent</span>'
+              : (!hasBoundCertificate ? '<span class="cert-target-state">请先在该节点部署绑定证书</span>' : ''));
           return [
             '<label class="check-card">',
-            '  <input type="checkbox" name="transfer-node" value="' + escapeHtml(node.id) + '"' + disabled + '>',
-            '  <span class="cert-target-copy"><b>' + escapeHtml(node.name) + '</b>',
+            '  <input type="checkbox" name="transfer-node" value="' + escapeHtml(node.id) + '" data-transfer-kind="' + (moving ? 'move' : 'copy') + '"' + disabled + '>',
+            '  <span class="cert-target-copy"><b>' + escapeHtml(node.name) + ' · ' + (moving ? '迁移入口' : '复制到节点') + '</b>',
             '    <span>' + escapeHtml(node.ip) + ' · ' + escapeHtml(stateCopy) + '</span>',
-            '    <span class="cert-target-path" title="' + escapeHtml(migrationConfigPath(site, node)) + '">写入：' + escapeHtml(migrationConfigPath(site, node)) + '</span>',
+            '    <select class="select" data-transfer-entry-node-id="' + escapeHtml(node.id) + '"' + disabled + '>' + entries.map(function (entry) {
+              return '<option value="' + escapeHtml(entry.id) + '"' + (defaultEntry && defaultEntry.id === entry.id ? ' selected' : '') + '>'
+                + escapeHtml(entry.label) + (entry.default ? '（默认）' : '') + '</option>';
+            }).join('') + '</select>',
             blockingCopy,
             '  </span>',
             '</label>'
@@ -8943,28 +9224,120 @@
         return String(value || 'resource').toLowerCase().replace(/[^a-z0-9.-]+/g, '_');
       }
 
-      function suggestedConfigFilename(value) {
-        var stem = String(value || 'generic').toLowerCase().replace(/\.conf$/i, '')
-          .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'generic';
-        return stem.slice(0, 120) + '.conf';
+      function siteContext(site) {
+        return site && site.context === 'stream' ? 'stream' : (site && site.context === 'main' ? 'main' : 'http');
       }
 
-      function validManagedConfigFilename(value) {
-        return /^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.conf$/.test(String(value || ''));
+      function normalizeNodeConfigEntries(node) {
+        var entries = Array.isArray(node && node.configEntries) ? node.configEntries : [];
+        entries = entries.filter(function (entry) {
+          return entry && ['http', 'stream'].includes(entry.context)
+            && entry.suffix === (entry.context === 'http' ? '.conf' : '.stream')
+            && typeof entry.directory === 'string' && entry.directory.charAt(0) === '/';
+        }).map(function (entry) {
+          return {
+            id: String(entry.id),
+            context: entry.context,
+            directory: String(entry.directory).replace(/\/+$/, ''),
+            suffix: entry.suffix,
+            default: Boolean(entry.default),
+            label: String(entry.label || entry.context.toUpperCase() + ' · ' + entry.directory)
+          };
+        });
+        if (!entries.length) {
+          var legacyRoot = String(node && node.managedConfigRoot || '/etc/nginx/nginx-manager.d').replace(/\/+$/, '');
+          entries = [{
+            id: 'legacy-http-default',
+            context: 'http',
+            directory: legacyRoot,
+            suffix: '.conf',
+            default: true,
+            label: 'HTTP · ' + legacyRoot
+          }];
+        }
+        if (node) {
+          node.configEntries = entries;
+          node.managedConfigRoot = (entries.find(function (entry) {
+            return entry.context === 'http' && entry.default;
+          }) || entries.find(function (entry) { return entry.context === 'http'; }) || entries[0]).directory;
+        }
+        return entries;
+      }
+
+      function nodeConfigEntries(node, context) {
+        return normalizeNodeConfigEntries(node).filter(function (entry) {
+          return entry.context === context;
+        });
+      }
+
+      function defaultNodeConfigEntry(node, context) {
+        var entries = nodeConfigEntries(node, context);
+        return entries.find(function (entry) { return entry.default; }) || entries[0] || null;
+      }
+
+      function nodeConfigEntry(node, entryId, context) {
+        return nodeConfigEntries(node, context).find(function (entry) {
+          return entry.id === entryId;
+        }) || null;
+      }
+
+      function siteNodeConfigEntry(site, node) {
+        var context = siteContext(site);
+        if (context === 'main') return null;
+        var selectedId = site && site.nodeConfigEntryIds && site.nodeConfigEntryIds[node.id];
+        var selected = nodeConfigEntry(node, selectedId, context);
+        if (selected) return selected;
+        if (selectedId) return null;
+        var path = site && site.nodeConfigPaths && site.nodeConfigPaths[node.id];
+        if (path) {
+          var parent = String(path).replace(/\/[^/]+$/, '');
+          var matched = nodeConfigEntries(node, context).find(function (entry) {
+            return entry.directory === parent;
+          });
+          if (matched) return matched;
+        }
+        return defaultNodeConfigEntry(node, context);
+      }
+
+      function siteNodeEntryRemoved(site, node) {
+        if (!site || !node || siteContext(site) === 'main') return false;
+        var selectedId = site.nodeConfigEntryIds && site.nodeConfigEntryIds[node.id];
+        return Boolean(selectedId && !nodeConfigEntry(node, selectedId, siteContext(site)));
+      }
+
+      function suggestedConfigFilename(value, context) {
+        var suffix = context === 'stream' ? '.stream' : '.conf';
+        var stem = String(value || 'generic').toLowerCase().replace(/\.(?:conf|stream)$/i, '')
+          .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'generic';
+        return stem.slice(0, 120) + suffix;
+      }
+
+      function validManagedConfigFilename(value, context) {
+        var pattern = context === 'stream'
+          ? /^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.stream$/
+          : /^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.conf$/;
+        return pattern.test(String(value || ''));
       }
 
       function managedConfigFilename(site) {
         var explicitFilename = String(site && site.filename || '');
-        if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.conf$/.test(explicitFilename)) return explicitFilename;
+        var context = siteContext(site);
+        if (validManagedConfigFilename(explicitFilename, context)) return explicitFilename;
         var configuredPath = String(site && site.configPath || '');
         var basename = configuredPath.split('/').pop();
-        if (basename && /^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.conf$/.test(basename)) return basename;
-        return safeResourceName(site && site.domain || 'site') + '.conf';
+        if (basename && validManagedConfigFilename(basename, context)) return basename;
+        return suggestedConfigFilename(site && (site.domain || site.name) || 'site', context);
       }
 
       function migrationConfigPath(site, node) {
-        var root = node && node.managedConfigRoot ? node.managedConfigRoot : '/etc/nginx/nginx-manager.d';
+        var entry = node ? siteNodeConfigEntry(site, node) : null;
+        var root = entry ? entry.directory : (node && node.managedConfigRoot ? node.managedConfigRoot : '/etc/nginx/nginx-manager.d');
         return String(root).replace(/\/+$/, '') + '/' + managedConfigFilename(site);
+      }
+
+      function migrationConfigPathForEntry(site, node, entryId) {
+        var entry = nodeConfigEntry(node, entryId, siteContext(site)) || siteNodeConfigEntry(site, node);
+        return String(entry ? entry.directory : node.managedConfigRoot).replace(/\/+$/, '') + '/' + managedConfigFilename(site);
       }
 
       function versionAtLeast(value, major, minor, patch) {
@@ -9023,7 +9396,8 @@
       function managedConfigPath(site, node) {
         if (site.nodeConfigPaths && node && site.nodeConfigPaths[node.id]) return site.nodeConfigPaths[node.id];
         if (site.configPath) return site.configPath;
-        var root = node && node.managedConfigRoot ? node.managedConfigRoot : '/etc/nginx/nginx-manager.d';
+        var entry = node ? siteNodeConfigEntry(site, node) : null;
+        var root = entry ? entry.directory : (node && node.managedConfigRoot ? node.managedConfigRoot : '/etc/nginx/nginx-manager.d');
         return String(root).replace(/\/+$/, '') + '/' + managedConfigFilename(site);
       }
 
@@ -9137,6 +9511,9 @@
           var jobMetadataByNode = {};
           for (var index = 0; index < targets.length; index += 1) {
             var node = targets[index];
+            if (siteNodeEntryRemoved(site, node)) {
+              throw new Error(node.name + ' 的原配置入口已从 Agent 移除；请先复制到该节点的新入口完成重新映射');
+            }
             var targetPath = managedConfigPath(site, node);
             var knownHash = site.nodeHashes && site.nodeHashes[node.id];
             if (!knownHash && site.version > 0) {
@@ -9236,39 +9613,78 @@
         }
       }
 
-      async function startRemoteConfigTransfer(site, nodeIds, mode) {
+      async function startRemoteConfigTransfer(site, nodeIds, mode, entryIds) {
         var targets = nodeIds.map(getNode).filter(Boolean);
         var queued = [];
         try {
           var transferJobs = [];
           var transferPaths = {};
+          var transferKinds = {};
           for (var index = 0; index < targets.length; index += 1) {
             var node = targets[index];
-            var targetPath = migrationConfigPath(site, node);
+            var moving = site.nodeIds.includes(node.id);
+            var targetPath = migrationConfigPathForEntry(site, node, entryIds && entryIds[node.id]);
             transferPaths[node.id] = targetPath;
-            transferJobs.push({
-              node_id: node.id,
-              action: 'config_apply',
-              payload: {
+            transferKinds[node.id] = moving ? 'move' : 'copy';
+            if (moving) {
+              var sourcePath = managedConfigPath(site, node);
+              var sourceHash = site.nodeHashes && site.nodeHashes[node.id];
+              if (!sourceHash) throw new Error(node.name + ' 缺少源配置 Hash，已停止迁移');
+              if (sourcePath === targetPath) throw new Error(node.name + ' 的源入口与目标入口相同');
+              transferJobs.push({
+                node_id: node.id,
+                action: 'config_move',
+                payload: {
+                  source_path: sourcePath,
+                  target_path: targetPath,
+                  content: managedConfigContent(site, node),
+                  expected_sha256: sourceHash,
+                  target_expected_sha256: mode === 'replace' ? 'present' : 'missing',
+                  reload: true
+                }
+              });
+            } else {
+              transferJobs.push({
+                node_id: node.id,
+                action: 'config_apply',
+                payload: {
                   path: targetPath,
                   content: managedConfigContent(site, node),
                   expected_sha256: mode === 'replace' ? 'present' : 'missing',
                   validate_only: false,
                   reload: true
-              }
-            });
+                }
+              });
+            }
           }
           var response = await submitOperation({
               request_id: uid('operation'),
               site_id: site.id,
               kind: 'transfer',
               base_version: Number(site.version || 0),
-              candidate: { mode: mode, targetNodeIds: nodeIds.slice() },
+              candidate: {
+                mode: mode,
+                targetNodeIds: nodeIds.slice(),
+                targets: nodeIds.map(function (nodeId) {
+                  return {
+                    node_id: nodeId,
+                    path: transferPaths[nodeId] || '',
+                    entry_id: entryIds && entryIds[nodeId] || '',
+                    migration: transferKinds[nodeId] === 'move'
+                  };
+                })
+              },
               jobs: transferJobs,
               ttl_seconds: 300
           });
           (response.jobs || []).forEach(function (job) {
-            queued.push({ id: job.id, nodeId: job.node_id, path: transferPaths[job.node_id] || '' });
+            queued.push({
+              id: job.id,
+              nodeId: job.node_id,
+              path: transferPaths[job.node_id] || '',
+              entryId: entryIds && entryIds[job.node_id] || '',
+              migration: transferKinds[job.node_id] === 'move'
+            });
           });
           if (!queued.length) throw new Error('控制端没有创建任何目标任务');
           delete site.lastFailure;
@@ -9279,11 +9695,12 @@
             publish: false,
             transfer: true,
             transferMode: mode,
+            entryIds: entryIds || {},
             targetNodeIds: nodeIds.slice()
           };
           site.status = 'publishing';
           saveState();
-          notify('配置复制任务已提交；Agent 将逐节点校验、写入并 reload');
+          notify('配置复制/迁移任务已提交；Agent 将逐节点原子校验、写入并 reload');
           render();
           setTimeout(function () { refreshRemoteData(false).catch(function () {}); }, 500);
         } catch (error) {
@@ -9296,10 +9713,10 @@
               targetNodeIds: queued.map(function (item) { return item.nodeId; })
             };
           }
-          site.lastFailure = buildSubmissionFailure(queued, error, '配置复制');
+          site.lastFailure = buildSubmissionFailure(queued, error, '配置复制/迁移');
           site.status = 'failed';
           saveState();
-          notify('配置复制任务提交失败：' + error.message);
+          notify('配置复制/迁移任务提交失败：' + error.message);
           render();
         }
       }
@@ -9371,22 +9788,30 @@
         }
       }
 
-      function startConfigTransfer(site, nodeIds, mode) {
+      function startConfigTransfer(site, nodeIds, mode, entryIds) {
         if (remoteConnected) {
-          startRemoteConfigTransfer(site, nodeIds, mode);
+          startRemoteConfigTransfer(site, nodeIds, mode, entryIds);
           return;
         }
         var targets = nodeIds.map(getNode).filter(Boolean);
         site.nodeHashes = site.nodeHashes || {};
         site.nodeConfigPaths = site.nodeConfigPaths || {};
         site.nodeConfigs = site.nodeConfigs || {};
+        var demoCopied = [];
+        var demoMigrated = [];
         targets.forEach(function (node) {
-          if (!site.nodeIds.includes(node.id)) {
+          var moving = site.nodeIds.includes(node.id);
+          if (!moving) {
             site.nodeIds.push(node.id);
             node.sites = Number(node.sites || 0) + 1;
+            demoCopied.push(node.name);
+          } else {
+            demoMigrated.push(node.name);
           }
           site.nodeHashes[node.id] = 'demo-' + uid('hash');
-          site.nodeConfigPaths[node.id] = migrationConfigPath(site, node);
+          site.nodeConfigEntryIds = site.nodeConfigEntryIds || {};
+          if (entryIds && entryIds[node.id]) site.nodeConfigEntryIds[node.id] = entryIds[node.id];
+          site.nodeConfigPaths[node.id] = migrationConfigPathForEntry(site, node, site.nodeConfigEntryIds[node.id]);
           delete site.nodeConfigs[node.id];
         });
         site.status = 'published';
@@ -9394,11 +9819,14 @@
         site.history = site.history || [];
         site.history.unshift({
           version: site.version,
-          note: (mode === 'replace' ? '替换' : '新建') + '配置到 ' + targets.map(function (node) { return node.name; }).join('、'),
+          note: [
+            demoCopied.length ? (mode === 'replace' ? '替换' : '新建') + '配置到 ' + demoCopied.join('、') : '',
+            demoMigrated.length ? '迁移配置入口：' + demoMigrated.join('、') : ''
+          ].filter(Boolean).join('；'),
           time: '刚刚',
           user: '当前用户'
         });
-        addRun('配置复制', resourceTitle(site), targets.map(function (node) { return node.name; }), 'success', mode === 'replace' ? '替换目标同名配置' : '在目标节点新建配置', ['nginx -t passed', 'atomic write completed', 'nginx reload completed']);
+        addRun('配置复制/迁移', resourceTitle(site), targets.map(function (node) { return node.name; }), 'success', demoMigrated.length ? '在同一事务中写入目标入口并删除源文件' : (mode === 'replace' ? '替换目标同名配置' : '在目标节点新建配置'), ['nginx -t passed', 'atomic write completed', 'nginx reload completed']);
         saveState();
         notify('演示完成：配置已写入目标节点并加入托管范围');
         render();
@@ -9557,6 +9985,34 @@
         openDialog('node-dialog');
       }
 
+      async function openNodeMainConfig(nodeId) {
+        var node = getNode(nodeId);
+        if (!node) return;
+        var mainSite = state.sites.find(function (site) {
+          return siteContext(site) === 'main' && (site.nodeIds || []).includes(node.id);
+        });
+        if (mainSite) {
+          openConfigEditor(mainSite.id);
+          return;
+        }
+        if (!remoteConnected || !node.online) {
+          notify('主配置尚未读取；请先让 Agent 在线并重新扫描');
+          return;
+        }
+        try {
+          pendingMainConfigNodeId = node.id;
+          await apiRequest('/api/v1/admin/jobs', {
+            method: 'POST',
+            body: { node_ids: [node.id], action: 'config_inventory', payload: {}, ttl_seconds: 120 }
+          });
+          notify('正在安全读取 ' + node.name + ' 的主配置；读取完成后会自动打开');
+          setTimeout(function () { refreshRemoteData(false).catch(function () {}); }, 500);
+        } catch (error) {
+          pendingMainConfigNodeId = null;
+          notify('主配置读取任务提交失败：' + error.message);
+        }
+      }
+
       async function quickNodeRun(nodeId, action) {
         var node = getNode(nodeId);
         if (!node || !node.online) return;
@@ -9681,6 +10137,7 @@
           selectedLogPath = '';
           switchView('logs');
         }
+        else if (action === 'edit-main-config') openNodeMainConfig(nodeId);
         else if (action === 'select-monitor-node') {
           selectedMonitorNodeId = nodeId;
           monitoringSamples = remoteConnected ? [] : syntheticSamples(nodeId);
@@ -9886,30 +10343,34 @@
           notify('至少选择一个在线 Agent 节点');
           return;
         }
+        var streamMode = siteCreateMode === 'stream';
         var genericMode = siteCreateMode === 'generic';
-        var domain = genericMode ? '' : String(form.get('domain')).trim();
-        var configName = genericMode ? String(form.get('config_name') || '').trim() : domain;
-        var configFilename = genericMode ? String(form.get('config_filename') || '').trim() : '';
-        if (genericMode && !configName) {
+        var namedFileMode = genericMode || streamMode;
+        var context = streamMode ? 'stream' : 'http';
+        var domain = namedFileMode ? '' : String(form.get('domain')).trim();
+        var configName = namedFileMode ? String(form.get('config_name') || '').trim() : domain;
+        var configFilename = namedFileMode ? String(form.get('config_filename') || '').trim() : '';
+        if (namedFileMode && !configName) {
           notify('配置名称不能为空');
           document.getElementById('site-config-name').focus();
           return;
         }
-        if (genericMode && !validManagedConfigFilename(configFilename)) {
-          notify('文件名必须是安全的 .conf 文件名，不能包含目录');
+        if (namedFileMode && !validManagedConfigFilename(configFilename, context)) {
+          notify('文件名必须是安全的 ' + (streamMode ? '.stream' : '.conf') + ' 文件名，不能包含目录');
           document.getElementById('site-config-filename').focus();
           return;
         }
         if (state.sites.some(function (site) {
-          return genericMode
-            ? (isGenericResource(site) && (resourceTitle(site) === configName || managedConfigFilename(site) === configFilename))
+          return namedFileMode
+            ? (siteContext(site) === context && isGenericResource(site) && (resourceTitle(site) === configName || managedConfigFilename(site) === configFilename))
             : (!isGenericResource(site) && site.domain === domain);
         })) {
-          notify(genericMode ? '配置名称或文件名已经存在' : '该域名已经存在');
+          notify(namedFileMode ? '配置名称或文件名已经存在' : '该域名已经存在');
           return;
         }
-        if (genericMode && state.sites.some(function (site) {
+        if (namedFileMode && state.sites.some(function (site) {
           return managedConfigFilename(site) === configFilename
+            && siteContext(site) === context
             && (site.nodeIds || []).some(function (nodeId) { return nodeIds.includes(nodeId); });
         })) {
           notify('所选节点已有同名托管文件；请先扫描并导入现有配置，再从平台编辑，禁止盲目覆盖');
@@ -9917,7 +10378,7 @@
         }
         var confMode = siteCreateMode !== 'guided';
         var type = confMode ? 'custom' : String(form.get('type'));
-        var target = genericMode ? '通用 HTTP 配置片段' : (confMode ? '自定义 Nginx Conf' : normalizeProxyTarget(form.get('target')));
+        var target = streamMode ? 'Stream 配置' : (genericMode ? '通用 HTTP 配置片段' : (confMode ? '自定义 Nginx Conf' : normalizeProxyTarget(form.get('target'))));
         var config = '';
         if (confMode) {
           config = document.getElementById('site-conf-editor').value;
@@ -9926,7 +10387,7 @@
             document.getElementById('site-conf-editor').focus();
             return;
           }
-          if (!genericMode) {
+          if (!namedFileMode) {
             var serverNames = nginxDirectiveValues(config, 'server_name').join(' ').split(/\s+/).map(function (name) {
               return name.replace(/^["']|["']$/g, '');
             }).filter(Boolean);
@@ -9939,7 +10400,7 @@
             if (metadata.target && metadata.target !== '现有 Nginx 配置') target = metadata.target;
           }
         }
-        var certId = genericMode ? '' : String(form.get('certificate') || '');
+        var certId = namedFileMode ? '' : String(form.get('certificate') || '');
         if (certId) {
           var selectedCertificate = getCert(certId);
           var missingCertificateNodeIds = selectedCertificate ? certificateMissingNodeIds(selectedCertificate, nodeIds) : nodeIds.slice();
@@ -9957,22 +10418,38 @@
             return;
           }
         }
+        var nodeConfigEntryIds = {};
+        for (var entryIndex = 0; entryIndex < nodeIds.length; entryIndex += 1) {
+          var entryNodeId = nodeIds[entryIndex];
+          var entryNode = getNode(entryNodeId);
+          var entrySelect = Array.from(document.querySelectorAll('select[data-entry-node-id]')).find(function (select) {
+            return select.dataset.entryNodeId === entryNodeId;
+          });
+          var selectedEntry = entryNode && entrySelect ? nodeConfigEntry(entryNode, entrySelect.value, context) : null;
+          if (!selectedEntry) {
+            notify((entryNode ? entryNode.name : entryNodeId) + ' 没有可用的 ' + context.toUpperCase() + ' 配置入口');
+            return;
+          }
+          nodeConfigEntryIds[entryNodeId] = selectedEntry.id;
+        }
         var site = {
           id: uid('site'),
-          resourceType: genericMode ? 'generic' : 'site',
+          resourceType: namedFileMode ? 'generic' : 'site',
+          context: context,
           name: configName,
-          filename: genericMode ? configFilename : '',
-          domain: genericMode ? configName : domain,
+          filename: namedFileMode ? configFilename : '',
+          domain: namedFileMode ? configName : domain,
           type: type,
-          configMode: genericMode ? 'generic' : siteCreateMode,
+          configMode: streamMode ? 'stream' : (genericMode ? 'generic' : siteCreateMode),
           target: target,
           environment: String(form.get('environment')),
           nodeIds: nodeIds,
+          nodeConfigEntryIds: nodeConfigEntryIds,
           certificateId: certId,
           version: 0,
           status: 'draft',
           note: String(form.get('note') || '').trim(),
-          changeNote: genericMode ? '草稿：创建通用 Conf' : '草稿：创建站点',
+          changeNote: streamMode ? '草稿：创建 Stream Conf' : (genericMode ? '草稿：创建通用 Conf' : '草稿：创建站点'),
           updatedAt: '刚刚',
           config: confMode ? config : defaultConfig(domain, type, target, getCert(certId), getNode(nodeIds[0])),
           nodeConfigs: {},
@@ -9989,7 +10466,7 @@
         selectedSiteId = site.id;
         closeDialog('site-dialog');
         saveState();
-        notify((genericMode ? '通用 Conf' : '站点') + '草稿已创建，尚未发布到节点');
+        notify((streamMode ? 'Stream Conf' : (genericMode ? '通用 Conf' : '站点')) + '草稿已创建，尚未发布到节点');
         render();
       });
 
@@ -10017,6 +10494,7 @@
 
       document.getElementById('site-node-checks').addEventListener('change', function (event) {
         if (event.target && event.target.name === 'site-node') {
+          renderSiteEntryTargets();
           updateSiteCertificateOptions();
           refreshCleanSiteConfTemplate(true);
         }
@@ -10029,7 +10507,7 @@
 
       document.getElementById('site-config-name').addEventListener('input', function (event) {
         var filename = document.getElementById('site-config-filename');
-        if (filename.dataset.manual !== 'true') filename.value = suggestedConfigFilename(event.target.value);
+        if (filename.dataset.manual !== 'true') filename.value = suggestedConfigFilename(event.target.value, siteCreateContext());
       });
 
       document.getElementById('site-config-filename').addEventListener('input', function (event) {
@@ -10051,7 +10529,9 @@
 
       document.getElementById('site-conf-template').addEventListener('change', function (event) {
         var editor = document.getElementById('site-conf-editor');
-        var previousTemplate = editor.dataset.templateKey || (siteCreateMode === 'generic' ? 'generic-blank' : 'proxy-http');
+        var previousTemplate = editor.dataset.templateKey || (
+          siteCreateMode === 'stream' ? 'stream-blank' : (siteCreateMode === 'generic' ? 'generic-blank' : 'proxy-http')
+        );
         if (siteCreateMode === 'generic' && event.target.value === 'generic-stub-status') {
           var nameInput = document.getElementById('site-config-name');
           var filenameInput = document.getElementById('site-config-filename');
@@ -10111,8 +10591,32 @@
             return;
           }
         }
+        var transferEntryIds = {};
+        for (var transferIndex = 0; transferIndex < nodeIds.length; transferIndex += 1) {
+          var transferNodeId = nodeIds[transferIndex];
+          var transferSelect = Array.from(document.querySelectorAll('select[data-transfer-entry-node-id]')).find(function (select) {
+            return select.dataset.transferEntryNodeId === transferNodeId;
+          });
+          var transferNode = getNode(transferNodeId);
+          if (!transferSelect || !transferNode || !nodeConfigEntry(transferNode, transferSelect.value, siteContext(site))) {
+            notify((transferNode ? transferNode.name : transferNodeId) + ' 没有可用的目标配置入口');
+            return;
+          }
+          if (site.nodeIds.includes(transferNodeId)) {
+            if (!nodeSupports(transferNode, 'config_move')) {
+              notify(transferNode.name + ' 的 Agent 尚不支持原子迁移，请先升级');
+              return;
+            }
+            var currentTransferEntry = siteNodeConfigEntry(site, transferNode);
+            if (currentTransferEntry && currentTransferEntry.id === transferSelect.value) {
+              notify(transferNode.name + ' 的目标入口不能与当前入口相同');
+              return;
+            }
+          }
+          transferEntryIds[transferNodeId] = transferSelect.value;
+        }
         closeDialog('config-transfer-dialog');
-        startConfigTransfer(site, nodeIds, mode);
+        startConfigTransfer(site, nodeIds, mode, transferEntryIds);
       });
 
       document.getElementById('config-delete-form').addEventListener('submit', function (event) {

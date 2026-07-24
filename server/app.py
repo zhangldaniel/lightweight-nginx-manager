@@ -44,6 +44,7 @@ ActionName = Literal[
     "config_read",
     "config_hash",
     "config_apply",
+    "config_move",
     "config_delete",
     "certificate_apply",
 ]
@@ -57,6 +58,7 @@ JOB_ACTIONS = {
     "config_read",
     "config_hash",
     "config_apply",
+    "config_move",
     "config_delete",
     "certificate_apply",
 }
@@ -240,7 +242,7 @@ def _safe_config_inventory(value: Any) -> Optional[Dict[str, Any]]:
             or not os.path.isabs(path)
             or len(path) > 4096
             or "\0" in path
-            or not path.lower().endswith(".conf")
+            or not path.lower().endswith((".conf", ".stream"))
             or not isinstance(content, str)
             or not isinstance(digest, str)
             or re.fullmatch(r"[0-9a-f]{64}", digest) is None
@@ -258,22 +260,101 @@ def _safe_config_inventory(value: Any) -> Optional[Dict[str, Any]]:
             if total_bytes + len(encoded) > INVENTORY_MAX_TOTAL_BYTES:
                 truncated = True
             continue
+        context = item.get("context")
+        suffix = item.get("suffix")
+        entry_id = item.get("entry_id")
+        if context is None and suffix is None and entry_id is None and path.lower().endswith(".conf"):
+            context = "http"
+            suffix = ".conf"
+            entry_id = "legacy-http-default"
+        if (
+            context not in ("http", "stream")
+            or suffix not in (".conf", ".stream")
+            or (context == "http" and suffix != ".conf")
+            or (context == "stream" and suffix != ".stream")
+            or not isinstance(entry_id, str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,80}", entry_id) is None
+        ):
+            rejected += 1
+            continue
         safe_files.append({
             "path": path,
             "content": content,
             "sha256": digest,
             "size": len(encoded),
+            "entry_id": entry_id,
+            "context": context,
+            "suffix": suffix,
+            "loaded": bool(item.get("loaded", False)),
+            "read_only": bool(item.get("read_only", False)),
         })
         total_bytes += len(encoded)
     supplied_skipped = value.get("skipped_count", 0)
     if not isinstance(supplied_skipped, int) or supplied_skipped < 0:
         supplied_skipped = 0
+    safe_entries: List[Dict[str, Any]] = []
+    raw_entries = value.get("config_entries", [])
+    if isinstance(raw_entries, list):
+        for entry in raw_entries[:32]:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            context = entry.get("context")
+            directory = entry.get("directory")
+            suffix = entry.get("suffix")
+            label = entry.get("label")
+            if (
+                not isinstance(entry_id, str)
+                or re.fullmatch(r"[A-Za-z0-9._-]{1,80}", entry_id) is None
+                or context not in ("http", "stream")
+                or suffix != (".conf" if context == "http" else ".stream")
+                or not isinstance(directory, str)
+                or not os.path.isabs(directory)
+                or len(directory) > 4096
+                or not isinstance(label, str)
+            ):
+                continue
+            safe_entries.append({
+                "id": entry_id,
+                "context": context,
+                "directory": directory,
+                "suffix": suffix,
+                "default": bool(entry.get("default", False)),
+                "label": label[:160],
+            })
+    safe_main = None
+    raw_main = value.get("main_config")
+    if isinstance(raw_main, dict):
+        main_path = raw_main.get("path")
+        main_content = raw_main.get("content")
+        main_digest = raw_main.get("sha256")
+        if (
+            isinstance(main_path, str)
+            and os.path.isabs(main_path)
+            and isinstance(main_content, str)
+            and isinstance(main_digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", main_digest)
+            and hashlib.sha256(main_content.encode("utf-8")).hexdigest() == main_digest
+            and len(main_content.encode("utf-8")) <= INVENTORY_MAX_FILE_BYTES
+            and not any(marker in main_content.upper() for marker in PRIVATE_KEY_MARKERS)
+        ):
+            safe_main = {
+                "path": main_path,
+                "content": main_content,
+                "sha256": main_digest,
+                "size": len(main_content.encode("utf-8")),
+                "context": "main",
+                "loaded": bool(raw_main.get("loaded", False)),
+                "read_only": bool(raw_main.get("read_only", True)),
+            }
     return {
         "files": safe_files,
         "file_count": len(safe_files),
         "total_bytes": total_bytes,
         "skipped_count": min(supplied_skipped + rejected, 100000),
         "truncated": truncated,
+        "config_entries": safe_entries,
+        "main_config": safe_main,
     }
 
 
@@ -386,7 +467,9 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
     allowed_detail_keys = {
         "changed",
         "deleted",
+        "moved",
         "path",
+        "source_path",
         "config_hash",
         "previous_config_hash",
         "syntax_ok",
@@ -431,7 +514,7 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
         if (
             failure_code == "nginx_config_test_failed"
             and failure_stage == "nginx_test"
-            and request.action in {"nginx_test", "config_apply", "config_delete", "certificate_apply"}
+            and request.action in {"nginx_test", "config_apply", "config_move", "config_delete", "certificate_apply"}
         ):
             if isinstance(nginx_error_code, str) and nginx_error_code in NGINX_ERROR_CODES:
                 result["nginx_error_code"] = nginx_error_code
@@ -471,7 +554,7 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
             result[key] = value[:256] if isinstance(value, str) else value
     if "config_hash" not in result:
         config_hash = nested.get("config_sha256")
-        if request.action in {"config_read", "config_hash", "config_apply"}:
+        if request.action in {"config_read", "config_hash", "config_apply", "config_move"}:
             config_hash = nested.get("sha256", config_hash)
         if isinstance(config_hash, str):
             result["config_hash"] = config_hash[:128]
@@ -943,14 +1026,43 @@ class HeartbeatRequest(BaseModel):
     def sanitize_facts(cls, value: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {
             "os", "os_version", "arch", "kernel", "cpu_count", "memory_bytes",
-            "nginx_root", "managed_config_root", "managed_certificate_root",
+            "nginx_root", "managed_config_root", "managed_certificate_root", "nginx_config",
+            "config_entries", "main_config_editable",
             "log_roots", "log_files", "stub_status_url", "log_stream_transport",
         }
         result: Dict[str, Any] = {}
         for key, item in value.items():
             if key not in allowed:
                 continue
-            if key in {"log_roots", "log_files"}:
+            if key == "config_entries":
+                if not isinstance(item, list):
+                    continue
+                safe_entries = []
+                for entry in item[:32]:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_id = entry.get("id")
+                    context = entry.get("context")
+                    directory = entry.get("directory")
+                    suffix = entry.get("suffix")
+                    if (
+                        isinstance(entry_id, str)
+                        and re.fullmatch(r"[A-Za-z0-9._-]{1,80}", entry_id)
+                        and context in ("http", "stream")
+                        and suffix == (".conf" if context == "http" else ".stream")
+                        and isinstance(directory, str)
+                        and os.path.isabs(directory)
+                    ):
+                        safe_entries.append({
+                            "id": entry_id,
+                            "context": context,
+                            "directory": directory[:4096],
+                            "suffix": suffix,
+                            "default": bool(entry.get("default", False)),
+                            "label": str(entry.get("label", ""))[:160],
+                        })
+                result[key] = safe_entries
+            elif key in {"log_roots", "log_files"}:
                 if not isinstance(item, list):
                     continue
                 result[key] = [str(entry)[:4096] for entry in item[:200] if isinstance(entry, str)]
@@ -2886,6 +2998,32 @@ def create_app(
                 "job_count": len(prepared_jobs),
                 "node_ids": node_ids,
             }
+            if request.kind == "transfer" and isinstance(request.candidate.get("targets"), list):
+                transfer_targets = []
+                for item in request.candidate["targets"][: len(node_ids)]:
+                    if not isinstance(item, dict):
+                        continue
+                    node_id = item.get("node_id")
+                    path = item.get("path")
+                    entry_id = item.get("entry_id")
+                    if (
+                        node_id not in node_ids
+                        or not isinstance(path, str)
+                        or not os.path.isabs(path)
+                        or not path.lower().endswith((".conf", ".stream"))
+                        or len(path) > 4096
+                        or not isinstance(entry_id, str)
+                        or re.fullmatch(r"[A-Za-z0-9._-]{1,80}", entry_id) is None
+                    ):
+                        continue
+                    transfer_targets.append({
+                        "node_id": node_id,
+                        "path": path,
+                        "entry_id": entry_id,
+                        "migration": bool(item.get("migration", False)),
+                    })
+                if transfer_targets:
+                    metadata["transfer_targets"] = transfer_targets
             connection.execute(
                 """INSERT INTO operations
                    (id, site_id, kind, status, base_version, candidate_revision_id, created_by,

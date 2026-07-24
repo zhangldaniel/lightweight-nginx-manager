@@ -367,7 +367,29 @@ class ServerTestCase(unittest.TestCase):
                 "nginx_version": "nginx/1.26.0",
                 "config_hash": "abc123",
                 "capabilities": ["nginx_test", "nginx_reload"],
-                "facts": {"os": "linux", "arch": "x86_64", "ignored": "value"},
+                "facts": {
+                    "os": "linux",
+                    "arch": "x86_64",
+                    "nginx_config": "/apps/nginx/conf/nginx.conf",
+                    "main_config_editable": False,
+                    "config_entries": [
+                        {
+                            "id": "http-primary",
+                            "context": "http",
+                            "directory": "/apps/nginx/conf/conf.d",
+                            "suffix": ".conf",
+                            "default": True,
+                            "label": "HTTP 配置",
+                        },
+                        {
+                            "id": "invalid-entry",
+                            "context": "http",
+                            "directory": "relative/path",
+                            "suffix": ".conf",
+                        },
+                    ],
+                    "ignored": "value",
+                },
             },
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -375,6 +397,10 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0]["status"], "online")
         self.assertNotIn("token_hash", nodes[0])
+        self.assertEqual("/apps/nginx/conf/nginx.conf", nodes[0]["facts"]["nginx_config"])
+        self.assertFalse(nodes[0]["facts"]["main_config_editable"])
+        self.assertEqual(["http-primary"], [item["id"] for item in nodes[0]["facts"]["config_entries"]])
+        self.assertNotIn("ignored", nodes[0]["facts"])
 
     def test_monitoring_metrics_are_stored_with_bounded_history(self):
         enrolled = self.enroll("metrics-node")
@@ -557,6 +583,101 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(jobs[0]["result"]["previous_config_hash"], "b" * 64)
         self.assertNotIn("output", jobs[0]["result"])
         self.assertIn("output_sha256", jobs[0]["result"])
+
+    def test_config_move_is_a_first_class_typed_agent_action(self):
+        enrolled = self.enroll("move-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [enrolled["agent_id"]],
+                "action": "config_move",
+                "payload": {
+                    "source_path": "/apps/nginx/conf/conf.d/site.conf",
+                    "target_path": "/apps/nginx/conf/sites.d/site.conf",
+                    "content": "server { listen 80; }\n",
+                    "expected_sha256": "a" * 64,
+                    "target_expected_sha256": "missing",
+                },
+            },
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        job = self.client.post("/api/v1/agent/poll", headers=agent_headers, json={}).json()["jobs"][0]
+        self.assertEqual("config_move", job["action"])
+        result = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job["id"]),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": job["id"],
+                "action": "config_move",
+                "details": {
+                    "source_path": "/apps/nginx/conf/conf.d/site.conf",
+                    "path": "/apps/nginx/conf/sites.d/site.conf",
+                    "config_hash": "b" * 64,
+                    "previous_config_hash": "a" * 64,
+                    "moved": True,
+                    "syntax_ok": True,
+                    "reloaded": True,
+                },
+            },
+        )
+        self.assertEqual(200, result.status_code, result.text)
+        stored = self.client.get(
+            "/api/v1/admin/jobs?ids=" + job["id"], headers=self.admin_headers
+        ).json()["items"][0]["result"]
+        self.assertTrue(stored["moved"])
+        self.assertEqual("/apps/nginx/conf/sites.d/site.conf", stored["path"])
+        self.assertEqual("/apps/nginx/conf/conf.d/site.conf", stored["source_path"])
+        operation = self.client.post(
+            "/api/v1/admin/operations",
+            headers=self.admin_headers,
+            json={
+                "request_id": "move-operation-0001",
+                "site_id": "site-move-test",
+                "kind": "transfer",
+                "base_version": 1,
+                "candidate": {
+                    "mode": "create",
+                    "targets": [
+                        {
+                            "node_id": enrolled["agent_id"],
+                            "path": "/apps/nginx/conf/sites.d/site.conf",
+                            "entry_id": "http-secondary",
+                            "migration": True,
+                        }
+                    ],
+                },
+                "jobs": [
+                    {
+                        "node_id": enrolled["agent_id"],
+                        "action": "config_move",
+                        "payload": {
+                            "source_path": "/apps/nginx/conf/conf.d/site.conf",
+                            "target_path": "/apps/nginx/conf/sites.d/site.conf",
+                            "content": "server { listen 80; }\n",
+                            "expected_sha256": "a" * 64,
+                            "target_expected_sha256": "missing",
+                        },
+                    }
+                ],
+            },
+        )
+        self.assertEqual(201, operation.status_code, operation.text)
+        operation_detail = self.client.get(
+            "/api/v1/admin/operations/move-operation-0001",
+            headers=self.admin_headers,
+        ).json()
+        self.assertEqual(
+            [{
+                "node_id": enrolled["agent_id"],
+                "path": "/apps/nginx/conf/sites.d/site.conf",
+                "entry_id": "http-secondary",
+                "migration": True,
+            }],
+            operation_detail["operation"]["metadata"]["transfer_targets"],
+        )
 
     def test_expired_lease_redelivers_same_job_and_accepts_late_result(self):
         enrolled = self.enroll("lease-node")
@@ -931,6 +1052,85 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(content, inventory["files"][0]["content"])
         self.assertEqual(digest, inventory["files"][0]["sha256"])
         self.assertNotIn("tampered.conf", json.dumps(inventory))
+
+    def test_config_inventory_preserves_stream_entries_and_protected_main_config(self):
+        enrolled = self.enroll("multi-config-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [enrolled["agent_id"]],
+                "action": "config_inventory",
+                "payload": {},
+                "ttl_seconds": 60,
+            },
+        ).json()["jobs"][0]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={"limit": 1})
+        stream_content = "server { listen 9000; proxy_pass 127.0.0.1:9001; }\n"
+        main_content = "events {}\nhttp { include /apps/nginx/conf/conf.d/*.conf; }\nstream { include /apps/nginx/conf/conf.d/*.stream; }\n"
+        result = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(created["id"]),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": created["id"],
+                "action": "config_inventory",
+                "details": {
+                    "files": [
+                        {
+                            "path": "/apps/nginx/conf/conf.d/tcp.stream",
+                            "content": stream_content,
+                            "sha256": hashlib.sha256(stream_content.encode()).hexdigest(),
+                            "entry_id": "stream-primary",
+                            "context": "stream",
+                            "suffix": ".stream",
+                            "loaded": True,
+                            "read_only": False,
+                        }
+                    ],
+                    "config_entries": [
+                        {
+                            "id": "http-primary",
+                            "context": "http",
+                            "directory": "/apps/nginx/conf/conf.d",
+                            "suffix": ".conf",
+                            "default": True,
+                            "label": "HTTP 配置",
+                        },
+                        {
+                            "id": "stream-primary",
+                            "context": "stream",
+                            "directory": "/apps/nginx/conf/conf.d",
+                            "suffix": ".stream",
+                            "default": True,
+                            "label": "Stream 配置",
+                        },
+                    ],
+                    "main_config": {
+                        "path": "/apps/nginx/conf/nginx.conf",
+                        "content": main_content,
+                        "sha256": hashlib.sha256(main_content.encode()).hexdigest(),
+                        "loaded": True,
+                        "read_only": True,
+                    },
+                    "skipped_count": 0,
+                    "truncated": False,
+                },
+            },
+        )
+        self.assertEqual(200, result.status_code, result.text)
+        jobs = self.client.get(
+            "/api/v1/admin/jobs?action=config_inventory",
+            headers=self.admin_headers,
+        ).json()["items"]
+        inventory = jobs[0]["result"]["config_inventory"]
+        self.assertEqual("stream", inventory["files"][0]["context"])
+        self.assertEqual("stream-primary", inventory["files"][0]["entry_id"])
+        self.assertTrue(inventory["files"][0]["loaded"])
+        self.assertEqual(2, len(inventory["config_entries"]))
+        self.assertEqual("/apps/nginx/conf/nginx.conf", inventory["main_config"]["path"])
+        self.assertTrue(inventory["main_config"]["read_only"])
 
     def test_certificate_inventory_exposes_paths_and_hashes_but_no_private_key_content(self):
         enrolled = self.enroll()

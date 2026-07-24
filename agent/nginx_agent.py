@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.9.2"
+VERSION = "0.10.0"
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -71,6 +71,7 @@ CAPABILITIES = (
     "config_read",
     "config_hash",
     "config_apply",
+    "config_move",
     "config_delete",
     "certificate_apply",
 )
@@ -376,6 +377,9 @@ class Settings:
         nginx_config: str = "/etc/nginx/nginx.conf",
         nginx_root: str = "/etc/nginx",
         allowed_config_roots: Optional[List[str]] = None,
+        config_entries: Optional[List[Dict[str, Any]]] = None,
+        allow_main_config_edit: bool = False,
+        verify_config_entries_loaded: bool = False,
         allowed_certificate_roots: Optional[List[str]] = None,
         state_dir: str = "/var/lib/nginx-manager-agent",
         helper_state_dir: str = "/var/lib/nginx-manager-agent-helper",
@@ -406,11 +410,34 @@ class Settings:
         self.openssl_binary = openssl_binary
         self.nginx_config = nginx_config
         self.nginx_root = nginx_root
-        self.allowed_config_roots = (
+        legacy_config_roots = (
             ["/etc/nginx/nginx-manager.d"]
             if allowed_config_roots is None
             else list(allowed_config_roots)
         )
+        if config_entries is None:
+            self.config_entries = [
+                {
+                    "id": "http-" + hashlib.sha256(
+                        ("http\0" + os.path.abspath(path) + "\0.conf").encode("utf-8")
+                    ).hexdigest()[:12],
+                    "context": "http",
+                    "directory": path,
+                    "suffix": ".conf",
+                    "default": index == 0,
+                    "label": "HTTP · " + path,
+                }
+                for index, path in enumerate(legacy_config_roots)
+            ]
+        else:
+            self.config_entries = [dict(item) if isinstance(item, dict) else item for item in config_entries]
+        self.allowed_config_roots = []
+        for entry in self.config_entries:
+            if isinstance(entry, dict) and isinstance(entry.get("directory"), str):
+                if entry["directory"] not in self.allowed_config_roots:
+                    self.allowed_config_roots.append(entry["directory"])
+        self.allow_main_config_edit = allow_main_config_edit
+        self.verify_config_entries_loaded = verify_config_entries_loaded
         self.allowed_certificate_roots = (
             ["/etc/nginx/ssl/nginx-manager"]
             if allowed_certificate_roots is None
@@ -472,6 +499,9 @@ class Settings:
             allowed_config_roots=[str(item) for item in raw.get(
                 "allowed_config_roots", [os.path.join(nginx_root, "nginx-manager.d")]
             )],
+            config_entries=raw.get("config_entries"),
+            allow_main_config_edit=bool(raw.get("allow_main_config_edit", False)),
+            verify_config_entries_loaded=bool(raw.get("verify_config_entries_loaded", False)),
             allowed_certificate_roots=[str(item) for item in raw.get(
                 "allowed_certificate_roots", [os.path.join(nginx_root, "ssl", "nginx-manager")]
             )],
@@ -510,6 +540,54 @@ class Settings:
             raise AgentError("nginx_binary and openssl_binary must be absolute paths")
         if not os.path.isabs(self.nginx_config) or not os.path.isabs(self.nginx_root):
             raise AgentError("nginx_config and nginx_root must be absolute paths")
+        if not isinstance(self.config_entries, list) or not self.config_entries or len(self.config_entries) > 32:
+            raise AgentError("config_entries must contain between 1 and 32 entries")
+        seen_entries = set()
+        seen_entry_ids = set()
+        default_counts: Dict[str, int] = {}
+        normalized_entries: List[Dict[str, Any]] = []
+        for raw_entry in self.config_entries:
+            if not isinstance(raw_entry, dict):
+                raise AgentError("each config_entries item must be an object")
+            context = str(raw_entry.get("context", "")).lower()
+            directory = raw_entry.get("directory")
+            suffix = str(raw_entry.get("suffix", "")).lower()
+            entry_id = str(raw_entry.get("id", ""))
+            label = str(raw_entry.get("label") or "{} · {}".format(context.upper(), directory))
+            expected_suffix = ".conf" if context == "http" else ".stream" if context == "stream" else ""
+            if not expected_suffix or suffix != expected_suffix:
+                raise AgentError("config entry context/suffix must be http/.conf or stream/.stream")
+            if not isinstance(directory, str) or not os.path.isabs(directory):
+                raise AgentError("config entry directories must be absolute paths")
+            if Path(directory).is_symlink():
+                raise AgentError("config entry directories must not be symbolic links")
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", entry_id):
+                raise AgentError("config entry id contains unsupported characters")
+            if entry_id in seen_entry_ids:
+                raise AgentError("config_entries contains duplicate ids")
+            seen_entry_ids.add(entry_id)
+            if len(label) > 160:
+                raise AgentError("config entry label is too long")
+            resolved_directory = str(Path(directory).resolve())
+            key = (resolved_directory, suffix)
+            if key in seen_entries:
+                raise AgentError("config_entries contains duplicate directory/suffix ownership")
+            seen_entries.add(key)
+            is_default = bool(raw_entry.get("default", False))
+            default_counts[context] = default_counts.get(context, 0) + int(is_default)
+            normalized_entries.append({
+                "id": entry_id,
+                "context": context,
+                "directory": resolved_directory,
+                "suffix": suffix,
+                "default": is_default,
+                "label": label,
+            })
+        for context in {entry["context"] for entry in normalized_entries}:
+            if default_counts.get(context, 0) != 1:
+                raise AgentError("config_entries must contain exactly one default {} entry".format(context))
+        self.config_entries = normalized_entries
+        self.allowed_config_roots = list(dict.fromkeys(entry["directory"] for entry in normalized_entries))
         for name, roots in (
             ("allowed_config_roots", self.allowed_config_roots),
             ("allowed_certificate_roots", self.allowed_certificate_roots),
@@ -646,6 +724,20 @@ def _parse_iso8601(value: Any) -> dt.datetime:
     return parsed
 
 
+def _atomic_replace(source: str, target: str) -> None:
+    attempts = 8 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt + 1 >= attempts:
+                raise
+            # Windows virus scanners and indexers can hold a newly flushed file
+            # for a few milliseconds. Keep Linux fail-fast semantics unchanged.
+            time.sleep(min(0.01 * (2 ** attempt), 0.2))
+
+
 def _atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
@@ -658,7 +750,7 @@ def _atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
             json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, str(path))
+        _atomic_replace(temporary, str(path))
         _fsync_dir(path.parent)
     except Exception:
         with contextlib.suppress(OSError):
@@ -774,7 +866,7 @@ class JobStore:
         except (OSError, ValueError):
             LOG.warning("job record is unreadable; moving it aside")
             with contextlib.suppress(OSError):
-                os.replace(str(path), str(path) + ".corrupt-" + str(int(time.time())))
+                _atomic_replace(str(path), str(path) + ".corrupt-" + str(int(time.time())))
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         return self.records.get(job_id)
@@ -823,7 +915,7 @@ class ResultOutbox:
         except (OSError, ValueError):
             LOG.warning("result outbox is unreadable; moving it aside")
             with contextlib.suppress(OSError):
-                os.replace(str(path), str(path) + ".corrupt-" + str(int(time.time())))
+                _atomic_replace(str(path), str(path) + ".corrupt-" + str(int(time.time())))
 
     def put(self, job_id: str, result: Dict[str, Any]) -> None:
         with self._lock:
@@ -876,6 +968,14 @@ class JobExecutor:
         self.settings = settings
         self.store = store
         self._allowed_config_roots = [Path(path).resolve() for path in settings.allowed_config_roots]
+        self._config_entries = [
+            {
+                **entry,
+                "directory_path": Path(entry["directory"]).resolve(),
+            }
+            for entry in settings.config_entries
+        ]
+        self._main_config_path = Path(settings.nginx_config).resolve()
         self._allowed_certificate_roots = [Path(path).resolve() for path in settings.allowed_certificate_roots]
         self._configured_log_roots = [Path(os.path.abspath(path)) for path in settings.allowed_log_roots]
         self._allowed_log_roots = [Path(path).resolve() for path in settings.allowed_log_roots]
@@ -1156,8 +1256,6 @@ class JobExecutor:
         candidate = Path(raw)
         if candidate.name in ("", ".", ".."):
             raise ActionError("path must name a file")
-        if kind == "configuration" and candidate.suffix.lower() != ".conf":
-            raise ActionError("managed configuration paths must end in .conf")
         if kind == "certificate" and candidate.suffix.lower() not in (".pem", ".crt", ".key"):
             raise ActionError("managed certificate paths must end in .pem, .crt, or .key")
         try:
@@ -1177,8 +1275,50 @@ class JobExecutor:
             raise ActionError("path is outside allowed_{}_roots".format(kind))
         return resolved
 
-    def _configuration_path(self, raw: Any) -> Path:
-        return self._allowed_path(raw, self._allowed_config_roots, "configuration")
+    def _configuration_path(
+        self,
+        raw: Any,
+        require_write: bool = False,
+        require_delete: bool = False,
+    ) -> Path:
+        if not isinstance(raw, str) or not raw or not os.path.isabs(raw):
+            raise ActionError("path must be an absolute string")
+        candidate = Path(raw)
+        if candidate.name in ("", ".", ".."):
+            raise ActionError("path must name a file")
+        try:
+            resolved_parent = candidate.parent.resolve(strict=True)
+        except OSError as exc:
+            raise ActionError("path parent does not exist: {}".format(exc))
+        resolved = resolved_parent / candidate.name
+        if resolved == self._main_config_path:
+            if require_delete:
+                raise ActionError("the protected nginx main configuration cannot be deleted")
+            if require_write and not self.settings.allow_main_config_edit:
+                raise ActionError("editing the nginx main configuration is disabled on this node")
+        else:
+            matching = [
+                entry for entry in self._config_entries
+                if entry["directory_path"] == resolved_parent
+                and candidate.name.lower().endswith(entry["suffix"])
+            ]
+            if len(matching) != 1:
+                raise ActionError("path is not a direct child of a registered configuration entry")
+        if candidate.is_symlink():
+            raise ActionError("symbolic-link targets are read-only")
+        if candidate.exists():
+            status = candidate.stat()
+            if not stat.S_ISREG(status.st_mode):
+                raise ActionError("managed paths must name regular files")
+            if status.st_nlink > 1:
+                raise ActionError("hard-linked targets are refused")
+        return resolved
+
+    def _configuration_entry_for_path(self, path: Path) -> Optional[Dict[str, Any]]:
+        for entry in self._config_entries:
+            if entry["directory_path"] == path.parent and path.name.lower().endswith(entry["suffix"]):
+                return entry
+        return None
 
     def _certificate_path(self, raw: Any) -> Path:
         return self._allowed_path(raw, self._allowed_certificate_roots, "certificate")
@@ -1462,39 +1602,86 @@ class JobExecutor:
         reloaded = self._reload_only()
         return {"test": tested, "reload": reloaded}
 
-    def _configuration_candidates(self) -> Tuple[List[Path], int]:
-        candidates: List[Path] = []
+    def _configuration_candidates(self) -> Tuple[List[Tuple[Path, Dict[str, Any], bool]], int]:
+        candidates: List[Tuple[Path, Dict[str, Any], bool]] = []
         skipped = 0
         seen = set()
-        for root in self._allowed_config_roots:
+        for entry in self._config_entries:
+            root = entry["directory_path"]
             if not root.is_dir() or root.is_symlink():
                 continue
-            for current_root, directory_names, file_names in os.walk(str(root), followlinks=False):
-                directory_names[:] = sorted(
-                    name for name in directory_names
-                    if not (Path(current_root) / name).is_symlink()
-                )
-                for name in sorted(file_names):
-                    if not name.lower().endswith(".conf"):
+            try:
+                children = sorted(root.iterdir(), key=lambda item: item.name)
+            except OSError:
+                skipped += 1
+                continue
+            for candidate in children:
+                if not candidate.name.lower().endswith(entry["suffix"]):
+                    continue
+                is_symlink = candidate.is_symlink()
+                if is_symlink:
+                    try:
+                        resolved_target = candidate.resolve(strict=True)
+                        if resolved_target.parent != root or not resolved_target.is_file():
+                            skipped += 1
+                            continue
+                    except OSError:
+                        skipped += 1
                         continue
-                    candidate = Path(current_root) / name
+                    resolved = candidate
+                else:
                     try:
                         resolved = self._configuration_path(str(candidate))
                     except ActionError:
                         skipped += 1
                         continue
-                    key = str(resolved)
-                    if key not in seen:
-                        candidates.append(resolved)
-                        seen.add(key)
-        return sorted(candidates, key=lambda item: str(item)), skipped
+                key = (str(candidate), entry["id"])
+                if key not in seen:
+                    candidates.append((resolved, entry, is_symlink))
+                    seen.add(key)
+        return sorted(candidates, key=lambda item: (item[1]["context"], str(item[0]))), skipped
+
+    def _nginx_loaded_configuration_paths(self) -> set:
+        try:
+            completed = subprocess.run(
+                [self.settings.nginx_binary, "-T", "-c", self.settings.nginx_config],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=self.settings.command_timeout,
+                check=False,
+                shell=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise CommandError(
+                "nginx configuration dump timed out after {:.1f}s".format(self.settings.command_timeout),
+                failure_code="command_timeout",
+            )
+        except OSError as exc:
+            raise CommandError("cannot execute configured nginx binary: {}".format(exc))
+        combined = completed.stdout + b"\n" + completed.stderr
+        if completed.returncode != 0:
+            detail = combined.decode("utf-8", errors="replace")[-self.settings.max_command_output_bytes:].strip()
+            raise CommandError("nginx -T failed (exit {}): {}".format(completed.returncode, detail or "no output"))
+        loaded = set()
+        text = combined.decode("utf-8", errors="replace")
+        for raw_path in re.findall(r"(?m)^# configuration file (.+):\s*$", text):
+            try:
+                loaded.add(str(Path(raw_path.strip()).resolve()))
+            except OSError:
+                loaded.add(os.path.abspath(raw_path.strip()))
+        return loaded
 
     def _action_config_inventory(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
         files: List[Dict[str, Any]] = []
         candidates, skipped = self._configuration_candidates()
+        try:
+            loaded_paths = self._nginx_loaded_configuration_paths()
+        except AgentError:
+            loaded_paths = set()
         total_bytes = 0
         truncated = False
-        for path in candidates:
+        for path, entry, read_only in candidates:
             if len(files) >= INVENTORY_MAX_FILES:
                 truncated = True
                 break
@@ -1523,14 +1710,45 @@ class JobExecutor:
                 "content": content,
                 "sha256": hashlib.sha256(data).hexdigest(),
                 "size": len(data),
+                "entry_id": entry["id"],
+                "context": entry["context"],
+                "suffix": entry["suffix"],
+                "loaded": str(path.resolve()) in loaded_paths,
+                "read_only": read_only,
             })
             total_bytes += len(data)
+        main_config: Optional[Dict[str, Any]] = None
+        try:
+            main_path = self._configuration_path(str(self._main_config_path))
+            if main_path.is_file() and not main_path.is_symlink():
+                main_data = main_path.read_bytes()
+                if (
+                    len(main_data) <= self.settings.max_file_bytes
+                    and b"PRIVATE KEY-----" not in main_data
+                    and total_bytes + len(main_data) <= INVENTORY_MAX_TOTAL_BYTES
+                ):
+                    main_config = {
+                        "path": str(main_path),
+                        "content": main_data.decode("utf-8", errors="strict"),
+                        "sha256": hashlib.sha256(main_data).hexdigest(),
+                        "size": len(main_data),
+                        "context": "main",
+                        "loaded": str(main_path.resolve()) in loaded_paths,
+                        "read_only": not self.settings.allow_main_config_edit,
+                    }
+        except (ActionError, OSError, UnicodeDecodeError):
+            main_config = None
         return {
             "files": files,
             "file_count": len(files),
             "total_bytes": total_bytes,
             "skipped_count": skipped,
             "truncated": truncated,
+            "config_entries": [
+                {key: value for key, value in entry.items() if key != "directory_path"}
+                for entry in self._config_entries
+            ],
+            "main_config": main_config,
         }
 
     @staticmethod
@@ -1542,7 +1760,9 @@ class JobExecutor:
     def _referenced_certificate_keys(self) -> Dict[str, Path]:
         pairs: Dict[str, Path] = {}
         candidates, _skipped = self._configuration_candidates()
-        for config_path in candidates:
+        for config_path, entry, _read_only in candidates:
+            if entry["context"] != "http":
+                continue
             try:
                 if config_path.stat().st_size > min(self.settings.max_file_bytes, INVENTORY_MAX_FILE_BYTES):
                     continue
@@ -1720,7 +1940,16 @@ class JobExecutor:
         data = path.read_bytes()
         if b"PRIVATE KEY-----" in data:
             raise ActionError("config_read refuses private key material")
-        return {"path": str(path), "content": data.decode("utf-8", errors="replace"), "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        entry = self._configuration_entry_for_path(path)
+        return {
+            "path": str(path),
+            "content": data.decode("utf-8", errors="replace"),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+            "entry_id": entry["id"] if entry else None,
+            "context": entry["context"] if entry else "main",
+            "read_only": path == self._main_config_path and not self.settings.allow_main_config_edit,
+        }
 
     def _action_config_hash(self, payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
         path = self._configuration_path(payload.get("path"))
@@ -1729,7 +1958,7 @@ class JobExecutor:
         return {"path": str(path), "sha256": _file_sha256(path), "size": path.stat().st_size}
 
     def _action_config_apply(self, payload: Dict[str, Any], job_id: str) -> Dict[str, Any]:
-        path = self._configuration_path(payload.get("path"))
+        path = self._configuration_path(payload.get("path"), require_write=True)
         data = self._decode_content(payload)
         # Nginx is the configuration authority. Do not parse or allowlist
         # directives here: the transactional apply below installs the candidate,
@@ -1759,14 +1988,78 @@ class JobExecutor:
             **transaction,
         }
 
+    def _action_config_move(self, payload: Dict[str, Any], job_id: str) -> Dict[str, Any]:
+        source = self._configuration_path(payload.get("source_path"), require_write=True, require_delete=True)
+        target = self._configuration_path(payload.get("target_path"), require_write=True)
+        if source == target:
+            raise ActionError("source_path and target_path must be different")
+        source_entry = self._configuration_entry_for_path(source)
+        target_entry = self._configuration_entry_for_path(target)
+        if (
+            source_entry is None
+            or target_entry is None
+            or source_entry["context"] != target_entry["context"]
+        ):
+            raise ActionError("configuration moves must stay within the same context")
+        expected_source = payload.get("expected_sha256")
+        if not isinstance(expected_source, str) or not SHA256_RE.fullmatch(expected_source.lower()):
+            raise ActionError("config_move requires the exact source SHA-256")
+        source_sha = self._check_expected(source, expected_source)
+        if source_sha is None:
+            raise ActionError("source configuration file does not exist")
+        target_previous_sha = self._check_expected(target, payload.get("target_expected_sha256", "missing"))
+        data = self._decode_content(payload)
+        new_sha = hashlib.sha256(data).hexdigest()
+        requested_new_sha = payload.get("new_sha256")
+        if requested_new_sha is not None and str(requested_new_sha).lower() != new_sha:
+            raise ActionError("candidate content does not match new_sha256")
+        if self.settings.verify_config_entries_loaded:
+            loaded_paths = self._nginx_loaded_configuration_paths()
+            if str(source.resolve()) not in loaded_paths:
+                raise ActionError(
+                    "source configuration is not loaded by nginx: {}".format(source),
+                    failure_code="nginx_config_test_failed",
+                    failure_stage="nginx_test",
+                )
+        target_mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else stat.S_IMODE(source.stat().st_mode)
+        transaction = self._apply_files(
+            [
+                {"path": target, "data": data, "mode": target_mode},
+                {"path": source, "delete": True, "mode": stat.S_IMODE(source.stat().st_mode)},
+            ],
+            job_id,
+            reload_enabled=bool(payload.get("reload", True)),
+            health=_health_from_payload(payload, self.settings.health_check),
+            validate_only=False,
+        )
+        return {
+            "source_path": str(source),
+            "path": str(target),
+            "previous_sha256": source_sha,
+            "target_previous_sha256": target_previous_sha,
+            "sha256": new_sha,
+            "moved": True,
+            "validated": True,
+            "reloaded": bool(payload.get("reload", True)),
+            **transaction,
+        }
+
     def _action_config_delete(self, payload: Dict[str, Any], job_id: str) -> Dict[str, Any]:
-        path = self._configuration_path(payload.get("path"))
+        path = self._configuration_path(payload.get("path"), require_write=True, require_delete=True)
         expected = payload.get("expected_sha256")
         if not isinstance(expected, str) or not SHA256_RE.fullmatch(expected.lower()):
             raise ActionError("config_delete requires the exact current SHA-256")
         actual = self._check_expected(path, expected)
         if actual is None:
             raise ActionError("configuration file does not exist")
+        if self.settings.verify_config_entries_loaded:
+            loaded_paths = self._nginx_loaded_configuration_paths()
+            if str(path.resolve()) not in loaded_paths:
+                raise ActionError(
+                    "managed configuration is not loaded by nginx: {}".format(path),
+                    failure_code="nginx_config_test_failed",
+                    failure_stage="nginx_test",
+                )
         transaction = self._apply_files(
             [{"path": path, "delete": True, "mode": stat.S_IMODE(path.stat().st_mode)}],
             job_id,
@@ -2023,7 +2316,7 @@ class JobExecutor:
                         raise ActionError("transaction target changed before deletion")
                     target.unlink()
                 else:
-                    os.replace(entry["candidate"], entry["target"])
+                    _atomic_replace(entry["candidate"], entry["target"])
                 _fsync_dir(target.parent)
                 entry["replaced"] = True
                 # Recovery verifies hashes rather than trusting this marker, so a
@@ -2032,6 +2325,22 @@ class JobExecutor:
             self._set_manifest_phase(manifest_path, manifest, "replaced")
 
             self._set_manifest_phase(manifest_path, manifest, "testing")
+            managed_write_targets = [
+                Path(entry["target"])
+                for entry in entries
+                if entry["kind"] == "configuration"
+                and entry["operation"] == "write"
+                and Path(entry["target"]) != self._main_config_path
+            ]
+            if managed_write_targets and self.settings.verify_config_entries_loaded:
+                loaded_paths = self._nginx_loaded_configuration_paths()
+                unloaded = [str(path) for path in managed_write_targets if str(path.resolve()) not in loaded_paths]
+                if unloaded:
+                    raise ActionError(
+                        "managed configuration is not loaded by nginx: {}".format(", ".join(unloaded)),
+                        failure_code="nginx_config_test_failed",
+                        failure_stage="nginx_test",
+                    )
             test_result = self._nginx_test()
             self._set_manifest_phase(manifest_path, manifest, "validated")
             if validate_only:
@@ -2120,8 +2429,10 @@ class JobExecutor:
             )
 
     def _transaction_target_kind(self, path: Path) -> Tuple[str, Path]:
+        if path == self._main_config_path:
+            return "configuration", self._configuration_path(str(path), require_write=True)
         if any(_is_relative_to(path, root) for root in self._allowed_config_roots):
-            return "configuration", self._configuration_path(str(path))
+            return "configuration", self._configuration_path(str(path), require_write=True)
         if any(_is_relative_to(path, root) for root in self._allowed_certificate_roots):
             return "certificate", self._certificate_path(str(path))
         raise ActionError("transaction target is outside all managed roots")
@@ -2321,7 +2632,7 @@ class JobExecutor:
                     if backup is not None and backup.exists():
                         if _file_sha256(backup) != old_sha:
                             raise ActionError("verified original backup hash mismatch for {}".format(target))
-                        os.replace(str(backup), str(target))
+                        _atomic_replace(str(backup), str(target))
                         _fsync_dir(target.parent)
                         changed = True
                     elif current_sha != old_sha:
@@ -3215,6 +3526,9 @@ class AgentService:
             "facts": {
                 "nginx_root": self.settings.nginx_root,
                 "managed_config_root": self.settings.allowed_config_roots[0],
+                "config_entries": list(self.settings.config_entries),
+                "nginx_config": self.settings.nginx_config,
+                "main_config_editable": self.settings.allow_main_config_edit,
                 "managed_certificate_root": self.settings.allowed_certificate_roots[0],
                 "log_roots": list(self.settings.allowed_log_roots),
                 "log_files": log_files,
@@ -3290,6 +3604,8 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
             "total_bytes": raw.get("total_bytes", 0),
             "skipped_count": raw.get("skipped_count", 0),
             "truncated": bool(raw.get("truncated", False)),
+            "config_entries": raw.get("config_entries", []),
+            "main_config": raw.get("main_config"),
         }
     elif action == "certificate_inventory":
         details = {
@@ -3301,7 +3617,10 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
     elif action == "config_hash":
         details = {"path": raw.get("path"), "config_hash": raw.get("sha256"), "size": raw.get("size")}
     elif action == "config_read":
-        details = {key: raw.get(key) for key in ("path", "content", "sha256", "size")}
+        details = {
+            key: raw.get(key)
+            for key in ("path", "content", "sha256", "size", "entry_id", "context", "read_only")
+        }
         details["config_hash"] = details.pop("sha256", None)
     elif action == "config_apply":
         details = {
@@ -3321,6 +3640,20 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
             "path": raw.get("path"),
             "previous_config_hash": raw.get("previous_sha256"),
             "deleted": bool(raw.get("deleted")) and succeeded,
+            "syntax_ok": bool(raw.get("validated")) and succeeded,
+            "reloaded": bool(raw.get("reloaded")) and succeeded,
+            "backup_count": raw.get("backup_count", 0),
+        }
+        tested = raw.get("test") if isinstance(raw.get("test"), dict) else {}
+        output = str(tested.get("stderr") or tested.get("stdout") or "")
+    elif action == "config_move":
+        details = {
+            "path": raw.get("path"),
+            "source_path": raw.get("source_path"),
+            "config_hash": raw.get("sha256"),
+            "previous_config_hash": raw.get("previous_sha256"),
+            "target_previous_config_hash": raw.get("target_previous_sha256"),
+            "moved": bool(raw.get("moved")) and succeeded,
             "syntax_ok": bool(raw.get("validated")) and succeeded,
             "reloaded": bool(raw.get("reloaded")) and succeeded,
             "backup_count": raw.get("backup_count", 0),

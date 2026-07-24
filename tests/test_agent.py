@@ -60,6 +60,21 @@ class AgentTestCase(unittest.TestCase):
     def job(self, job_id, action, payload):
         return {"id": job_id, "action": action, "payload": payload, "expires_at": "2099-01-01T00:00:00Z"}
 
+    def test_atomic_replace_retries_transient_windows_file_lock(self):
+        with (
+            mock.patch.object(agent.os, "name", "nt"),
+            mock.patch.object(
+                agent.os,
+                "replace",
+                side_effect=[PermissionError("temporarily locked"), None],
+            ) as replace,
+            mock.patch.object(agent.time, "sleep") as sleep,
+        ):
+            agent._atomic_replace("candidate", "target")
+
+        self.assertEqual(2, replace.call_count)
+        sleep.assert_called_once_with(0.01)
+
     def test_result_outbox_survives_restart_until_acknowledged(self):
         path = self.state / "result-outbox.json"
         outbox = agent.ResultOutbox(path)
@@ -126,20 +141,311 @@ class AgentTestCase(unittest.TestCase):
 
         self.assertEqual("succeeded", response["status"])
         inventory = response["result"]
-        self.assertEqual(2, inventory["file_count"])
+        self.assertEqual(1, inventory["file_count"])
         self.assertEqual(1, inventory["skipped_count"])
         self.assertFalse(inventory["truncated"])
         by_name = {Path(item["path"]).name: item for item in inventory["files"]}
         self.assertEqual(first_content.decode(), by_name[first.name]["content"])
         self.assertEqual(self.sha(first_content), by_name[first.name]["sha256"])
-        self.assertEqual(second_content.decode(), by_name[second.name]["content"])
+        self.assertNotIn(second.name, by_name)
         self.assertNotIn("api.example.conf.bak", by_name)
         self.assertTrue(first.exists())
         self.assertTrue(second.exists())
         mapped = agent._to_server_result(response)
         self.assertEqual("config_inventory", mapped["action"])
-        self.assertEqual(2, mapped["details"]["file_count"])
-        self.assertEqual(2, len(mapped["details"]["files"]))
+        self.assertEqual(1, mapped["details"]["file_count"])
+        self.assertEqual(1, len(mapped["details"]["files"]))
+        self.assertEqual(1, len(mapped["details"]["config_entries"]))
+        self.assertEqual(str(self.main_config.resolve()), mapped["details"]["main_config"]["path"])
+
+    def test_multiple_http_and_stream_entries_are_context_aware_and_non_recursive(self):
+        secondary_http = self.root / "sites-enabled"
+        stream_root = self.root / "stream.d"
+        secondary_http.mkdir()
+        stream_root.mkdir()
+        http_file = secondary_http / "api.conf"
+        stream_file = stream_root / "tcp.stream"
+        nested = stream_root / "nested"
+        nested.mkdir()
+        nested_file = nested / "ignored.stream"
+        http_file.write_text("server { listen 80; }\n", encoding="utf-8")
+        stream_file.write_text("server { listen 9000; proxy_pass 127.0.0.1:9001; }\n", encoding="utf-8")
+        nested_file.write_text("server { listen 9002; }\n", encoding="utf-8")
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="multi-entry-node",
+            nginx_binary=str(Path(sys.executable).resolve()),
+            nginx_config=str(self.main_config),
+            nginx_root=str(self.root),
+            config_entries=[
+                {
+                    "id": "http-primary",
+                    "context": "http",
+                    "directory": str(self.config_root),
+                    "suffix": ".conf",
+                    "default": True,
+                    "label": "HTTP primary",
+                },
+                {
+                    "id": "http-secondary",
+                    "context": "http",
+                    "directory": str(secondary_http),
+                    "suffix": ".conf",
+                    "default": False,
+                    "label": "HTTP secondary",
+                },
+                {
+                    "id": "stream-primary",
+                    "context": "stream",
+                    "directory": str(stream_root),
+                    "suffix": ".stream",
+                    "default": True,
+                    "label": "Stream primary",
+                },
+            ],
+            allowed_certificate_roots=[str(self.certificate_root)],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "multi-helper.sock"),
+        )
+        settings.validate()
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "multi-jobs.json"))
+        executor._nginx_loaded_configuration_paths = mock.Mock(
+            return_value={str(self.main_config.resolve()), str(http_file.resolve()), str(stream_file.resolve())}
+        )
+
+        response = executor.execute(self.job("job-multi-inventory", "config_inventory", {}))
+
+        self.assertEqual("succeeded", response["status"])
+        inventory = response["result"]
+        self.assertEqual(2, inventory["file_count"])
+        by_name = {Path(item["path"]).name: item for item in inventory["files"]}
+        self.assertEqual("http", by_name[http_file.name]["context"])
+        self.assertEqual("http-secondary", by_name[http_file.name]["entry_id"])
+        self.assertTrue(by_name[http_file.name]["loaded"])
+        self.assertEqual("stream", by_name[stream_file.name]["context"])
+        self.assertEqual(".stream", by_name[stream_file.name]["suffix"])
+        self.assertNotIn(nested_file.name, by_name)
+        self.assertEqual(3, len(inventory["config_entries"]))
+        self.assertEqual(str(self.main_config.resolve()), inventory["main_config"]["path"])
+        self.assertTrue(inventory["main_config"]["read_only"])
+
+    def test_stream_suffix_and_protected_main_configuration_are_enforced(self):
+        stream_root = self.root / "stream.d"
+        stream_root.mkdir()
+        stream_path = stream_root / "tcp.stream"
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="stream-node",
+            nginx_binary=str(Path(sys.executable).resolve()),
+            nginx_config=str(self.main_config),
+            nginx_root=str(self.root),
+            config_entries=[
+                {
+                    "id": "stream-primary",
+                    "context": "stream",
+                    "directory": str(stream_root),
+                    "suffix": ".stream",
+                    "default": True,
+                    "label": "Stream",
+                },
+            ],
+            allowed_certificate_roots=[str(self.certificate_root)],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "stream-helper.sock"),
+        )
+        settings.validate()
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "stream-jobs.json"))
+        executor._nginx_test = mock.Mock(return_value={"exit_code": 0, "stdout": "", "stderr": "syntax is ok"})
+        executor._reload_only = mock.Mock(return_value={"exit_code": 0, "stdout": "", "stderr": "reloaded"})
+
+        applied = executor.execute(
+            self.job(
+                "job-stream-apply",
+                "config_apply",
+                {
+                    "path": str(stream_path),
+                    "content": "server { listen 9000; proxy_pass 127.0.0.1:9001; }\n",
+                    "expected_sha256": "missing",
+                    "reload": False,
+                },
+            )
+        )
+        self.assertEqual("succeeded", applied["status"])
+        wrong_suffix = executor.execute(
+            self.job("job-stream-wrong-suffix", "config_hash", {"path": str(stream_root / "wrong.conf")})
+        )
+        self.assertEqual("failed", wrong_suffix["status"])
+        self.assertIn("registered configuration entry", wrong_suffix["error"])
+
+        main_read = executor.execute(
+            self.job("job-main-read", "config_read", {"path": str(self.main_config)})
+        )
+        self.assertEqual("succeeded", main_read["status"])
+        self.assertEqual("main", main_read["result"]["context"])
+        self.assertTrue(main_read["result"]["read_only"])
+        main_apply = executor.execute(
+            self.job(
+                "job-main-write-disabled",
+                "config_apply",
+                {
+                    "path": str(self.main_config),
+                    "content": "events {}\nhttp { include sites-enabled/*.conf; }\n",
+                    "expected_sha256": self.sha(self.main_config.read_bytes()),
+                },
+            )
+        )
+        self.assertEqual("failed", main_apply["status"])
+        self.assertIn("disabled", main_apply["error"])
+        main_delete = executor.execute(
+            self.job(
+                "job-main-delete",
+                "config_delete",
+                {"path": str(self.main_config), "expected_sha256": self.sha(self.main_config.read_bytes())},
+            )
+        )
+        self.assertEqual("failed", main_delete["status"])
+        self.assertIn("cannot be deleted", main_delete["error"])
+
+    def test_main_config_edit_requires_opt_in_and_managed_write_must_be_loaded(self):
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="editable-main-node",
+            nginx_binary=str(Path(sys.executable).resolve()),
+            nginx_config=str(self.main_config),
+            nginx_root=str(self.root),
+            config_entries=[
+                {
+                    "id": "http-primary",
+                    "context": "http",
+                    "directory": str(self.config_root),
+                    "suffix": ".conf",
+                    "default": True,
+                    "label": "HTTP",
+                },
+            ],
+            allow_main_config_edit=True,
+            verify_config_entries_loaded=True,
+            allowed_certificate_roots=[str(self.certificate_root)],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "editable-main-helper.sock"),
+        )
+        settings.validate()
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "editable-main-jobs.json"))
+        executor._nginx_test = mock.Mock(return_value={"exit_code": 0, "stdout": "", "stderr": "syntax is ok"})
+        executor._reload_only = mock.Mock(return_value={"exit_code": 0, "stdout": "", "stderr": "reloaded"})
+
+        previous_main = self.main_config.read_bytes()
+        main_result = executor.execute(
+            self.job(
+                "job-main-write",
+                "config_apply",
+                {
+                    "path": str(self.main_config),
+                    "content": "events { worker_connections 256; }\nhttp {}\n",
+                    "expected_sha256": self.sha(previous_main),
+                    "reload": False,
+                },
+            )
+        )
+        self.assertEqual("succeeded", main_result["status"])
+
+        target = self.config_root / "not-loaded.conf"
+        target.write_text("server { listen 80; }\n", encoding="utf-8")
+        old = target.read_bytes()
+        executor._nginx_loaded_configuration_paths = mock.Mock(return_value={str(self.main_config.resolve())})
+        rejected = executor.execute(
+            self.job(
+                "job-unloaded-write",
+                "config_apply",
+                {
+                    "path": str(target),
+                    "content": "server { listen 8080; }\n",
+                    "expected_sha256": self.sha(old),
+                    "reload": False,
+                },
+            )
+        )
+        self.assertEqual("failed", rejected["status"])
+        self.assertIn("not loaded by nginx", rejected["error"])
+        self.assertEqual(old, target.read_bytes())
+        delete_rejected = executor.execute(
+            self.job(
+                "job-unloaded-delete",
+                "config_delete",
+                {"path": str(target), "expected_sha256": self.sha(old)},
+            )
+        )
+        self.assertEqual("failed", delete_rejected["status"])
+        self.assertIn("not loaded by nginx", delete_rejected["error"])
+        self.assertTrue(target.exists())
+
+    def test_config_move_atomically_replaces_target_and_removes_source(self):
+        secondary = self.root / "sites.d"
+        secondary.mkdir()
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="move-node",
+            nginx_binary=str(Path(sys.executable).resolve()),
+            nginx_config=str(self.main_config),
+            nginx_root=str(self.root),
+            config_entries=[
+                {
+                    "id": "http-primary",
+                    "context": "http",
+                    "directory": str(self.config_root),
+                    "suffix": ".conf",
+                    "default": True,
+                    "label": "HTTP primary",
+                },
+                {
+                    "id": "http-secondary",
+                    "context": "http",
+                    "directory": str(secondary),
+                    "suffix": ".conf",
+                    "default": False,
+                    "label": "HTTP secondary",
+                },
+            ],
+            allowed_certificate_roots=[str(self.certificate_root)],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "move-helper.sock"),
+        )
+        settings.validate()
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "move-jobs.json"))
+        executor._nginx_test = mock.Mock(return_value={"exit_code": 0, "stdout": "", "stderr": "syntax is ok"})
+        executor._reload_only = mock.Mock(return_value={"exit_code": 0, "stdout": "", "stderr": "reloaded"})
+        source = self.config_root / "site.conf"
+        target = secondary / "site.conf"
+        content = b"server { listen 8080; }\n"
+        source.write_bytes(content)
+
+        response = executor.execute(
+            self.job(
+                "job-config-move",
+                "config_move",
+                {
+                    "source_path": str(source),
+                    "target_path": str(target),
+                    "content": content.decode(),
+                    "expected_sha256": self.sha(content),
+                    "target_expected_sha256": "missing",
+                    "reload": True,
+                },
+            )
+        )
+
+        self.assertEqual("succeeded", response["status"])
+        self.assertFalse(source.exists())
+        self.assertEqual(content, target.read_bytes())
+        self.assertTrue(response["result"]["moved"])
+        mapped = agent._to_server_result(response)
+        self.assertEqual("config_move", mapped["action"])
+        self.assertEqual(str(target.resolve()), mapped["details"]["path"])
+        self.assertEqual(str(source.resolve()), mapped["details"]["source_path"])
 
     def test_certificate_inventory_pairs_referenced_files_without_returning_private_key(self):
         certificate_path = self.certificate_root / "int.example.pem"
@@ -671,7 +977,7 @@ class AgentTestCase(unittest.TestCase):
         outside.write_text("outside", encoding="utf-8")
         escaped = self.executor.execute(self.job("job-outside", "config_hash", {"path": str(outside)}))
         self.assertEqual("failed", escaped["status"])
-        self.assertIn("outside allowed_configuration_roots", escaped["error"])
+        self.assertIn("direct child of a registered configuration entry", escaped["error"])
 
         if hasattr(os, "symlink"):
             link = self.config_root / "link.conf"
@@ -730,7 +1036,7 @@ class AgentTestCase(unittest.TestCase):
             self.assertEqual(0o600, key_path.stat().st_mode & 0o777)
         read_key = self.executor.execute(self.job("job-read-key", "config_read", {"path": str(key_path)}))
         self.assertEqual("failed", read_key["status"])
-        self.assertIn("managed configuration paths", read_key["error"])
+        self.assertIn("direct child of a registered configuration entry", read_key["error"])
 
     def test_certificate_wildcard_matches_exactly_one_dns_label(self):
         matches = self.executor._certificate_domain_matches
@@ -1094,6 +1400,51 @@ class AgentTestCase(unittest.TestCase):
         self.assertEqual({}, second.labels)
         self.assertNotIn("/tmp/extra", second.allowed_config_roots)
 
+    def test_config_entry_ids_and_context_defaults_must_be_unambiguous(self):
+        duplicate_id = [
+            {
+                "id": "same-entry",
+                "context": "http",
+                "directory": str(self.config_root),
+                "suffix": ".conf",
+                "default": True,
+            },
+            {
+                "id": "same-entry",
+                "context": "stream",
+                "directory": str(self.root / "stream.d"),
+                "suffix": ".stream",
+                "default": True,
+            },
+        ]
+        with self.assertRaisesRegex(agent.AgentError, "duplicate ids"):
+            agent.Settings(
+                "https://manager.example.test",
+                "duplicate-entry-node",
+                nginx_root=str(self.root),
+                nginx_config=str(self.main_config),
+                config_entries=duplicate_id,
+                allowed_certificate_roots=[str(self.certificate_root)],
+            ).validate()
+        missing_default = [
+            {
+                "id": "http-one",
+                "context": "http",
+                "directory": str(self.config_root),
+                "suffix": ".conf",
+                "default": False,
+            }
+        ]
+        with self.assertRaisesRegex(agent.AgentError, "exactly one default http entry"):
+            agent.Settings(
+                "https://manager.example.test",
+                "missing-default-node",
+                nginx_root=str(self.root),
+                nginx_config=str(self.main_config),
+                config_entries=missing_default,
+                allowed_certificate_roots=[str(self.certificate_root)],
+            ).validate()
+
     def test_python36_iso8601_parser_handles_protocol_timestamps(self):
         parsed = agent._parse_iso8601("2026-07-14T12:34:56.123456789+08:00")
         self.assertEqual(123456, parsed.microsecond)
@@ -1230,8 +1581,10 @@ class AgentTestCase(unittest.TestCase):
             "--insecure-skip-tls-verify",
             "--nginx-binary",
             "--managed-config-dir",
+            "--managed-stream-dir",
             "--managed-cert-dir",
             "--managed-include-file",
+            "--allow-main-config-edit",
             "--nginx-log-dir",
             "--stub-status-url",
             "--allow-plaintext-log-stream",
@@ -1244,9 +1597,9 @@ class AgentTestCase(unittest.TestCase):
         self.assertIn("--managed-config-already-included", installer)
         self.assertIn("zz-nginx-manager-probe.", installer)
         self.assertIn("is not loaded by nginx", installer)
-        self.assertIn('if [[ -e "${MANAGED_CONFIG_DIR}" ]]', installer)
+        self.assertIn('for directory in "${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}"', installer)
         self.assertIn('if [[ -e "${MANAGED_CERT_DIR}" ]]', installer)
-        self.assertIn('harden_managed_path_chain "${MANAGED_CONFIG_DIR}"', installer)
+        self.assertIn('harden_managed_path_chain "${directory}"', installer)
         self.assertIn('harden_managed_path_chain "${MANAGED_CERT_DIR}"', installer)
         self.assertIn('"allowed_log_roots"', installer)
         self.assertIn('"stub_status_url"', installer)

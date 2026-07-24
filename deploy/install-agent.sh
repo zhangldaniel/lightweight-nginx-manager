@@ -29,10 +29,12 @@ ALLOW_INSECURE_HTTP="0"
 NGINX_BINARY=""
 NGINX_ROOT="/etc/nginx"
 NGINX_CONFIG="/etc/nginx/nginx.conf"
-MANAGED_CONFIG_DIR=""
+MANAGED_CONFIG_DIRS=()
+MANAGED_STREAM_DIRS=()
 MANAGED_CERT_DIR=""
 MANAGED_INCLUDE_FILE=""
 MANAGED_CONFIG_ALREADY_INCLUDED="0"
+ALLOW_MAIN_CONFIG_EDIT="0"
 HEALTH_URL=""
 NGINX_LOG_DIRS=()
 STUB_STATUS_URL=""
@@ -85,10 +87,12 @@ usage() {
   --nginx-binary <路径> Nginx 可执行文件，默认从 PATH 查找
   --nginx-root <路径>  Nginx 配置根；脚本只在其下建立专用托管子目录，默认 /etc/nginx
   --nginx-config <路径> Nginx 主配置，默认 /etc/nginx/nginx.conf
-  --managed-config-dir <路径> Agent 专用托管配置目录，默认 <nginx-root>/nginx-manager.d
+  --managed-config-dir <路径> HTTP 配置入口（直属 *.conf）；可重复指定，第一个为默认入口
+  --managed-stream-dir <路径> Stream 配置入口（直属 *.stream）；可重复指定，第一个为默认入口
   --managed-cert-dir <路径> Agent 专用托管证书目录，默认 <nginx-root>/ssl/nginx-manager
   --managed-include-file <路径> 引入托管配置的 include 文件，默认 <nginx-root>/conf.d/00-nginx-manager.conf
   --managed-config-already-included 托管目录已由现有 nginx.conf 加载；不创建额外 include 文件
+  --allow-main-config-edit 允许平台编辑 nginx.conf；默认仅查看且始终禁止删除/迁移
   --nginx-service <单元> Nginx systemd 单元，默认 nginx.service
   --health-url <URL>   发布后的节点本地健康检查 URL
   --nginx-log-dir <路径> 允许实时查看的 Nginx 日志目录；可重复指定
@@ -385,15 +389,39 @@ install_nginx_if_requested() {
 }
 
 prepare_managed_directories() {
-  local expected_include created dump temporary include_dir probe
-  [[ -n "${MANAGED_CONFIG_DIR}" ]] || MANAGED_CONFIG_DIR="${NGINX_ROOT}/nginx-manager.d"
-  [[ -n "${MANAGED_CERT_DIR}" ]] || MANAGED_CERT_DIR="${NGINX_ROOT}/ssl/nginx-manager"
-  if [[ -e "${MANAGED_CONFIG_DIR}" ]]; then
-    [[ -d "${MANAGED_CONFIG_DIR}" && ! -L "${MANAGED_CONFIG_DIR}" ]] || \
-      die "托管配置路径必须是普通目录：${MANAGED_CONFIG_DIR}"
-  else
-    install -d -m 0750 -o root -g root "${MANAGED_CONFIG_DIR}"
+  local created dump temporary include_dir probe directory suffix context expected_file
+  local resolved_root resolved_cert resolved_config resolved_main
+  local -a all_managed_dirs=()
+  if [[ "${#MANAGED_CONFIG_DIRS[@]}" -eq 0 && "${#MANAGED_STREAM_DIRS[@]}" -eq 0 ]]; then
+    MANAGED_CONFIG_DIRS+=("${NGINX_ROOT}/nginx-manager.d")
   fi
+  [[ -n "${MANAGED_CERT_DIR}" ]] || MANAGED_CERT_DIR="${NGINX_ROOT}/ssl/nginx-manager"
+  all_managed_dirs=("${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}")
+  resolved_root="$(readlink -m -- "${NGINX_ROOT}")"
+  resolved_cert="$(readlink -m -- "${MANAGED_CERT_DIR}")"
+  [[ "${resolved_cert}" == "${resolved_root}/"* ]] || \
+    die "托管证书目录必须位于 nginx-root 的严格子目录中：${MANAGED_CERT_DIR}"
+  resolved_main="$(readlink -m -- "${NGINX_CONFIG}")"
+  for directory in "${all_managed_dirs[@]}"; do
+    resolved_config="$(readlink -m -- "${directory}")"
+    [[ "${resolved_config}" == "${resolved_root}/"* ]] || \
+      die "托管配置入口必须位于 nginx-root 的严格子目录中：${directory}"
+    [[ "${resolved_main}" != "${resolved_config}" && "${resolved_main}" != "${resolved_config}/"* ]] || \
+      die "nginx 主配置不能位于托管配置入口中：${directory}"
+    [[
+      "${resolved_config}" != "${resolved_cert}"
+      && "${resolved_config}" != "${resolved_cert}/"*
+      && "${resolved_cert}" != "${resolved_config}/"*
+    ]] || die "托管配置入口与证书目录不能重叠：${directory}"
+  done
+  for directory in "${all_managed_dirs[@]}"; do
+    if [[ -e "${directory}" ]]; then
+      [[ -d "${directory}" && ! -L "${directory}" ]] || \
+        die "托管配置路径必须是普通目录：${directory}"
+    else
+      install -d -m 0750 -o root -g root "${directory}"
+    fi
+  done
   if [[ -e "${MANAGED_CERT_DIR}" ]]; then
     [[ -d "${MANAGED_CERT_DIR}" && ! -L "${MANAGED_CERT_DIR}" ]] || \
       die "托管证书路径必须是普通目录：${MANAGED_CERT_DIR}"
@@ -404,42 +432,65 @@ prepare_managed_directories() {
   # The privileged helper validates paths before using them.  Root-owned,
   # non-writable directory chains prevent a local nginx/Agent account from
   # swapping an allowed parent for a symlink between validation and replace.
-  harden_managed_path_chain "${MANAGED_CONFIG_DIR}"
+  for directory in "${all_managed_dirs[@]}"; do
+    harden_managed_path_chain "${directory}"
+  done
   harden_managed_path_chain "${MANAGED_CERT_DIR}"
 
   if [[ "${MANAGED_CONFIG_ALREADY_INCLUDED}" == "1" ]]; then
     [[ -z "${MANAGED_INCLUDE_FILE}" ]] || die "--managed-config-already-included 不能与 --managed-include-file 同时使用"
-    probe="$(mktemp "${MANAGED_CONFIG_DIR}/zz-nginx-manager-probe.XXXXXX.conf")"
-    printf '%s\n' '# nginx-manager managed directory probe' >"${probe}"
-    chmod 0644 "${probe}"
-    if ! dump="$("${NGINX_BINARY}" -T -c "${NGINX_CONFIG}" 2>&1)"; then
-      rm -f -- "${probe}"
-      printf '%s\n' "${dump}" >&2
-      die "nginx validation failed while checking the existing managed directory"
-    fi
-    rm -f -- "${probe}"
-    if ! grep -Fq -- "# configuration file ${probe}:" <<<"${dump}"; then
-      die "${MANAGED_CONFIG_DIR} is not loaded by nginx; remove --managed-config-already-included or fix nginx.conf"
-    fi
+    for context in http stream; do
+      if [[ "${context}" == "http" ]]; then
+        suffix=".conf"
+        all_managed_dirs=("${MANAGED_CONFIG_DIRS[@]}")
+      else
+        suffix=".stream"
+        all_managed_dirs=("${MANAGED_STREAM_DIRS[@]}")
+      fi
+      for directory in "${all_managed_dirs[@]}"; do
+        probe="$(mktemp "${directory}/zz-nginx-manager-probe.XXXXXX${suffix}")"
+        printf '%s\n' '# nginx-manager managed directory probe' >"${probe}"
+        chmod 0644 "${probe}"
+        if ! dump="$("${NGINX_BINARY}" -T -c "${NGINX_CONFIG}" 2>&1)"; then
+          rm -f -- "${probe}"
+          printf '%s\n' "${dump}" >&2
+          die "nginx validation failed while checking ${context} entry ${directory}"
+        fi
+        rm -f -- "${probe}"
+        if ! grep -Fq -- "# configuration file ${probe}:" <<<"${dump}"; then
+          die "${context} entry ${directory} (*${suffix}) is not loaded by nginx"
+        fi
+        log "已确认 Nginx 加载 ${context} 入口 ${directory}/*${suffix}"
+      done
+    done
     "${NGINX_BINARY}" -t -c "${NGINX_CONFIG}" >/dev/null 2>&1 || \
       die "nginx validation failed after removing the managed-directory probe"
-    log "已确认现有 Nginx 配置直接加载 ${MANAGED_CONFIG_DIR}"
     return
   fi
 
+  [[ "${#MANAGED_STREAM_DIRS[@]}" -eq 0 ]] || \
+    die "Stream 入口不会由安装器自动改写 nginx.conf；请先配置 stream include，并添加 --managed-config-already-included"
   [[ -n "${MANAGED_INCLUDE_FILE}" ]] || MANAGED_INCLUDE_FILE="${NGINX_ROOT}/conf.d/00-nginx-manager.conf"
   include_dir="$(dirname -- "${MANAGED_INCLUDE_FILE}")"
   [[ -d "${include_dir}" ]] || die "托管 include 文件的父目录不存在：${include_dir}"
-  [[ "$(readlink -f -- "${MANAGED_CONFIG_DIR}")" != "$(readlink -f -- "${include_dir}")" ]] || \
-    die "托管目录已是 include 文件所在目录；请移除 --managed-include-file 并添加 --managed-config-already-included"
-  expected_include="include ${MANAGED_CONFIG_DIR}/*.conf;"
+  for directory in "${MANAGED_CONFIG_DIRS[@]}"; do
+    [[ "$(readlink -f -- "${directory}")" != "$(readlink -f -- "${include_dir}")" ]] || \
+      die "HTTP 入口已是 include 文件所在目录；请移除 --managed-include-file 并添加 --managed-config-already-included"
+  done
+  expected_file="$(mktemp)"
+  for directory in "${MANAGED_CONFIG_DIRS[@]}"; do
+    printf 'include %s/*.conf;\n' "${directory}" >>"${expected_file}"
+  done
   created="0"
   if [[ -e "${MANAGED_INCLUDE_FILE}" ]]; then
     [[ -f "${MANAGED_INCLUDE_FILE}" && ! -L "${MANAGED_INCLUDE_FILE}" ]] || die "managed include must be a regular file: ${MANAGED_INCLUDE_FILE}"
-    grep -Fqx -- "${expected_include}" "${MANAGED_INCLUDE_FILE}" || die "existing ${MANAGED_INCLUDE_FILE} has unexpected content; inspect it manually"
+    cmp -s -- "${expected_file}" "${MANAGED_INCLUDE_FILE}" || {
+      rm -f -- "${expected_file}"
+      die "existing ${MANAGED_INCLUDE_FILE} has unexpected content; inspect it manually"
+    }
   else
     temporary="$(mktemp "${include_dir}/.nginx-manager.XXXXXX")"
-    printf '%s\n' "${expected_include}" >"${temporary}"
+    cp -- "${expected_file}" "${temporary}"
     chmod 0644 "${temporary}"
     mv -f -- "${temporary}" "${MANAGED_INCLUDE_FILE}"
     created="1"
@@ -447,14 +498,17 @@ prepare_managed_directories() {
   fi
 
   if ! dump="$("${NGINX_BINARY}" -T -c "${NGINX_CONFIG}" 2>&1)"; then
+    rm -f -- "${expected_file}"
     [[ "${created}" != "1" ]] || rm -f -- "${MANAGED_INCLUDE_FILE}"
     printf '%s\n' "${dump}" >&2
     die "nginx validation failed after adding the managed include"
   fi
   if ! grep -Fq -- "# configuration file ${MANAGED_INCLUDE_FILE}:" <<<"${dump}"; then
+    rm -f -- "${expected_file}"
     [[ "${created}" != "1" ]] || rm -f -- "${MANAGED_INCLUDE_FILE}"
     die "${MANAGED_INCLUDE_FILE} is not loaded by nginx; verify the conf.d include rule"
   fi
+  rm -f -- "${expected_file}"
 }
 
 harden_managed_path_chain() {
@@ -565,7 +619,7 @@ ensure_identity_user() {
 }
 
 write_config() {
-  local ca_target log_dirs_text
+  local ca_target log_dirs_text config_dirs_text stream_dirs_text
   ca_target=""
   if [[ "${ALLOW_INSECURE_HTTP}" == "1" ]]; then
     rm -f -- "${ETC_DIR}/ca.crt"
@@ -580,9 +634,12 @@ write_config() {
   fi
 
   printf -v log_dirs_text '%s\n' "${NGINX_LOG_DIRS[@]}"
+  printf -v config_dirs_text '%s\n' "${MANAGED_CONFIG_DIRS[@]}"
+  printf -v stream_dirs_text '%s\n' "${MANAGED_STREAM_DIRS[@]}"
   "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${LABELS}" \
     "${ca_target}" "${TLS_SKIP_VERIFY}" "${ALLOW_INSECURE_HTTP}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
-    "${MANAGED_CONFIG_DIR}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" <<'PY'
+    "${config_dirs_text}" "${stream_dirs_text}" "${ALLOW_MAIN_CONFIG_EDIT}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" <<'PY'
+import hashlib
 import json
 import os
 import socket
@@ -592,7 +649,7 @@ from urllib.parse import urlparse
 (
     config_path, server_url, node_name, raw_labels, ca_file,
     tls_skip_verify, allow_insecure_http, poll_seconds, nginx_binary, openssl_binary, nginx_config, nginx_root,
-    managed_config_dir, managed_cert_dir, state_dir, helper_state_dir, health_url,
+    raw_config_dirs, raw_stream_dirs, allow_main_config_edit, managed_cert_dir, state_dir, helper_state_dir, health_url,
     raw_log_dirs, stub_status_url, allow_plaintext_log_stream,
 ) = sys.argv[1:]
 
@@ -615,6 +672,34 @@ if health_url:
         allowed_health_hosts.append(parsed.hostname.lower())
     health_check = {"url": health_url, "expected_status": 200, "timeout": 5, "attempts": 3}
 
+config_entries = []
+all_roots = []
+for context, suffix, raw_directories in (
+    ("http", ".conf", raw_config_dirs),
+    ("stream", ".stream", raw_stream_dirs),
+):
+    directories = []
+    for item in raw_directories.splitlines():
+        if item and item not in directories:
+            directories.append(item)
+    for index, directory in enumerate(directories):
+        entry_id = "{}-{}".format(
+            context,
+            hashlib.sha256(
+                (context + "\0" + os.path.abspath(directory) + "\0" + suffix).encode("utf-8")
+            ).hexdigest()[:12],
+        )
+        config_entries.append({
+            "id": entry_id,
+            "context": context,
+            "directory": directory,
+            "suffix": suffix,
+            "default": index == 0,
+            "label": "{} · {}".format(context.upper(), directory),
+        })
+        if directory not in all_roots:
+            all_roots.append(directory)
+
 value = {
     "server_url": server_url.rstrip("/"),
     "node_name": node_name,
@@ -631,7 +716,10 @@ value = {
     "openssl_binary": openssl_binary,
     "nginx_config": nginx_config,
     "nginx_root": nginx_root,
-    "allowed_config_roots": [managed_config_dir],
+    "allowed_config_roots": all_roots,
+    "config_entries": config_entries,
+    "allow_main_config_edit": allow_main_config_edit == "1",
+    "verify_config_entries_loaded": True,
     "allowed_certificate_roots": [managed_cert_dir],
     "state_dir": state_dir,
     "helper_state_dir": helper_state_dir,
@@ -663,12 +751,16 @@ PY
 
 write_services() {
   local python_path systemd_version protect_system write_access_key
-  local modern_hardening="" runtime_preserve="" nginx_write_paths=""
+  local modern_hardening="" runtime_preserve="" nginx_write_paths="" managed_write_paths="" directory
   python_path="$(command -v "${PYTHON_BIN}")"
   systemd_version="$(systemctl --version 2>/dev/null | awk 'NR == 1 {print $2}')"
   [[ "${systemd_version}" =~ ^[0-9]+$ ]] || die "无法识别 systemd 版本"
   [[ ! -d /var/log/nginx ]] || nginx_write_paths+=" /var/log/nginx"
   [[ ! -d /var/cache/nginx ]] || nginx_write_paths+=" /var/cache/nginx"
+  for directory in "${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}"; do
+    [[ " ${managed_write_paths} " == *" ${directory} "* ]] || managed_write_paths+=" ${directory}"
+  done
+  [[ "${ALLOW_MAIN_CONFIG_EDIT}" != "1" ]] || managed_write_paths+=" ${NGINX_CONFIG}"
   if (( systemd_version >= 232 )); then
     protect_system="strict"
     write_access_key="ReadWritePaths"
@@ -703,7 +795,7 @@ ProtectHome=true
 ${modern_hardening}
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL CAP_NET_BIND_SERVICE
-${write_access_key}=${MANAGED_CONFIG_DIR} ${MANAGED_CERT_DIR} ${HELPER_STATE_DIR}${nginx_write_paths}
+${write_access_key}=${managed_write_paths} ${MANAGED_CERT_DIR} ${HELPER_STATE_DIR}${nginx_write_paths}
 UMask=0077
 EOF
 
@@ -729,7 +821,7 @@ ProtectHome=true
 ${modern_hardening}
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL CAP_NET_BIND_SERVICE
-${write_access_key}=${MANAGED_CONFIG_DIR} ${MANAGED_CERT_DIR} ${HELPER_STATE_DIR} /run/${APP_NAME}${nginx_write_paths}
+${write_access_key}=${managed_write_paths} ${MANAGED_CERT_DIR} ${HELPER_STATE_DIR} /run/${APP_NAME}${nginx_write_paths}
 RuntimeDirectory=${APP_NAME}
 RuntimeDirectoryMode=0750
 ${runtime_preserve}
@@ -809,10 +901,12 @@ while [[ $# -gt 0 ]]; do
     --nginx-binary) [[ $# -ge 2 ]] || die "--nginx-binary 缺少值"; NGINX_BINARY="$2"; shift 2 ;;
     --nginx-root) [[ $# -ge 2 ]] || die "--nginx-root 缺少值"; NGINX_ROOT="$2"; shift 2 ;;
     --nginx-config) [[ $# -ge 2 ]] || die "--nginx-config 缺少值"; NGINX_CONFIG="$2"; shift 2 ;;
-    --managed-config-dir) [[ $# -ge 2 ]] || die "--managed-config-dir 缺少值"; MANAGED_CONFIG_DIR="$2"; shift 2 ;;
+    --managed-config-dir) [[ $# -ge 2 ]] || die "--managed-config-dir 缺少值"; MANAGED_CONFIG_DIRS+=("$2"); shift 2 ;;
+    --managed-stream-dir) [[ $# -ge 2 ]] || die "--managed-stream-dir 缺少值"; MANAGED_STREAM_DIRS+=("$2"); shift 2 ;;
     --managed-cert-dir) [[ $# -ge 2 ]] || die "--managed-cert-dir 缺少值"; MANAGED_CERT_DIR="$2"; shift 2 ;;
     --managed-include-file) [[ $# -ge 2 ]] || die "--managed-include-file 缺少值"; MANAGED_INCLUDE_FILE="$2"; shift 2 ;;
     --managed-config-already-included) MANAGED_CONFIG_ALREADY_INCLUDED="1"; shift ;;
+    --allow-main-config-edit) ALLOW_MAIN_CONFIG_EDIT="1"; shift ;;
     --nginx-service) [[ $# -ge 2 ]] || die "--nginx-service 缺少值"; NGINX_SERVICE="$2"; shift 2 ;;
     --health-url) [[ $# -ge 2 ]] || die "--health-url 缺少值"; HEALTH_URL="$2"; shift 2 ;;
     --nginx-log-dir) [[ $# -ge 2 ]] || die "--nginx-log-dir 缺少值"; NGINX_LOG_DIRS+=("$2"); shift 2 ;;
@@ -832,10 +926,10 @@ require_root
 [[ "${TLS_SKIP_VERIFY}" != "1" || -z "${CA_SOURCE}" ]] || die "--ca-file 与 --insecure-skip-tls-verify 不能同时使用"
 [[ "${MANAGED_CONFIG_ALREADY_INCLUDED}" != "1" || -z "${MANAGED_INCLUDE_FILE}" ]] || die "--managed-config-already-included 不能与 --managed-include-file 同时使用"
 [[ "${NGINX_ROOT}" = /* && "${NGINX_CONFIG}" = /* ]] || die "Nginx 路径必须是绝对路径"
-for optional_path in "${NGINX_BINARY}" "${MANAGED_CONFIG_DIR}" "${MANAGED_CERT_DIR}" "${MANAGED_INCLUDE_FILE}"; do
+for optional_path in "${NGINX_BINARY}" "${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}" "${MANAGED_CERT_DIR}" "${MANAGED_INCLUDE_FILE}"; do
   [[ -z "${optional_path}" || "${optional_path}" = /* ]] || die "自定义 Nginx 路径必须是绝对路径：${optional_path}"
 done
-for nginx_path in "${NGINX_ROOT}" "${NGINX_CONFIG}" "${NGINX_BINARY}" "${MANAGED_CONFIG_DIR}" "${MANAGED_CERT_DIR}" "${MANAGED_INCLUDE_FILE}"; do
+for nginx_path in "${NGINX_ROOT}" "${NGINX_CONFIG}" "${NGINX_BINARY}" "${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}" "${MANAGED_CERT_DIR}" "${MANAGED_INCLUDE_FILE}"; do
   [[ ! "${nginx_path}" =~ [[:space:]] ]] || die "Nginx 路径不能包含空白字符：${nginx_path}"
 done
 [[ "${NGINX_SERVICE}" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || die "--nginx-service 必须是合法的 .service 单元名"

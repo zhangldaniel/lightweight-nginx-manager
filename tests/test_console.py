@@ -57,6 +57,19 @@ if (!html.includes('data-site-create-mode="generic"')
     || !html.includes('data-action="convert-generic"')) {
   throw new Error("the unified site/generic Conf workflow or sanitized templates are missing");
 }
+if (!html.includes('data-site-create-mode="stream"')
+    || !html.includes('value="stream-proxy"')
+    || !html.includes('id="site-entry-targets"')
+    || !html.includes('data-entry-node-id')
+    || !html.includes("siteNodeEntryRemoved(site, node)")
+    || !html.includes("site.nodeConfigEntryIds")
+    || !html.includes('data-action="edit-main-config"')
+    || !html.includes("mainConfigEditable")
+    || !html.includes("action: 'config_move'")
+    || !html.includes("transfer_targets")
+    || !html.includes("item.migration")) {
+  throw new Error("multi-entry HTTP/Stream selection or protected main-config interaction is incomplete");
+}
 if (!html.includes("applySiteConfTemplate(true, event.target.value, false)")
     || !html.includes("event.target.value = previousTemplate")) {
   throw new Error("selecting a Conf template must apply it immediately and restore the previous choice when cancelled");

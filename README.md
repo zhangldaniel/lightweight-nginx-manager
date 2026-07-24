@@ -1,6 +1,6 @@
 # Lightweight Nginx Manager（轻量级 Nginx 管理平台）
 
-一个轻量、自托管的多节点 Nginx 管理平台。通过 Web 控制台统一管理 Linux 节点上的域名站点、通用 HTTP Conf 与 TLS 证书，支持现有配置导入、编辑、复制、逐节点校验、发布、回滚和审计。
+一个轻量、自托管的多节点 Nginx 管理平台。通过 Web 控制台统一管理 Linux 节点上的域名站点、HTTP/Stream Conf 与 TLS 证书，支持多个配置入口、现有配置导入、编辑、复制、逐节点校验、发布、回滚和审计。
 
 Server 基于 FastAPI、SQLite 和单文件 Web 控制台；Agent 主动连接 Server，无需开放管理端口，也不提供任意 Shell。适合从少量节点开始部署并逐步扩展。
 
@@ -60,6 +60,38 @@ sudo bash -s -- \
   --nginx-service nginx.service
 ```
 
+如果一台 Nginx 有多个 HTTP 配置目录，可重复传入：
+
+```bash
+  --managed-config-dir /apps/nginx/conf/conf.d \
+  --managed-config-dir /apps/nginx/conf/sites.d \
+  --managed-config-already-included
+```
+
+如果同一目录还加载 Stream 文件：
+
+```nginx
+http {
+    include /apps/nginx/conf/conf.d/*.conf;
+}
+
+stream {
+    include /apps/nginx/conf/conf.d/*.stream;
+}
+```
+
+对应的 Agent 参数为：
+
+```bash
+  --managed-config-dir /apps/nginx/conf/conf.d \
+  --managed-stream-dir /apps/nginx/conf/conf.d \
+  --managed-config-already-included
+```
+
+`--managed-config-dir` 与 `--managed-stream-dir` 都可以重复。每种类型的第一个目录是默认写入入口；创建或复制配置时，也可以为每个节点单独选择目标入口。平台只管理入口目录的直接子文件，不递归扫描子目录：HTTP 仅接受 `*.conf`，Stream 仅接受 `*.stream`。
+
+Agent 会用真实的 `nginx -T` 确认每个入口确实被加载。符号链接目录会被拒绝，符号链接文件只读显示。入口只能通过 root 重新执行安装命令调整，不能从 Web 临时扩大写入范围。
+
 安装完成后进入 Web 的“节点 Agent”批准申请，不需要注册令牌。然后分别点击“导入节点现有配置”和证书页的“扫描节点证书”。扫描只读，私钥内容不会离开节点。
 
 “站点与配置”顶部可按 Agent 切换列表；右侧会显示所选节点的实际配置路径、Hash 和配置预览。升级后重新导入一次，可补齐旧站点的节点配置快照。
@@ -83,17 +115,26 @@ server {
 
 “运行监控”每 15 秒采集宿主机、Nginx 进程和 Stub Status；原始数据保留 2 小时，分钟级历史保留 24 小时。“实时日志”一次查看一个节点上的一个文件，浏览器最多保留 5,000 行。
 
-## 三种配置方式
+## 配置方式
 
-“新增站点”中统一提供三种入口：
+“新增配置”中提供：
 
 - **向导站点**：填写域名和上游，由平台生成基础配置。
 - **站点 Conf**：直接编写包含业务 `server_name` 的站点配置，可绑定证书。
 - **通用 Conf**：托管 `upstream`、`map`、`geo`、限流区和本机 Stub Status 等 HTTP 片段，不要求域名或证书。
+- **Stream Conf**：托管 TCP/UDP `server`、`upstream` 等 Stream 片段，使用 `.stream` 文件；证书路径直接写在正文中。
 
-平台不解析或限制 Conf 中的 Nginx 指令，`auth_basic`、第三方模块和其他合法指令均直接交给目标节点的真实 `nginx -t` 校验。Agent 仍只允许写入 `--managed-config-dir`，并保留 SHA-256 并发保护、原子替换、失败恢复与 reload 回滚。使用 `include`、动态模块或其他高权限指令时，安全责任由操作者承担。
+平台不解析或限制 Conf 中的 Nginx 指令，`auth_basic`、第三方模块和其他合法指令均直接交给目标节点的真实 `nginx -t` 校验。Agent 仍只允许写入已注册入口，并保留 SHA-256 并发保护、原子替换、失败恢复与 reload 回滚。使用 `include`、动态模块或其他高权限指令时，安全责任由操作者承担。
 
-通用 Conf 只填写 `.conf` 文件名，完整目录使用每个 Agent 的 `--managed-config-dir`。如果目标节点已有同名文件，必须先“导入节点现有配置”取得路径和 SHA-256，平台不会盲目覆盖。取消指令预检需要 Agent `0.9.2+`。
+通用 Conf 只填写文件名，完整目录由每个 Agent 的目标入口决定。如果目标节点已有同名文件，必须先“导入节点现有配置”取得路径和 SHA-256，平台不会盲目覆盖。HTTP 配置只能复制到 HTTP 入口，Stream 配置只能复制到 Stream 入口；同一节点切换入口会在一个事务中写入目标并删除源文件，校验或 reload 失败会同时恢复。跨类型迁移需要新建配置并人工确认正文。
+
+`--nginx-config` 指定的主配置会作为独立受保护资源显示，默认只能查看，不能删除、移动、重命名或复制。确实需要从平台修改时，重新安装 Agent 并显式增加：
+
+```bash
+  --allow-main-config-edit
+```
+
+即使开启，主配置仍不能删除。发布前后仍执行真实 `nginx -t`，失败自动恢复原文件。
 
 ## 最容易踩的坑
 
@@ -108,7 +149,10 @@ server {
 | `nginx -t` 报 `bind() to 0.0.0.0:80 failed (13: Permission denied)` | 部分自编译 Nginx 在测试配置时也会绑定低端口；升级 Agent，安装器会为受限 helper/recover 单元保留 `CAP_NET_BIND_SERVICE`。 |
 | `00-nginx-manager.conf has unexpected content` | 旧 include 文件和新托管目录冲突；先检查其内容。直接托管 `conf.d` 时不要再传 `--managed-include-file`。 |
 | 托管 `conf.d` 后出现递归 include | 不要在 `conf.d` 中创建一个再次 include `conf.d/*.conf` 的文件；必须使用 `--managed-config-already-included`。 |
-| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应至少显示 `0.9.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
+| Stream 文件没有导入 | `stream { include .../*.stream; }` 必须已存在，并同时传 `--managed-stream-dir` 与 `--managed-config-already-included`。Agent 不会自动改写主配置创建 `stream {}`。 |
+| 新目录已注册，但发布提示“入口未被 Nginx 加载” | 安装器和发布流程都会以 `nginx -T` 为准；检查 include 后重新执行安装命令。只创建目录但没有 include 不算可写入口。 |
+| 页面显示“入口已移除” | 该资源还指向 Agent 以前注册的入口。重新安装 Agent 恢复入口，或把配置复制/迁移到同类型的现有入口；平台不会悄悄改写目标目录。 |
+| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应至少显示 `0.10.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
 | “实时日志”没有节点或文件 | Agent 至少应为 `0.8.0`，并在安装时传入真实的 `--nginx-log-dir`。HTTP 管理网还要添加 `--allow-plaintext-log-stream`，然后等待一次心跳并刷新页面。 |
 | 监控显示 Stub Status 不可用 | 检查 `curl http://127.0.0.1:18080/nginx_status` 是否返回 Active connections / Reading / Writing / Waiting；采集失败不会影响配置和证书操作。 |
 | `find /apps/nginx/conf/nginx-manager.d` 为空 | 如果托管目录已经改为 `conf.d`，这是正常的；应检查 `/apps/nginx/conf/conf.d`。 |
