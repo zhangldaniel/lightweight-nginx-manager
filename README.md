@@ -1,8 +1,8 @@
 # Lightweight Nginx Manager（轻量级 Nginx 管理平台）
 
-一个轻量、自托管的多节点 Nginx 管理平台。通过 Web 控制台统一管理 Linux 节点上的域名站点、HTTP/Stream Conf 与 TLS 证书，支持多个配置入口、现有配置导入、编辑、复制、逐节点校验、发布、回滚和审计。
+这是一个轻量、可以自己部署的多节点 Nginx 管理平台。装好以后，你可以直接在 Web 页面里管理站点、HTTP/Stream 配置和 TLS 证书，也可以导入服务器上已经存在的配置。
 
-Server 基于 FastAPI、SQLite 和单文件 Web 控制台；Agent 主动连接 Server，无需开放管理端口，也不提供任意 Shell。适合从少量节点开始部署并逐步扩展。
+每台 Nginx 服务器只需要安装一个 Agent。Agent 会主动连接管理端，不用额外开放管理端口，也不会给平台一个可以随便执行 Shell 的入口。先管几台机器没有问题，后面再慢慢增加节点也可以。
 
 ## 界面预览
 
@@ -12,9 +12,11 @@ Server 基于 FastAPI、SQLite 和单文件 Web 控制台；Agent 主动连接 S
 | --- | --- |
 | ![运行监控界面](docs/images/runtime-monitoring.png) | ![实时日志界面](docs/images/runtime-logs.png) |
 
-## 快速安装
+## 先把它装起来
 
-### 1. Server（默认 HTTP）
+### 第一步：安装 Server
+
+下面是最简单的 HTTP 安装方式，适合隔离、可信的内网：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-server.sh | \
@@ -24,13 +26,17 @@ sudo bash -s -- \
   --open-firewall
 ```
 
-将示例 IP 换成实际 Server IP，然后访问 `http://192.0.2.20:8443`。`--public-url` 可以不写。
+把示例 IP 换成管理端服务器的真实 IP，然后打开 `http://192.0.2.20:8443`。没有特殊需求时，不用填写 `--public-url`。
 
-- 账号：`admin`
-- 密码：首次安装随机生成，没有固定默认密码
-- 查看密码：`sudo cat /root/nginx-manager-credentials.txt`
+登录账号是 `admin`。首次安装会随机生成密码，不使用固定默认密码，可以这样查看：
 
-### 2. Agent（系统默认 Nginx）
+```bash
+sudo cat /root/nginx-manager-credentials.txt
+```
+
+### 第二步：安装 Agent
+
+如果 Nginx 是通过系统软件源安装的，通常只需要：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
@@ -39,9 +45,9 @@ sudo bash -s -- \
   --node-name edge-a-01
 ```
 
-### 3. Agent（已有 `/apps/nginx`）
+### 自定义 Nginx 目录
 
-下面的例子直接托管已经被 `nginx.conf` 加载的 `/apps/nginx/conf/conf.d`：
+如果 Nginx 装在 `/apps/nginx`，把二进制、主配置、配置目录、证书目录和日志目录都明确写出来。下面这条命令可以直接作为参考：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
@@ -60,7 +66,7 @@ sudo bash -s -- \
   --nginx-service nginx.service
 ```
 
-如果一台 Nginx 有多个 HTTP 配置目录，可重复传入：
+一台 Nginx 可以有多个 HTTP 配置目录。多写几次 `--managed-config-dir` 就可以，第一个目录会作为默认写入位置：
 
 ```bash
   --managed-config-dir /apps/nginx/conf/conf.d \
@@ -68,7 +74,7 @@ sudo bash -s -- \
   --managed-config-already-included
 ```
 
-如果同一目录还加载 Stream 文件：
+如果你还使用了 Stream 配置，例如主配置里有：
 
 ```nginx
 http {
@@ -80,7 +86,7 @@ stream {
 }
 ```
 
-对应的 Agent 参数为：
+安装 Agent 时再加上对应的 Stream 目录：
 
 ```bash
   --managed-config-dir /apps/nginx/conf/conf.d \
@@ -88,17 +94,24 @@ stream {
   --managed-config-already-included
 ```
 
-`--managed-config-dir` 与 `--managed-stream-dir` 都可以重复。每种类型的第一个目录是默认写入入口；创建或复制配置时，也可以为每个节点单独选择目标入口。平台只管理入口目录的直接子文件，不递归扫描子目录：HTTP 仅接受 `*.conf`，Stream 仅接受 `*.stream`。
+`--managed-config-dir` 和 `--managed-stream-dir` 都可以重复。创建、复制或迁移配置时，也可以单独选择每个节点要写入哪个目录。
 
-Agent 会用真实的 `nginx -T` 确认每个入口确实被加载。符号链接目录会被拒绝，符号链接文件只读显示。入口只能通过 root 重新执行安装命令调整，不能从 Web 临时扩大写入范围。
+平台只管理这些目录最外层的文件，不会递归扫描子目录。HTTP 配置使用 `*.conf`，Stream 配置使用 `*.stream`。Agent 还会通过真实的 `nginx -T` 确认目录确实已经被 Nginx 加载，避免把文件写到一个根本不会生效的位置。
 
-安装完成后进入 Web 的“节点 Agent”批准申请，不需要注册令牌。然后分别点击“导入节点现有配置”和证书页的“扫描节点证书”。扫描只读，私钥内容不会离开节点。
+为了避免从 Web 页面临时扩大写入范围，配置入口只能由 root 重新执行安装命令来调整。符号链接目录不会被接管；符号链接文件可以看到，但不能修改。
 
-“站点与配置”顶部可按 Agent 切换列表；右侧会显示所选节点的实际配置路径、Hash 和配置预览。升级后重新导入一次，可补齐旧站点的节点配置快照。
+Agent 安装完成后，登录 Web 页面，在“节点 Agent”里批准接入申请。这里不需要注册令牌。接着：
 
-`--nginx-log-dir` 可重复指定，只允许实时读取目录内的普通 `*.log`；控制端不把日志正文写入 SQLite 或磁盘。HTTP 管理网必须显式添加 `--allow-plaintext-log-stream`，该参数在 HTTPS 下也可以保留，不会关闭 TLS 或改变 Server 地址。
+1. 在“站点与配置”中点击“导入节点现有配置”。
+2. 在“证书”页面点击“扫描节点证书”。
 
-`--stub-status-url` 仅接受本机回环地址。暂时不可访问不会阻断安装，Agent 会继续重试。可在 Nginx 中增加：
+扫描过程是只读的，私钥内容不会离开节点。站点列表还可以按 Agent 筛选，右侧会显示真实文件路径、Hash 和配置预览。
+
+`--nginx-log-dir` 也可以重复指定。平台只会按需实时读取这些目录里的普通 `*.log` 文件，不会把日志正文长期保存在管理端。
+
+如果 Agent 通过 HTTP 连接管理端，需要显式添加 `--allow-plaintext-log-stream` 才能查看实时日志。以后改成 HTTPS，这个参数留着也不会关闭 TLS。
+
+`--stub-status-url` 只接受本机回环地址。安装时暂时访问不到不会失败，Agent 会在后台继续重试。可以在 Nginx 中加入：
 
 ```nginx
 server {
@@ -113,69 +126,36 @@ server {
 }
 ```
 
-“运行监控”每 15 秒采集宿主机、Nginx 进程和 Stub Status；原始数据保留 2 小时，分钟级历史保留 24 小时。“实时日志”一次查看一个节点上的一个文件，浏览器最多保留 5,000 行。
+“运行监控”每 15 秒采集一次宿主机、Nginx 进程和 Stub Status。原始数据保留 2 小时，分钟级历史保留 24 小时。“实时日志”一次查看一个节点上的一个文件，浏览器最多显示 5,000 行。
 
-## 配置方式
+## 怎么管理配置
 
-“新增配置”中提供：
+点击“新增配置”后，可以选择四种方式：
 
 - **向导站点**：填写域名和上游，由平台生成基础配置。
 - **站点 Conf**：直接编写包含业务 `server_name` 的站点配置，可绑定证书。
 - **通用 Conf**：托管 `upstream`、`map`、`geo`、限流区和本机 Stub Status 等 HTTP 片段，不要求域名或证书。
 - **Stream Conf**：托管 TCP/UDP `server`、`upstream` 等 Stream 片段，使用 `.stream` 文件；证书路径直接写在正文中。
 
-平台不解析或限制 Conf 中的 Nginx 指令，`auth_basic`、第三方模块和其他合法指令均直接交给目标节点的真实 `nginx -t` 校验。Agent 仍只允许写入已注册入口，并保留 SHA-256 并发保护、原子替换、失败恢复与 reload 回滚。使用 `include`、动态模块或其他高权限指令时，安全责任由操作者承担。
+如果你已经有一份完整配置，直接使用 Conf 模式会更省事。平台不会用自己的规则限制 Nginx 指令，而是把配置交给目标节点的真实 `nginx -t` 检查。因此 `auth_basic`、第三方模块和其他合法指令都可以使用。
 
-通用 Conf 只填写文件名，完整目录由每个 Agent 的目标入口决定。如果目标节点已有同名文件，必须先“导入节点现有配置”取得路径和 SHA-256，平台不会盲目覆盖。HTTP 配置只能复制到 HTTP 入口，Stream 配置只能复制到 Stream 入口；同一节点切换入口会在一个事务中写入目标并删除源文件，校验或 reload 失败会同时恢复。跨类型迁移需要新建配置并人工确认正文。
+Agent 只会写入安装时登记过的目录。写入时会检查 SHA-256，使用原子替换；如果校验或 reload 失败，会恢复原文件。
 
-`--nginx-config` 指定的主配置会作为独立受保护资源显示，默认只能查看，不能删除、移动、重命名或复制。确实需要从平台修改时，重新安装 Agent 并显式增加：
+通用 Conf 只需要填写文件名，最终目录由每个节点选择的配置入口决定。目标节点上如果已经有同名文件，请先导入现有配置，平台不会直接覆盖一个自己不了解的文件。
+
+HTTP 配置只能复制或迁移到 HTTP 入口，Stream 配置也只能进入 Stream 入口。同一个节点切换目录时，平台会把“写入新位置、删除旧文件、校验和 reload”放在同一次操作里；中间任何一步失败，两个位置都会恢复。
+
+`--nginx-config` 指定的主配置会单独显示。默认只能查看，不能删除、移动、重命名或复制。如果确实要在平台里编辑主配置，重新执行 Agent 安装命令并加上：
 
 ```bash
   --allow-main-config-edit
 ```
 
-即使开启，主配置仍不能删除。发布前后仍执行真实 `nginx -t`，失败自动恢复原文件。
+即使打开了编辑权限，主配置仍然不能删除。每次发布都会先执行真实的 `nginx -t`；如果失败，Agent 会恢复原文件。
 
-## 最容易踩的坑
+## HTTPS 和 LDAP
 
-| 现象 | 原因与处理 |
-| --- | --- |
-| `/apps/nginx` 存在，但提示未发现 Nginx | 自动探测不覆盖自定义目录；使用上面的完整 `/apps/nginx` 参数。 |
-| 配置已经导入，但证书页为空 | `--managed-cert-dir` 必须指向真实目录；`cert` 和 `certs` 是两个不同路径。修改参数后重新安装 Agent，再点击“扫描节点证书”。 |
-| 配置没改，重复发布却显示失败 | 先升级 Server；新版会比较逐节点 SHA-256，内容一致时只执行 `nginx -t` 与 reload，不写文件、不增加版本。真正修改后仍失败时，检查配置中的 `ssl_certificate` 路径是否位于 `--managed-cert-dir`。 |
-| 页面显示候选配置校验失败，但手工 `nginx -t` 成功 | 页面若同时显示“原文件已自动恢复”，手工检查的是恢复后的旧配置，这是正常现象。`proxy_pass` 必须带 `http://` 或 `https://`；向导模式会自动补齐简单的 IP、主机名和 upstream。新版也会显示候选配置的安全分类原因和大致行号。 |
-| 发布前提示“Conf 格式不完整或包含不允许托管的指令” | 节点仍在运行旧版 Agent 的指令白名单；升级 Agent 到 `0.9.2+` 后重试，配置将直接交给目标节点的 `nginx -t`。 |
-| 绑定证书后发布失败或浏览器报域名不匹配 | 证书必须同时存在于目标节点并覆盖站点域名；`*.itbkcmdb.int.example.com` 不覆盖 `test.int.example.com`。在“编辑配置”中更换绑定证书会自动更新证书路径。 |
-| `nginx -t` 报 `bind() to 0.0.0.0:80 failed (13: Permission denied)` | 部分自编译 Nginx 在测试配置时也会绑定低端口；升级 Agent，安装器会为受限 helper/recover 单元保留 `CAP_NET_BIND_SERVICE`。 |
-| `00-nginx-manager.conf has unexpected content` | 旧 include 文件和新托管目录冲突；先检查其内容。直接托管 `conf.d` 时不要再传 `--managed-include-file`。 |
-| 托管 `conf.d` 后出现递归 include | 不要在 `conf.d` 中创建一个再次 include `conf.d/*.conf` 的文件；必须使用 `--managed-config-already-included`。 |
-| Stream 文件没有导入 | `stream { include .../*.stream; }` 必须已存在，并同时传 `--managed-stream-dir` 与 `--managed-config-already-included`。Agent 不会自动改写主配置创建 `stream {}`。 |
-| 新目录已注册，但发布提示“入口未被 Nginx 加载” | 安装器和发布流程都会以 `nginx -T` 为准；检查 include 后重新执行安装命令。只创建目录但没有 include 不算可写入口。 |
-| 页面显示“入口已移除” | 该资源还指向 Agent 以前注册的入口。重新安装 Agent 恢复入口，或把配置复制/迁移到同类型的现有入口；平台不会悄悄改写目标目录。 |
-| Agent 显示在线，但导入后仍为 0 | Server 和 Agent 都要升级；`grep '^VERSION' /opt/nginx-manager-agent/nginx_agent.py` 应至少显示 `0.10.0`，然后浏览器按 `Ctrl+F5` 再导入。 |
-| “实时日志”没有节点或文件 | Agent 至少应为 `0.8.0`，并在安装时传入真实的 `--nginx-log-dir`。HTTP 管理网还要添加 `--allow-plaintext-log-stream`，然后等待一次心跳并刷新页面。 |
-| 监控显示 Stub Status 不可用 | 检查 `curl http://127.0.0.1:18080/nginx_status` 是否返回 Active connections / Reading / Writing / Waiting；采集失败不会影响配置和证书操作。 |
-| `find /apps/nginx/conf/nginx-manager.d` 为空 | 如果托管目录已经改为 `conf.d`，这是正常的；应检查 `/apps/nginx/conf/conf.d`。 |
-| 从节点移除后站点仍在，并显示 `v1 → v2` | “从节点移除配置”只删除 Agent 上的 `.conf`，会保留平台记录；新版会显示“未部署”和原版本 `v1`。确认不再需要后，可在右侧点击“删除站点记录”。 |
-| 点击“逐节点校验”后出现 `v1 → v2` | 升级 Server。逐节点校验是只读操作，新版只显示“校验中/校验失败”，不会创建草稿或增加版本；只有真正编辑配置才会出现候选版本。 |
-| Agent 接入 `timed out` | 先从 Agent 执行 `curl --connect-timeout 5 http://192.0.2.20:8443/healthz`。能访问仍超时就重新执行最新 Agent 安装命令。 |
-| 安装后没有默认密码 | 密码是随机生成的，查看 `/root/nginx-manager-credentials.txt`。升级不会重置账号密码。 |
-| CentOS 7 只有 Python 3.6 / systemd 219 | 最新 Agent 已兼容，不需要手工升级 Python；重新执行安装命令即可。 |
-
-如果以前创建过旧 include 文件，只在确认它确实是旧的 Manager 引用后再迁移：
-
-```bash
-sudo cat /apps/nginx/conf/conf.d/00-nginx-manager.conf
-sudo cp -a /apps/nginx/conf/conf.d/00-nginx-manager.conf /root/00-nginx-manager.conf.backup
-sudo rm -f /apps/nginx/conf/conf.d/00-nginx-manager.conf
-sudo /apps/nginx/sbin/nginx -t -c /apps/nginx/conf/nginx.conf && sudo systemctl reload nginx
-```
-
-不要直接删除内容不明的生产配置。
-
-## HTTPS 与 LDAP
-
-HTTP 只适合隔离且可信的管理网。使用本机 Nginx 终止 HTTPS：
+如果管理网是隔离且可信的，直接使用 HTTP 最省事。只要会经过不可信网络，就应该在 Server 前面放一个本机 Nginx，由它处理 HTTPS：
 
 ```bash
 sudo ./deploy/install-server.sh \
@@ -184,9 +164,9 @@ sudo ./deploy/install-server.sh \
   --port 8443
 ```
 
-代理示例见 `deploy/nginx-manager-proxy.conf.example`。如果同时保留 `http://服务器IP:8443`，增加 `--allow-direct-http`。
+可以直接参考 `deploy/nginx-manager-proxy.conf.example`。如果还想保留 `http://服务器IP:8443` 这个入口，再加上 `--allow-direct-http`。
 
-LDAP/AD 参数见 `sudo ./deploy/install-server.sh --help`。至少需要：
+需要接 LDAP 或 AD 时，先准备下面四项：
 
 ```text
 --ldap-url
@@ -195,15 +175,29 @@ LDAP/AD 参数见 `sudo ./deploy/install-server.sh --help`。至少需要：
 --ldap-bind-password-file
 ```
 
-默认角色组为 `nginx-admin`、`nginx-operator`、`nginx-auditor`；本地 `admin` 始终作为应急账号保留。
+完整参数可以运行 `sudo ./deploy/install-server.sh --help` 查看。默认会识别 `nginx-admin`、`nginx-operator` 和 `nginx-auditor` 三个角色组。本地 `admin` 不会被关闭，可以在 LDAP 出现问题时应急登录。
 
-## 升级与检查
+## 升级和日常检查
 
-升级 Server 或 Agent：重新执行原安装命令。Server 保留数据库和账号，Agent 保留已批准的机器身份。涉及发布任务协议的版本应先升级 Server，再升级所有 Agent，最后浏览器 `Ctrl+F5`。
+升级很简单：重新执行原来的安装命令即可。Server 会保留数据库和账号，Agent 也会保留已经批准的机器身份。
 
-新版发布有服务端操作单、逐节点任务租约和不可变版本快照。Agent 在网络中断时会将结果保存在 `/var/lib/nginx-manager-agent/result-outbox.json`，收到 Server 确认后才删除；永久被拒绝的结果会留在 `result-outbox-rejected.json` 供排查。多节点发布可能出现“部分成功”，页面会明确保留逐节点结果，不会把它伪装成全部成功。
+建议按这个顺序升级：
 
-真实版本回滚只适用于升级后成功发布并形成快照的版本；升级前仅有页面历史文字、没有配置快照的旧版本不能自动回滚。升级前先备份 Server：
+1. 先升级 Server。
+2. 再升级所有 Agent。
+3. 最后在浏览器按 `Ctrl+F5` 刷新页面。
+
+Agent 遇到网络中断时，不会直接丢掉执行结果，而是先保存在 `/var/lib/nginx-manager-agent/result-outbox.json`，等 Server 确认收到后再删除。多节点发布如果只有一部分成功，页面会把每个节点的真实结果分别显示出来。
+
+只有已经成功发布并生成快照的版本才能自动回滚。很早以前只留下页面历史、没有配置快照的记录，不能直接恢复。
+
+升级前建议先备份 Server：
+
+```bash
+sudo ./deploy/backup-server.sh
+```
+
+平时检查服务可以使用：
 
 ```bash
 # Server
@@ -219,13 +213,7 @@ journalctl -u nginx-manager-agent -f
 /apps/nginx/sbin/nginx -t -c /apps/nginx/conf/nginx.conf
 ```
 
-Server 备份：
-
-```bash
-sudo ./deploy/backup-server.sh
-```
-
-生产环境不要长期从可变的 `main` 直接以 root 安装。确认一个已审核的 40 位 commit 后固定它：
+正式环境不要一直从会变化的 `main` 直接安装。确认一个测试过的提交后，把 40 位 commit 固定下来：
 
 ```bash
 export NGINX_MANAGER_REF='<40位Git提交>'
@@ -234,13 +222,17 @@ curl -fsSL "https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-man
 sudo -E bash -s -- --host 192.0.2.20 --port 8443
 ```
 
-Agent 安装同样设置这两个环境变量。也可以额外设置 `NGINX_MANAGER_ARCHIVE_SHA256` 校验 GitHub 源码归档。Server 默认只保留最近 3 个程序 release（数据与数据库不在 release 内），可用 `NGINX_MANAGER_RELEASE_RETENTION` 调整。
+安装 Agent 时也可以使用这两个环境变量。如果还想校验 GitHub 源码归档，可以再设置 `NGINX_MANAGER_ARCHIVE_SHA256`。
 
-控制端默认保留任务/操作 30 天、审计 180 天；LDAP 会话每 5 分钟重新检查一次角色。对应环境变量见 `server/env.example`。证书替换任务在排队和租约重试期间会暂存在权限为 `0600` 的 Server SQLite 中，任务结束即删除私钥 payload；因此仍应保护 Server 磁盘、备份和管理网络。
+Server 默认保留最近 3 个程序版本，数据库和业务数据不在这些 release 目录里。需要调整数量时，可以设置 `NGINX_MANAGER_RELEASE_RETENTION`。
 
-## 一键卸载
+任务和操作记录默认保留 30 天，审计记录保留 180 天。LDAP 登录会每 5 分钟重新确认一次角色。相关环境变量都在 `server/env.example`。
 
-默认卸载会保留数据或 Agent 身份；添加 `--purge` 才彻底删除。Agent 卸载器不会删除已经发布的 Nginx 配置和证书。
+替换证书时，私钥会在任务排队和重试期间临时保存在权限为 `0600` 的 Server SQLite 中，任务结束后立即删除。因此 Server 磁盘、备份和管理网络仍然需要认真保护。
+
+## 不用了怎么卸载
+
+普通卸载会保留 Server 数据或 Agent 身份，方便以后重新安装。Agent 卸载器也不会删除已经发布到 Nginx 的配置和证书：
 
 ```bash
 # Server
@@ -250,10 +242,10 @@ curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-mana
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-agent.sh | sudo bash
 ```
 
-彻底卸载示例：
+如果确认所有保留数据都不再需要，再使用 `--purge`：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-server.sh | sudo bash -s -- --purge
 ```
 
-> HTTP 会明文传输登录会话、Agent 身份和任务内容；跨不可信网络必须使用 HTTPS。
+> HTTP 会明文传输登录会话、Agent 身份和任务内容。只要流量会经过不可信网络，就必须使用 HTTPS。
