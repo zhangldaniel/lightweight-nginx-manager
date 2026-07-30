@@ -24,7 +24,8 @@ RELEASE_RETENTION="${NGINX_MANAGER_RELEASE_RETENTION:-3}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PACKAGE_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
 SERVER_SOURCE="${PACKAGE_DIR}/server"
-UI_SOURCE="${PACKAGE_DIR}/nginx-cluster-console.html"
+UI_SOURCE="${PACKAGE_DIR}/frontend/release/index.html"
+[[ -f "${UI_SOURCE}" ]] || UI_SOURCE="${PACKAGE_DIR}/nginx-cluster-console.html"
 [[ -f "${UI_SOURCE}" ]] || UI_SOURCE="${PACKAGE_DIR}/../nginx-cluster-console.html"
 
 MANAGER_HOST=""
@@ -398,7 +399,7 @@ detect_package_manager() {
 preflight_static() {
   [[ -f "${SERVER_SOURCE}/app.py" ]] || die "找不到 ${SERVER_SOURCE}/app.py，请从完整发布包内运行脚本"
   [[ -f "${SERVER_SOURCE}/requirements.txt" ]] || die "找不到 server/requirements.txt"
-  [[ -f "${UI_SOURCE}" ]] || die "找不到 nginx-cluster-console.html，请保留发布包目录结构"
+  [[ -f "${UI_SOURCE}" ]] || die "找不到新版或兼容版 Web 控制台，请保留发布包目录结构"
   [[ -r "${SERVER_SOURCE}/app.py" && -r "${SERVER_SOURCE}/requirements.txt" && -r "${UI_SOURCE}" ]] || \
     die "发布包文件不可读"
 

@@ -1342,6 +1342,8 @@ class ServerTestCase(unittest.TestCase):
         self.assertIn("--host ${bind_host}", installer)
         self.assertIn("NGINX_MANAGER_LDAP_ENABLED", installer)
         self.assertIn("NGINX_MANAGER_LDAP_BIND_PASSWORD_FILE", installer)
+        self.assertIn('UI_SOURCE="${PACKAGE_DIR}/frontend/release/index.html"', installer)
+        self.assertIn('UI_SOURCE="${PACKAGE_DIR}/nginx-cluster-console.html"', installer)
         self.assertIn('sed "s|${CURRENT_LINK}|${NEW_RELEASE}|g"', installer)
         self.assertIn('systemctl is-enabled --quiet "${APP_NAME}.service" 2>/dev/null', installer)
         self.assertIn('chown -R root:"${APP_GROUP}" "${STAGING_DIR}"', installer)

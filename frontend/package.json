@@ -8,6 +8,7 @@
     "dev": "vite",
     "prebuild": "node scripts/build-font-css.mjs",
     "build": "vue-tsc --noEmit && vite build",
+    "package:server": "npm run build && node scripts/qa-contract.mjs && node scripts/package-release.mjs",
     "test": "npm run build && node scripts/qa-contract.mjs",
     "qa:visual": "npm run build && node scripts/qa-capture.mjs",
     "preview": "vite preview",
