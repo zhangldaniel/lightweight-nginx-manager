@@ -55,6 +55,7 @@ export const useConsoleStore = defineStore('console', () => {
   const session = ref<Session | null>(null)
   const booting = ref(true)
   const loading = ref(false)
+  const refreshing = ref(false)
   const lastRefreshAt = ref<Date | null>(null)
   const stateRevision = ref(0)
   const ui = ref<UiState>(emptyState())
@@ -143,9 +144,17 @@ export const useConsoleStore = defineStore('console', () => {
     }
   }
 
-  async function refresh(includeSlow = false) {
+  async function refresh(includeSlow = false, background = false) {
     if (!session.value) return
-    loading.value = true
+    if (refreshing.value) {
+      if (background) return
+      while (refreshing.value) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 25))
+      }
+      if (!session.value) return
+    }
+    refreshing.value = true
+    if (!background) loading.value = true
     try {
       const requests = [
         api.uiState(),
@@ -214,7 +223,8 @@ export const useConsoleStore = defineStore('console', () => {
       if (error instanceof ApiError && error.status === 401) session.value = null
       throw error
     } finally {
-      loading.value = false
+      refreshing.value = false
+      if (!background) loading.value = false
     }
   }
 

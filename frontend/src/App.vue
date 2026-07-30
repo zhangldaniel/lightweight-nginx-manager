@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { RouterView } from 'vue-router'
 import {
   NConfigProvider,
@@ -55,7 +55,31 @@ const themeOverrides: GlobalThemeOverrides = {
 
 const currentTheme = computed(() => null)
 
-onMounted(() => store.checkSession())
+let refreshTimer: number | undefined
+
+async function refreshInBackground() {
+  if (document.hidden || !store.session) return
+  try {
+    await store.refresh(false, true)
+  } catch {
+    // Keep background refresh quiet. Manual refresh still reports connection errors.
+  }
+}
+
+function handleVisibilityChange() {
+  if (!document.hidden) void refreshInBackground()
+}
+
+onMounted(async () => {
+  await store.checkSession()
+  refreshTimer = window.setInterval(() => void refreshInBackground(), 2500)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+})
+
+onUnmounted(() => {
+  if (refreshTimer !== undefined) window.clearInterval(refreshTimer)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+})
 </script>
 
 <template>

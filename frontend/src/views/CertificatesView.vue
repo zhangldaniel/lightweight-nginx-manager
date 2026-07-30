@@ -26,6 +26,12 @@ const sortedCertificates = computed(() =>
   ),
 )
 
+const activeCertificateScan = computed(() =>
+  store.jobs.some(
+    (job) => job.action === 'certificate_inventory' && ['queued', 'running'].includes(job.status),
+  ),
+)
+
 const modalNodes = computed(() => {
   const allowedIds =
     modalMode.value === 'replace' ? new Set(activeCertificate.value?.nodeIds || []) : null
@@ -67,6 +73,10 @@ function toggleNode(id: string, checked: boolean) {
 }
 
 async function scan() {
+  if (activeCertificateScan.value) {
+    store.notify('证书扫描正在进行', 'info', '无需重复提交，完成后页面会自动同步结果。')
+    return
+  }
   scanning.value = true
   try {
     await store.scanInventory('certificate_inventory')
@@ -133,9 +143,13 @@ async function copy(value: string, label: string) {
 <template>
   <section class="page page-certificates">
     <PageHeader title="证书" description="查看到期风险、部署节点和每台机器上的原始证书路径。">
-      <NButton :loading="scanning" :disabled="!store.canOperate" @click="scan">
+      <NButton
+        :loading="scanning || activeCertificateScan"
+        :disabled="!store.canOperate || activeCertificateScan"
+        @click="scan"
+      >
         <template #icon><RefreshCw :size="18" /></template>
-        扫描节点证书
+        {{ activeCertificateScan ? '扫描进行中' : '扫描节点证书' }}
       </NButton>
       <NButton type="primary" :disabled="!store.canOperate" @click="openAdd">
         <template #icon><Plus :size="18" /></template>
@@ -242,8 +256,13 @@ async function copy(value: string, label: string) {
       <FileKey2 :size="34" />
       <strong>尚未发现证书</strong>
       <span>让在线 Agent 扫描已配置的证书目录和 Nginx 引用路径。</span>
-      <NButton type="primary" :loading="scanning" :disabled="!store.canOperate" @click="scan">
-        扫描节点证书
+      <NButton
+        type="primary"
+        :loading="scanning || activeCertificateScan"
+        :disabled="!store.canOperate || activeCertificateScan"
+        @click="scan"
+      >
+        {{ activeCertificateScan ? '扫描进行中' : '扫描节点证书' }}
       </NButton>
     </div>
 
