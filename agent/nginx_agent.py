@@ -1158,11 +1158,8 @@ class JobExecutor:
             self.store.complete(job_id, action, interrupted)
             return interrupted
 
-        if _is_expired(job.get("expires_at")):
-            response = self._response(job_id, action, "expired", error="job expired before execution")
-            self.store.complete(job_id, action, response)
-            return response
-
+        # The control plane owns queue expiry. Comparing its UTC deadline with
+        # the Agent's local clock would reject valid leases when node clocks skew.
         self.store.begin(job_id, action)
         started = utc_now()
         try:

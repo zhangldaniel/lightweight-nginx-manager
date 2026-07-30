@@ -171,7 +171,8 @@ export const useConsoleStore = defineStore('console', () => {
             notify(
               '部分节点扫描失败',
               'warning',
-              '已导入成功结果；失败原因可在“执行记录”中查看。',
+              imported.failureMessages.slice(0, 2).join('；') ||
+                '已导入成功结果；失败原因可在“执行记录”中查看。',
             )
           } else if (imported.configurations || imported.certificates) {
             notify(

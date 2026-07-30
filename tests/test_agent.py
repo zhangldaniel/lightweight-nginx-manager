@@ -158,6 +158,17 @@ class AgentTestCase(unittest.TestCase):
         self.assertEqual(1, len(mapped["details"]["config_entries"]))
         self.assertEqual(str(self.main_config.resolve()), mapped["details"]["main_config"]["path"])
 
+    def test_claimed_job_is_not_rejected_by_agent_clock_skew(self):
+        target = self.config_root / "clock-skew.conf"
+        target.write_text("server { listen 80; }\n", encoding="utf-8")
+        job = self.job("job-clock-skew", "config_inventory", {})
+        job["expires_at"] = "2000-01-01T00:00:00Z"
+
+        response = self.executor.execute(job)
+
+        self.assertEqual("succeeded", response["status"])
+        self.assertEqual(1, response["result"]["file_count"])
+
     def test_multiple_http_and_stream_entries_are_context_aware_and_non_recursive(self):
         secondary_http = self.root / "sites-enabled"
         stream_root = self.root / "stream.d"

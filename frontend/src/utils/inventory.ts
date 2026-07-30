@@ -34,6 +34,7 @@ export interface InventoryImportSummary {
   configurations: number
   certificates: number
   failures: number
+  failureMessages: string[]
   skipped: number
   truncated: boolean
 }
@@ -290,6 +291,7 @@ export function processInventoryJobs(
     configurations: 0,
     certificates: 0,
     failures: 0,
+    failureMessages: [],
     skipped: 0,
     truncated: false,
   }
@@ -312,8 +314,11 @@ export function processInventoryJobs(
           }
         | undefined
       const node = nodeById.get(job.node_id)
-      if (job.status !== 'succeeded' || !inventory || !node) result.failures += 1
-      else {
+      if (job.status !== 'succeeded' || !inventory || !node) {
+        result.failures += 1
+        const failure = String(job.result?.error || job.result?.failure_code || job.status)
+        result.failureMessages.push(`${node?.node_name || job.node_name || job.node_id}: ${failure}`)
+      } else {
         for (const file of inventory.files || []) {
           if (importConfiguration(ui, file, node)) result.configurations += 1
         }
@@ -336,8 +341,11 @@ export function processInventoryJobs(
           }
         | undefined
       const node = nodeById.get(job.node_id)
-      if (job.status !== 'succeeded' || !inventory || !node) result.failures += 1
-      else {
+      if (job.status !== 'succeeded' || !inventory || !node) {
+        result.failures += 1
+        const failure = String(job.result?.error || job.result?.failure_code || job.status)
+        result.failureMessages.push(`${node?.node_name || job.node_name || job.node_id}: ${failure}`)
+      } else {
         for (const item of inventory.certificates || []) {
           if (importCertificate(ui, item, node)) result.certificates += 1
         }

@@ -105,6 +105,11 @@ const draftCount = computed(
   () => store.sites.filter((site) => ['draft', 'failed', 'drift'].includes(site.status)).length,
 )
 const pendingCount = computed(() => store.sites.filter((site) => Boolean(site.pendingRemote)).length)
+const activeConfigScan = computed(() =>
+  store.jobs.some(
+    (job) => job.action === 'config_inventory' && ['queued', 'running'].includes(job.status),
+  ),
+)
 const availableCertificates = computed(() => {
   const domain = form.domain.trim()
   return [
@@ -453,6 +458,10 @@ async function run(publish: boolean) {
 }
 
 async function scanSites() {
+  if (activeConfigScan.value) {
+    store.notify('配置扫描正在进行', 'info', '无需重复提交，完成后页面会自动同步结果。')
+    return
+  }
   scanning.value = true
   try {
     await store.scanInventory('config_inventory')
@@ -505,11 +514,11 @@ function deleteRecord() {
     <PageHeader title="站点与配置" description="以站点为中心管理配置、证书和多节点发布。">
       <NButton
         secondary
-        :loading="scanning"
-        :disabled="!store.canOperate"
+        :loading="scanning || activeConfigScan"
+        :disabled="!store.canOperate || activeConfigScan"
         @click="scanSites"
       >
-        导入节点现有配置
+        {{ activeConfigScan ? '扫描进行中' : '导入节点现有配置' }}
       </NButton>
       <NButton type="primary" :disabled="!store.canOperate" @click="openCreate">
         <template #icon><Plus :size="18" /></template>
