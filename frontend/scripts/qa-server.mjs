@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const port = 4179
+const port = Number(process.env.QA_PORT || 4179)
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const index = await readFile(resolve(projectRoot, 'dist/index.html'))
 const now = new Date().toISOString()

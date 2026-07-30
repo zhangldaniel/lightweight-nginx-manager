@@ -11,6 +11,7 @@
     "package:server": "npm run build && node scripts/qa-contract.mjs && node scripts/package-release.mjs",
     "test": "npm run build && node scripts/qa-contract.mjs",
     "qa:visual": "npm run build && node scripts/qa-capture.mjs",
+    "qa:site-editor": "npm run build && node scripts/qa-site-editor.mjs",
     "preview": "vite preview",
     "preview:qa": "node scripts/qa-server.mjs"
   },

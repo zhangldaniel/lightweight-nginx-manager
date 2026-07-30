@@ -19,8 +19,6 @@ import {
   NInput,
   NModal,
   NSelect,
-  NTabPane,
-  NTabs,
   useDialog,
 } from 'naive-ui'
 import PageHeader from '../components/PageHeader.vue'
@@ -31,6 +29,11 @@ import { api } from '../api'
 import type { SiteRecord, SiteRevision } from '../types'
 import { defaultSiteConfig, nodeEntries, safeName, uid } from '../utils/config'
 import { certificateDays, relativeTime, siteKind, siteStatus, siteTitle } from '../utils/format'
+import {
+  renderSiteTemplate,
+  siteTemplates,
+  type SiteTemplateKey,
+} from '../utils/siteTemplates'
 
 const store = useConsoleStore()
 const dialog = useDialog()
@@ -40,6 +43,7 @@ const statusFilter = ref('')
 const editorOpen = ref(false)
 const editorMode = ref<'create' | 'edit'>('create')
 const editorTab = ref<'guided' | 'conf' | 'generic'>('guided')
+const activeTemplate = ref<SiteTemplateKey>('http')
 const saving = ref(false)
 const running = ref(false)
 const scanning = ref(false)
@@ -185,7 +189,8 @@ function resetForm() {
 
 function openCreate() {
   editorMode.value = 'create'
-  editorTab.value = 'guided'
+  editorTab.value = 'conf'
+  activeTemplate.value = 'http'
   resetForm()
   originalOperational.value = ''
   editorOpen.value = true
@@ -211,60 +216,40 @@ function openEdit(site: SiteRecord) {
     config: site.config || '',
     nodeConfigEntryIds: { ...(site.nodeConfigEntryIds || {}) },
   })
+  activeTemplate.value = inferTemplate(site)
   originalOperational.value = operationalSnapshot(form)
   editorOpen.value = true
 }
 
-function applyTemplate(kind: string) {
-  if (kind === 'https') {
-    form.config = [
-      'server {',
-      '  listen 443 ssl;',
-      `  server_name ${form.domain || 'api.example.com'};`,
-      '',
-      '  ssl_certificate     /apps/nginx/cert/example.com.pem;',
-      '  ssl_certificate_key /apps/nginx/cert/example.com.key;',
-      '',
-      '  location / {',
-      `    proxy_pass ${form.target || 'http://127.0.0.1:8080'};`,
-      '    proxy_http_version 1.1;',
-      '    proxy_set_header Host $host;',
-      '    proxy_set_header X-Real-IP $remote_addr;',
-      '    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;',
-      '  }',
-      '}',
-    ].join('\n')
-  } else if (kind === 'websocket') {
-    form.config = [
-      'server {',
-      '  listen 443 ssl;',
-      `  server_name ${form.domain || 'ws.example.com'};`,
-      '',
-      '  location / {',
-      `    proxy_pass ${form.target || 'http://127.0.0.1:8080'};`,
-      '    proxy_http_version 1.1;',
-      '    proxy_set_header Upgrade $http_upgrade;',
-      '    proxy_set_header Connection "upgrade";',
-      '    proxy_set_header Host $host;',
-      '    proxy_set_header X-Real-IP $remote_addr;',
-      '  }',
-      '}',
-    ].join('\n')
-  } else if (kind === 'stream') {
-    form.context = 'stream'
-    form.config = [
-      'upstream tcp_backend {',
-      '  server 127.0.0.1:3306;',
-      '}',
-      '',
-      'server {',
-      '  listen 13306;',
-      '  proxy_pass tcp_backend;',
-      '}',
-    ].join('\n')
-  } else {
-    form.config = defaultSiteConfig(form.domain, form.target)
+function inferTemplate(site: SiteRecord): SiteTemplateKey {
+  if (site.context === 'stream') return 'stream'
+  if (site.resourceType === 'generic') {
+    return /stub_status\s*;/m.test(site.config) ? 'stub-status' : 'custom'
   }
+  if (site.type === 'static' || /\btry_files\b/m.test(site.config)) return 'static'
+  if (/proxy_set_header\s+Upgrade\s+/m.test(site.config)) return 'websocket'
+  if (/\bupstream\s+\S+\s*\{/m.test(site.config) && /listen\s+443\s+ssl/m.test(site.config)) {
+    return 'balanced-https'
+  }
+  if (/listen\s+443\s+ssl/m.test(site.config)) return 'https'
+  return 'http'
+}
+
+function applyTemplate(kind: SiteTemplateKey) {
+  const template = siteTemplates.find((item) => item.key === kind)
+  if (!template) return
+  activeTemplate.value = kind
+  editorTab.value = template.resourceType === 'generic' ? 'generic' : 'conf'
+  form.context = template.context
+  form.type = template.type
+  if (template.resourceType === 'generic') {
+    form.name = template.defaultName || form.name
+    form.filename = template.defaultFilename || form.filename
+    form.certificateId = ''
+  }
+  form.nodeConfigEntryIds = {}
+  form.config = renderSiteTemplate(kind, form.domain, form.target)
+  for (const nodeId of form.nodeIds) ensureEntrySelection(nodeId)
 }
 
 function ensureEntrySelection(nodeId: string) {
@@ -282,6 +267,12 @@ function toggleNode(nodeId: string, checked: boolean) {
   if (checked && !form.nodeIds.includes(nodeId)) form.nodeIds.push(nodeId)
   if (!checked) form.nodeIds = form.nodeIds.filter((item) => item !== nodeId)
   ensureEntrySelection(nodeId)
+}
+
+function toggleNodeCard(nodeId: string) {
+  const node = store.nodes.find((item) => item.id === nodeId)
+  if (!node || node.status === 'offline' || form.context === 'main') return
+  toggleNode(nodeId, !form.nodeIds.includes(nodeId))
 }
 
 function validateForm() {
@@ -725,19 +716,30 @@ function deleteRecord() {
       :bordered="false"
       :mask-closable="false"
     >
-      <NTabs v-model:value="editorTab" type="segment" animated>
-        <NTabPane name="guided" tab="向导模式" :disabled="form.context === 'main'">
-          <span class="tab-help">填写域名和上游，自动生成基础配置。</span>
-        </NTabPane>
-        <NTabPane name="conf" tab="站点 Conf" :disabled="form.context === 'main'">
-          <span class="tab-help">直接编辑站点级 Nginx Conf。</span>
-        </NTabPane>
-        <NTabPane name="generic" tab="通用 Conf">
-          <span class="tab-help">托管 upstream、map、状态页等 HTTP/Stream 片段。</span>
-        </NTabPane>
-      </NTabs>
-
       <div class="site-editor-grid">
+        <aside class="template-rail" aria-label="配置模板">
+          <div class="template-rail-head">
+            <strong>配置模板</strong>
+            <small>选择后会替换右侧 Conf</small>
+          </div>
+          <button
+            v-for="template in siteTemplates"
+            :key="template.key"
+            type="button"
+            class="template-card"
+            :class="{ active: activeTemplate === template.key }"
+            :aria-pressed="activeTemplate === template.key"
+            @click="applyTemplate(template.key)"
+          >
+            <span class="template-card-icon"><FileCode2 :size="17" /></span>
+            <span class="template-card-copy">
+              <strong>{{ template.label }}</strong>
+              <small>{{ template.description }}</small>
+            </span>
+            <span class="template-context">{{ template.context.toUpperCase() }}</span>
+          </button>
+        </aside>
+
         <div class="editor-fields">
           <div v-if="editorTab === 'generic'" class="field-grid">
             <label>
@@ -771,30 +773,37 @@ function deleteRecord() {
             </label>
           </div>
 
-          <label v-if="editorTab === 'guided'">
+          <label v-if="editorTab !== 'generic' && form.type !== 'static'">
             <span>上游地址或站点目录</span>
             <NInput v-model:value="form.target" placeholder="http://10.0.0.21:8080" />
+            <small>修改域名或上游后，再点击左侧模板即可按当前信息重新生成。</small>
           </label>
 
           <fieldset>
             <legend>部署节点</legend>
             <div class="choice-grid">
-              <label
+              <button
                 v-for="node in store.nodes"
                 :key="node.id"
+                type="button"
                 class="choice-card"
                 :class="{ selected: form.nodeIds.includes(node.id), offline: node.status === 'offline' }"
+                :disabled="node.status === 'offline' || form.context === 'main'"
+                :aria-pressed="form.nodeIds.includes(node.id)"
+                @click="toggleNodeCard(node.id)"
               >
                 <NCheckbox
                   :checked="form.nodeIds.includes(node.id)"
                   :disabled="node.status === 'offline' || form.context === 'main'"
+                  tabindex="-1"
+                  @click.stop
                   @update:checked="(checked) => toggleNode(node.id, checked)"
                 />
                 <span>
                   <strong>{{ node.node_name }}</strong>
                   <small>{{ node.hostname }} · {{ node.status === 'offline' ? '离线' : '在线' }}</small>
                 </span>
-              </label>
+              </button>
             </div>
           </fieldset>
 
@@ -852,20 +861,12 @@ function deleteRecord() {
           <div class="editor-code-head">
             <div>
               <strong>Nginx Conf</strong>
-              <small>保存草稿不会触碰节点文件</small>
+              <small>
+                {{ siteTemplates.find((item) => item.key === activeTemplate)?.label || '自定义配置' }}
+                · 保存草稿不会触碰节点文件
+              </small>
             </div>
-            <NSelect
-              v-if="form.context !== 'main'"
-              class="template-select"
-              placeholder="应用模板"
-              :options="[
-                { label: 'HTTP 反向代理', value: 'http' },
-                { label: '标准 HTTPS 反向代理', value: 'https' },
-                { label: 'WebSocket 长连接', value: 'websocket' },
-                { label: 'Stream TCP 代理', value: 'stream' },
-              ]"
-              @update:value="applyTemplate"
-            />
+            <span class="editor-context-badge">{{ form.context.toUpperCase() }}</span>
           </div>
           <textarea
             v-model="form.config"
