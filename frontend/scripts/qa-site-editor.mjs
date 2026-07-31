@@ -105,15 +105,22 @@ try {
   await wait(700)
 
   const detailPresentation = await evaluate(`(() => {
+    const data = document.querySelector('.data-panel')
     const detail = document.querySelector('.detail-panel')
     const style = detail ? getComputedStyle(detail) : null
+    const dataRect = data?.getBoundingClientRect()
+    const detailRect = detail?.getBoundingClientRect()
     return {
       found: Boolean(detail),
       subtitle: detail?.querySelector('.detail-head p')?.textContent.trim() || '',
       overflowX: style?.overflowX || '',
       overflowY: style?.overflowY || '',
-      supportsScrollbarWidth: CSS.supports('scrollbar-width', 'thin'),
-      scrollbarWidth: style?.scrollbarWidth || '',
+      horizontallyScrollable: Boolean(detail && detail.scrollWidth > detail.clientWidth + 1),
+      independentlyScrollable: Boolean(detail && detail.scrollHeight > detail.clientHeight + 1),
+      bottomDelta:
+        dataRect && detailRect
+          ? Math.abs(dataRect.bottom - detailRect.bottom)
+          : Number.POSITIVE_INFINITY,
     }
   })()`)
   assert(detailPresentation.found, 'The site detail panel was not found')
@@ -123,19 +130,18 @@ try {
     `The site detail still renders an environment label: ${detailPresentation.subtitle}`,
   )
   assert(
-    detailPresentation.overflowX === 'hidden',
-    `The site detail can overflow horizontally (${detailPresentation.overflowX})`,
+    !detailPresentation.horizontallyScrollable,
+    `The site detail still overflows horizontally (${detailPresentation.overflowX})`,
   )
   assert(
-    detailPresentation.overflowY === 'auto',
-    `The site detail is not the intended vertical scroll container (${detailPresentation.overflowY})`,
+    detailPresentation.overflowY === 'visible',
+    `The site detail still creates nested vertical scrolling (${detailPresentation.overflowY})`,
   )
-  if (detailPresentation.supportsScrollbarWidth) {
-    assert(
-      detailPresentation.scrollbarWidth === 'thin',
-      `The site detail does not use a thin scrollbar (${detailPresentation.scrollbarWidth})`,
-    )
-  }
+  assert(!detailPresentation.independentlyScrollable, 'The site detail still renders its own scrollbar')
+  assert(
+    detailPresentation.bottomDelta <= 1,
+    `The data and detail panels are misaligned by ${detailPresentation.bottomDelta}px`,
+  )
 
   assert(
     await evaluate(`(() => {

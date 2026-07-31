@@ -6,7 +6,7 @@
 
 ## 界面
 
-![站点与配置](docs/images/console-overview.png?v=20260731)
+![站点与配置](docs/images/console-overview.png?v=20260731-2)
 
 | 运行监控 | 实时日志 |
 | --- | --- |

@@ -600,7 +600,7 @@ pre {
   display: grid;
   grid-template-columns: minmax(680px, 1fr) minmax(360px, 420px);
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .data-panel,
@@ -738,31 +738,8 @@ pre {
 .node-chip.offline::before { background: var(--red); }
 
 .detail-panel {
-  position: sticky;
-  top: 14px;
   min-width: 0;
-  max-height: calc(100vh - var(--topbar) - 40px);
-  overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-color: rgba(112, 132, 154, .5) transparent;
-  scrollbar-width: thin;
-}
-
-.detail-panel::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-.detail-panel::-webkit-scrollbar-thumb {
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: rgba(112, 132, 154, .5);
-  background-clip: padding-box;
-}
-
-.detail-panel::-webkit-scrollbar-thumb:hover {
-  background: rgba(78, 101, 128, .68);
-  background-clip: padding-box;
+  overflow: visible;
 }
 
 .detail-head {
