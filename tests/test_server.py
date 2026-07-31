@@ -1,6 +1,7 @@
 import hashlib
 import json
 import secrets
+import sqlite3
 import sys
 import tempfile
 import time
@@ -773,10 +774,28 @@ class ServerTestCase(unittest.TestCase):
             "/api/v1/admin/operations", headers=self.admin_headers, json=body
         )
         self.assertEqual(201, created.status_code, created.text)
+        recovery = created.json()["operation"]["metadata"]
+        self.assertEqual(1, recovery["reconcile_version"])
+        self.assertEqual(created.json()["jobs"][0]["id"], recovery["reconcile_jobs"][0]["id"])
+        self.assertEqual(
+            "/etc/nginx/nginx-manager.d/example.test.conf",
+            recovery["reconcile_jobs"][0]["path"],
+        )
+        self.assertNotIn("content", recovery["reconcile_jobs"][0])
         repeated = self.client.post(
             "/api/v1/admin/operations", headers=self.admin_headers, json=body
         )
         self.assertTrue(repeated.json()["idempotent"])
+        conflicting = dict(body)
+        conflicting["request_id"] = "operation-test-conflict-0002"
+        conflict = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=conflicting
+        )
+        self.assertEqual(409, conflict.status_code, conflict.text)
+        self.assertEqual(
+            request_id,
+            conflict.json()["detail"]["operation_id"],
+        )
         job_id = created.json()["jobs"][0]["id"]
         self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
         result = self.client.post(
@@ -801,6 +820,212 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(200, revision.status_code, revision.text)
         self.assertEqual("server { listen 8080; }\n", revision.json()["snapshot"]["config"])
 
+    def test_legacy_operation_schema_migrates_existing_rows_without_ack_lock(self):
+        legacy_path = str(Path(self.tempdir.name) / "legacy-operations.db")
+        connection = sqlite3.connect(legacy_path)
+        try:
+            connection.execute(
+                """CREATE TABLE operations (
+                    id TEXT PRIMARY KEY,
+                    site_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    base_version INTEGER NOT NULL,
+                    candidate_revision_id TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    completed_at INTEGER,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                )"""
+            )
+            connection.execute(
+                """INSERT INTO operations
+                   (id, site_id, kind, status, base_version, candidate_revision_id,
+                    created_by, created_at, updated_at, completed_at, metadata_json)
+                   VALUES (?, ?, 'publish', 'succeeded', 1, NULL, 'legacy-admin', 1, 2, 2, '{}')""",
+                ("legacy-migration-operation", "legacy-migration-site"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        migrated = create_app(replace(self.settings, db_path=legacy_path))
+        migrated.state.database.initialize()
+        with migrated.state.database.connection() as connection:
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(operations)").fetchall()
+            }
+            row = connection.execute(
+                "SELECT reconciliation_status, reconciled_at, reconciled_by "
+                "FROM operations WHERE id = 'legacy-migration-operation'"
+            ).fetchone()
+        self.assertTrue({"reconciliation_status", "reconciled_at", "reconciled_by"} <= columns)
+        self.assertEqual("legacy", row["reconciliation_status"])
+        self.assertIsNone(row["reconciled_at"])
+        self.assertIsNone(row["reconciled_by"])
+    def test_ui_state_reconciliation_ack_is_atomic_and_releases_operation_lock(self):
+        enrolled = self.enroll("reconciliation-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        operation_id = "reconciliation-operation-0001"
+        body = {
+            "request_id": operation_id,
+            "reconciliation_protocol": "ui-state-v1",
+            "site_id": "site-reconciliation",
+            "kind": "publish",
+            "base_version": 0,
+            "candidate": {
+                "id": "site-reconciliation",
+                "domain": "reconciliation.example.test",
+                "config": "server { listen 8080; }\n",
+            },
+            "jobs": [{
+                "node_id": enrolled["agent_id"],
+                "action": "config_apply",
+                "payload": {
+                    "path": "/etc/nginx/nginx-manager.d/reconciliation.conf",
+                    "content": "server { listen 8080; }\n",
+                    "expected_sha256": "missing",
+                },
+            }],
+            "ttl_seconds": 60,
+        }
+        created = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=body
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        self.assertEqual("pending", created.json()["operation"]["reconciliation_status"])
+
+        active_ack = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 0,
+                "state": {"sites": [{"id": "must-not-commit"}]},
+                "reconciled_operation_ids": [operation_id],
+            },
+        )
+        self.assertEqual(409, active_ack.status_code, active_ack.text)
+        self.assertEqual(
+            {"revision": 0, "state": {}},
+            self.client.get("/api/v1/admin/ui-state", headers=self.admin_headers).json(),
+        )
+
+        job_id = created.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        completed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": job_id,
+                "action": "config_apply",
+                "details": {"config_hash": "c" * 64},
+            },
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+        pending = self.client.get(
+            "/api/v1/admin/operations?reconciliation_status=pending",
+            headers=self.admin_headers,
+        ).json()["items"]
+        self.assertEqual([operation_id], [item["id"] for item in pending])
+
+        blocked_body = dict(body)
+        blocked_body["request_id"] = "reconciliation-operation-0002"
+        blocked_body["base_version"] = 1
+        blocked_body["candidate"] = dict(body["candidate"], config="server { listen 8081; }\n")
+        blocked = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=blocked_body
+        )
+        self.assertEqual(409, blocked.status_code, blocked.text)
+        self.assertEqual(operation_id, blocked.json()["detail"]["operation_id"])
+
+        state = {
+            "sites": [{
+                "id": "site-reconciliation",
+                "domain": "reconciliation.example.test",
+                "config": "server { listen 8080; }\n",
+                "version": 1,
+            }]
+        }
+        saved = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 0,
+                "state": state,
+                "reconciled_operation_ids": [operation_id, operation_id],
+            },
+        )
+        self.assertEqual(200, saved.status_code, saved.text)
+        self.assertEqual([operation_id], saved.json()["reconciled_operation_ids"])
+        detail = self.client.get(
+            "/api/v1/admin/operations/" + operation_id, headers=self.admin_headers
+        ).json()["operation"]
+        self.assertEqual("acknowledged", detail["reconciliation_status"])
+        self.assertTrue(detail["reconciled_at"])
+        self.assertEqual("admin", detail["reconciled_by"])
+        self.assertEqual(
+            [],
+            self.client.get(
+                "/api/v1/admin/operations?reconciliation_status=pending",
+                headers=self.admin_headers,
+            ).json()["items"],
+        )
+        audit = self.client.get(
+            "/api/v1/admin/audit?event=ui_state_updated", headers=self.admin_headers
+        ).json()["items"][0]
+        self.assertEqual(1, audit["detail"]["reconciled_operation_count"])
+        self.assertEqual([operation_id], audit["detail"]["reconciled_operation_ids"])
+
+        released = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=blocked_body
+        )
+        self.assertEqual(201, released.status_code, released.text)
+
+    def test_legacy_operation_remains_compatible_without_reconciliation_ack(self):
+        enrolled = self.enroll("legacy-operation-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        body = {
+            "request_id": "legacy-operation-0001",
+            "site_id": "site-legacy-operation",
+            "kind": "publish",
+            "base_version": 0,
+            "candidate": {"id": "site-legacy-operation", "config": "server { listen 80; }"},
+            "jobs": [{
+                "node_id": enrolled["agent_id"],
+                "action": "config_apply",
+                "payload": {
+                    "path": "/etc/nginx/nginx-manager.d/legacy.conf",
+                    "content": "server { listen 80; }",
+                },
+            }],
+        }
+        created = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=body
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        self.assertEqual("legacy", created.json()["operation"]["reconciliation_status"])
+        job_id = created.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        completed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={"status": "succeeded", "job_id": job_id, "action": "config_apply"},
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+
+        next_body = dict(body)
+        next_body["request_id"] = "legacy-operation-0002"
+        next_body["base_version"] = 1
+        next_body["candidate"] = {
+            "id": "site-legacy-operation",
+            "config": "server { listen 81; }",
+        }
+        compatible = self.client.post(
+            "/api/v1/admin/operations", headers=self.admin_headers, json=next_body
+        )
+        self.assertEqual(201, compatible.status_code, compatible.text)
+        self.assertEqual("legacy", compatible.json()["operation"]["reconciliation_status"])
     def test_failed_publish_does_not_consume_the_candidate_version(self):
         enrolled = self.enroll("failed-publish-node")
         agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
@@ -1226,6 +1451,103 @@ class ServerTestCase(unittest.TestCase):
                 "SELECT payload_json FROM jobs WHERE id = ?", (job_id,)
             ).fetchone()["payload_json"]
         self.assertNotIn("PRIVATE KEY", redacted)
+
+    def test_certificate_operation_recovery_metadata_keeps_paths_but_not_pem(self):
+        enrolled = self.enroll("certificate-recovery-node")
+        created = self.client.post(
+            "/api/v1/admin/operations",
+            headers=self.admin_headers,
+            json={
+                "request_id": "certificate-recovery-0001",
+                "site_id": "certificate:cert-recovery",
+                "kind": "certificate",
+                "base_version": 0,
+                "candidate": {"id": "cert-recovery", "domain": "int.example.com"},
+                "jobs": [{
+                    "node_id": enrolled["agent_id"],
+                    "action": "certificate_apply",
+                    "payload": {
+                        "certificate": {
+                            "path": "/apps/nginx/cert/int.example.com.pem",
+                            "pem": "CERTIFICATE MATERIAL MUST NOT LEAK",
+                            "expected_sha256": "missing",
+                        },
+                        "private_key": {
+                            "path": "/apps/nginx/cert/int.example.com.key",
+                            "pem": "PRIVATE KEY MATERIAL MUST NOT LEAK",
+                            "expected_sha256": "missing",
+                        },
+                        "expected_domain": "int.example.com",
+                        "reload": True,
+                    },
+                }],
+            },
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        metadata = created.json()["operation"]["metadata"]
+        recovery = metadata["reconcile_jobs"][0]
+        self.assertEqual("/apps/nginx/cert/int.example.com.pem", recovery["certificate_path"])
+        self.assertEqual("/apps/nginx/cert/int.example.com.key", recovery["private_key_path"])
+        serialized = json.dumps(metadata)
+        self.assertNotIn("CERTIFICATE MATERIAL", serialized)
+        self.assertNotIn("PRIVATE KEY MATERIAL", serialized)
+    def test_certificate_apply_result_retains_safe_paths_without_key_material(self):
+        enrolled = self.enroll()
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [enrolled["agent_id"]],
+                "action": "certificate_apply",
+                "payload": {
+                    "certificate_pem": "certificate material",
+                    "private_key_pem": "private key material",
+                },
+                "ttl_seconds": 60,
+            },
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        job_id = created.json()["jobs"][0]["id"]
+        polled = self.client.post(
+            "/api/v1/agent/poll", headers=agent_headers, json={"limit": 1}
+        )
+        self.assertEqual(job_id, polled.json()["jobs"][0]["id"])
+
+        certificate_path = "/apps/nginx/cert/int.example.com.pem"
+        private_key_path = "/apps/nginx/cert/int.example.com.key"
+        private_material = "-----BEGIN PRIVATE KEY-----\nMUST-NOT-BE-STORED\n-----END PRIVATE KEY-----"
+        completed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": job_id,
+                "action": "certificate_apply",
+                "details": {
+                    "certificate_path": certificate_path,
+                    "private_key_path": private_key_path,
+                    "certificate_sha256": "a" * 64,
+                    "key_material_sha256": "b" * 64,
+                    "private_key_pem": private_material,
+                },
+            },
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+
+        jobs = self.client.get(
+            "/api/v1/admin/jobs?ids={}".format(job_id),
+            headers=self.admin_headers,
+        ).json()["items"]
+        self.assertEqual(1, len(jobs))
+        result = jobs[0]["result"]
+        self.assertEqual(certificate_path, result["certificate_path"])
+        self.assertEqual(private_key_path, result["private_key_path"])
+        self.assertEqual("a" * 64, result["certificate_sha256"])
+        self.assertEqual("b" * 64, result["key_material_sha256"])
+        serialized = json.dumps(jobs[0], ensure_ascii=False)
+        self.assertNotIn("MUST-NOT-BE-STORED", serialized)
+        self.assertNotIn("private_key_pem", serialized)
 
     def test_config_delete_is_a_fixed_action_with_safe_result_metadata(self):
         enrolled = self.enroll()

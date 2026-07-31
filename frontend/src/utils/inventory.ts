@@ -5,6 +5,7 @@ import type {
   SiteRecord,
   UiState,
 } from '../types'
+import { rewriteConfigCertificatePaths } from './certificateConfig'
 import { uid } from './config'
 
 type InventoryFile = {
@@ -179,18 +180,25 @@ function importConfiguration(ui: UiState, file: InventoryFile, node: NodeRecord)
   resolved.nodeConfigEntryIds ||= {}
   resolved.nodeConfigs ||= {}
   const nodeReadOnly = ((resolved.nodeReadOnly ||= {}) as Record<string, boolean>)
+  const certificate = resolved.certificateId
+    ? ui.certificates.find((candidate) => candidate.id === resolved.certificateId)
+    : undefined
+  const expectedContent = certificate
+    ? rewriteConfigCertificatePaths(resolved.config, certificate, node).content
+    : resolved.config
+  const contentMatchesExpected = content === expectedContent
   const changed =
     resolved.nodeHashes[node.id] !== hash ||
     resolved.nodeConfigPaths[node.id] !== path ||
-    (content !== resolved.config && resolved.nodeConfigs[node.id] !== content) ||
-    (content === resolved.config && Object.hasOwn(resolved.nodeConfigs, node.id)) ||
+    (!contentMatchesExpected && resolved.nodeConfigs[node.id] !== content) ||
+    (contentMatchesExpected && Object.hasOwn(resolved.nodeConfigs, node.id)) ||
     !resolved.nodeIds.includes(node.id)
 
   resolved.nodeHashes[node.id] = hash
   resolved.nodeConfigPaths[node.id] = path
   if (file.entry_id) resolved.nodeConfigEntryIds[node.id] = file.entry_id
   nodeReadOnly[node.id] = Boolean(file.read_only)
-  if (content === resolved.config) delete resolved.nodeConfigs[node.id]
+  if (contentMatchesExpected) delete resolved.nodeConfigs[node.id]
   else resolved.nodeConfigs[node.id] = content
   if (!resolved.nodeIds.includes(node.id)) resolved.nodeIds.push(node.id)
   if (Object.keys(resolved.nodeConfigs).length) {

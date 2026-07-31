@@ -32,9 +32,21 @@ export const siteTemplates: SiteTemplateDefinition[] = [
   { key: 'custom', label: '空白配置', description: '从空白 HTTP Conf 开始', context: 'http', resourceType: 'generic', type: 'custom', defaultName: '自定义配置', defaultFilename: 'custom.conf' },
 ]
 
+function proxyEndpoint(value: string) {
+  const normalized = normalizeProxyTarget(value)
+  try {
+    return new URL(normalized).host
+  } catch {
+    return normalized.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/\/.*$/, '')
+  }
+}
 export function renderSiteTemplate(key: SiteTemplateKey, domain: string, target: string) {
   const hostname = domain.trim() || 'api.example.com'
   const upstream = normalizeProxyTarget(target || '127.0.0.1:8080')
+  const balancedUpstreams = (target.trim() || '127.0.0.1:8080')
+    .split(/[,\n]+/)
+    .map((item) => proxyEndpoint(item.trim()))
+    .filter(Boolean)
   if (key === 'http') return defaultSiteConfig(hostname, upstream)
   if (key === 'https') return [
     'server {', '  listen 443 ssl;', `  server_name ${hostname};`, '',
@@ -48,8 +60,10 @@ export function renderSiteTemplate(key: SiteTemplateKey, domain: string, target:
   ].join('\n')
   if (key === 'balanced-https') return [
     'upstream webserver {', '  hash $remote_addr;',
-    '  server 10.0.0.21:8080 weight=3 max_fails=3 fail_timeout=10s max_conns=200;',
-    '  server 10.0.0.22:8080 max_fails=3 fail_timeout=10s;', '}', '', 'server {',
+    ...balancedUpstreams.map((address, index) =>
+      `  server ${address}${index === 0 ? ' weight=3 max_conns=200' : ''} max_fails=3 fail_timeout=10s;`,
+    ),
+    '}', '', 'server {',
     '  listen 443 ssl;', `  server_name ${hostname};`, '',
     '  ssl_certificate     /apps/nginx/cert/example.com.pem;',
     '  ssl_certificate_key /apps/nginx/cert/example.com.key;',

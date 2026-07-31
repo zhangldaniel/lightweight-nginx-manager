@@ -476,6 +476,8 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
         "health_ok",
         "reloaded",
         "nginx_version",
+        "certificate_path",
+        "private_key_path",
         "certificate_sha256",
         "key_material_sha256",
         "certificate_fingerprint",
@@ -1157,6 +1159,7 @@ class OperationCreateRequest(BaseModel):
 
     site_id: str = Field(..., min_length=1, max_length=200)
     request_id: Optional[str] = Field(None, min_length=16, max_length=128)
+    reconciliation_protocol: Optional[Literal["ui-state-v1"]] = None
     kind: Literal["validate", "publish", "delete", "transfer", "certificate", "inventory"]
     base_version: int = Field(0, ge=0, le=1000000000)
     candidate: Dict[str, Any] = Field(default_factory=dict)
@@ -1190,6 +1193,20 @@ class UIStatePutRequest(BaseModel):
 
     revision: int = Field(..., ge=0)
     state: Dict[str, Any]
+    reconciled_operation_ids: List[str] = Field(default_factory=list, max_length=500)
+
+    @field_validator("reconciled_operation_ids")
+    def validate_reconciled_operation_ids(cls, value: List[str]) -> List[str]:
+        result: List[str] = []
+        seen = set()
+        for item in value:
+            item = str(item).strip()
+            if re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", item) is None:
+                raise ValueError("invalid reconciled operation id")
+            if item not in seen:
+                result.append(item)
+                seen.add(item)
+        return result
 
 
 class Database:
@@ -1317,12 +1334,15 @@ class Database:
                     site_id TEXT NOT NULL,
                     kind TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    reconciliation_status TEXT NOT NULL DEFAULT 'legacy',
                     base_version INTEGER NOT NULL,
                     candidate_revision_id TEXT,
                     created_by TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     completed_at INTEGER,
+                    reconciled_at INTEGER,
+                    reconciled_by TEXT,
                     metadata_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE INDEX IF NOT EXISTS operations_list_idx
@@ -1445,6 +1465,21 @@ class Database:
             }
             if "role_checked_at" not in existing_session_columns:
                 connection.execute("ALTER TABLE web_sessions ADD COLUMN role_checked_at INTEGER NOT NULL DEFAULT 0")
+            existing_operation_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(operations)").fetchall()
+            }
+            operation_migrations = {
+                "reconciliation_status": "TEXT NOT NULL DEFAULT 'legacy'",
+                "reconciled_at": "INTEGER",
+                "reconciled_by": "TEXT",
+            }
+            for column, definition in operation_migrations.items():
+                if column not in existing_operation_columns:
+                    connection.execute("ALTER TABLE operations ADD COLUMN {} {}".format(column, definition))
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS operations_reconciliation_idx "
+                "ON operations(reconciliation_status, updated_at DESC, id DESC)"
+            )
 
     def bootstrap_admin(self, username: str, password: str, iterations: int) -> Dict[str, Any]:
         """Create the first Web administrator without exposing a runtime bootstrap secret."""
@@ -1534,11 +1569,15 @@ class Database:
     ) -> Dict[str, int]:
         job_cursor = connection.execute(
             "DELETE FROM jobs WHERE status IN ('succeeded', 'failed', 'expired') "
-            "AND completed_at IS NOT NULL AND completed_at < ?",
+            "AND completed_at IS NOT NULL AND completed_at < ? "
+            "AND (operation_id IS NULL OR NOT EXISTS ("
+            "SELECT 1 FROM operations o WHERE o.id = jobs.operation_id "
+            "AND o.reconciliation_status = 'pending'))",
             (now - job_retention,),
         )
         operation_cursor = connection.execute(
             "DELETE FROM operations WHERE status IN ('succeeded', 'failed', 'partial', 'expired') "
+            "AND reconciliation_status <> 'pending' "
             "AND completed_at IS NOT NULL AND completed_at < ?",
             (now - job_retention,),
         )
@@ -1677,12 +1716,17 @@ def _operation_public(row: sqlite3.Row) -> Dict[str, Any]:
         "site_id": row["site_id"],
         "kind": row["kind"],
         "status": row["status"],
+        "reconciliation_status": (
+            row["reconciliation_status"] if "reconciliation_status" in row.keys() else "legacy"
+        ),
         "base_version": int(row["base_version"]),
         "candidate_revision_id": row["candidate_revision_id"],
         "created_by": row["created_by"],
         "created_at": _utc_iso(row["created_at"]),
         "updated_at": _utc_iso(row["updated_at"]),
         "completed_at": _utc_iso(row["completed_at"]),
+        "reconciled_at": _utc_iso(row["reconciled_at"] if "reconciled_at" in row.keys() else None),
+        "reconciled_by": row["reconciled_by"] if "reconciled_by" in row.keys() else None,
         "metadata": metadata,
     }
 
@@ -1763,7 +1807,9 @@ def _load_ui_state_document(connection: sqlite3.Connection) -> Dict[str, Any]:
     ).fetchone()
     state = json.loads(row["state_json"] or "{}")
     resource_count = connection.execute("SELECT COUNT(*) FROM resources").fetchone()[0]
-    if resource_count or state.get("_resources_split_v1") is True:
+    resources_are_split = bool(resource_count or state.get("_resources_split_v1") is True)
+    state.pop("_resources_split_v1", None)
+    if resources_are_split:
         for kind, state_key in (("site", "sites"), ("certificate", "certificates")):
             resources = connection.execute(
                 "SELECT document_json FROM resources WHERE kind = ? ORDER BY position, id", (kind,)
@@ -2900,6 +2946,7 @@ def create_app(
         admin: Dict[str, Any] = Depends(require_operator),
     ) -> Dict[str, Any]:
         raw_request = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+        reconciliation_protocol = raw_request.pop("reconciliation_protocol", None)
         request_digest = _sha256_text(_canonical_json(raw_request))
         operation_id = request.request_id or str(uuid.uuid4())
         now = int(time.time())
@@ -2943,6 +2990,20 @@ def create_app(
                     "idempotent": True,
                 }
 
+            active_operation = connection.execute(
+                "SELECT id FROM operations WHERE site_id = ? "
+                "AND (status IN ('queued', 'running') OR reconciliation_status = 'pending') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (request.site_id,),
+            ).fetchone()
+            if active_operation is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "resource already has an active operation",
+                        "operation_id": active_operation["id"],
+                    },
+                )
             node_ids = [spec.node_id for spec, _payload, _digest, _sensitive, _ttl in prepared_jobs]
             placeholders = ",".join("?" for _ in node_ids)
             existing_nodes = connection.execute(
@@ -2998,6 +3059,8 @@ def create_app(
                 "job_count": len(prepared_jobs),
                 "node_ids": node_ids,
             }
+            if reconciliation_protocol:
+                metadata["reconciliation_protocol"] = reconciliation_protocol
             if request.kind == "transfer" and isinstance(request.candidate.get("targets"), list):
                 transfer_targets = []
                 for item in request.candidate["targets"][: len(node_ids)]:
@@ -3026,13 +3089,14 @@ def create_app(
                     metadata["transfer_targets"] = transfer_targets
             connection.execute(
                 """INSERT INTO operations
-                   (id, site_id, kind, status, base_version, candidate_revision_id, created_by,
-                    created_at, updated_at, metadata_json)
-                   VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)""",
+                   (id, site_id, kind, status, reconciliation_status, base_version,
+                    candidate_revision_id, created_by, created_at, updated_at, metadata_json)
+                   VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     operation_id,
                     request.site_id,
                     request.kind,
+                    "pending" if reconciliation_protocol == "ui-state-v1" else "legacy",
                     request.base_version,
                     revision_id,
                     admin["username"],
@@ -3041,6 +3105,7 @@ def create_app(
                     _canonical_json(metadata),
                 ),
             )
+            reconcile_jobs: List[Dict[str, Any]] = []
             for spec, payload_json, payload_digest, sensitive, job_ttl in prepared_jobs:
                 job_id = str(uuid.uuid4())
                 expires_at = now + job_ttl
@@ -3070,6 +3135,33 @@ def create_app(
                     "operation_id": operation_id,
                     "expires_at": _utc_iso(expires_at),
                 })
+                reconcile_job: Dict[str, Any] = {
+                    "id": job_id,
+                    "node_id": spec.node_id,
+                    "action": spec.action,
+                }
+                for payload_key in ("path", "source_path", "target_path", "new_sha256"):
+                    value = spec.payload.get(payload_key)
+                    if isinstance(value, str) and 0 < len(value) <= 4096:
+                        reconcile_job[payload_key] = value
+                if spec.action == "certificate_apply":
+                    certificate_target = spec.payload.get("certificate")
+                    private_key_target = spec.payload.get("private_key")
+                    if isinstance(certificate_target, dict):
+                        certificate_path = certificate_target.get("path")
+                        if isinstance(certificate_path, str) and 0 < len(certificate_path) <= 4096:
+                            reconcile_job["certificate_path"] = certificate_path
+                    if isinstance(private_key_target, dict):
+                        private_key_path = private_key_target.get("path")
+                        if isinstance(private_key_path, str) and 0 < len(private_key_path) <= 4096:
+                            reconcile_job["private_key_path"] = private_key_path
+                reconcile_jobs.append(reconcile_job)
+            metadata["reconcile_version"] = 1
+            metadata["reconcile_jobs"] = reconcile_jobs
+            connection.execute(
+                "UPDATE operations SET metadata_json = ? WHERE id = ?",
+                (_canonical_json(metadata), operation_id),
+            )
             Database.audit(
                 connection,
                 admin["auth_source"],
@@ -3092,11 +3184,14 @@ def create_app(
     def list_operations(
         operation_status: Optional[str] = Query(None, alias="status"),
         site_id: Optional[str] = Query(None),
+        reconciliation_status: Optional[str] = Query(None),
         limit: int = Query(100, ge=1, le=500),
         admin: Dict[str, Any] = Depends(require_session),
     ) -> Dict[str, Any]:
         if operation_status and operation_status not in OPERATION_STATES and operation_status != "active":
             raise HTTPException(status_code=400, detail="invalid operation status")
+        if reconciliation_status and reconciliation_status not in {"legacy", "pending", "acknowledged"}:
+            raise HTTPException(status_code=400, detail="invalid reconciliation status")
         conditions: List[str] = []
         parameters: List[Any] = []
         if operation_status == "active":
@@ -3107,6 +3202,9 @@ def create_app(
         if site_id:
             conditions.append("site_id = ?")
             parameters.append(site_id)
+        if reconciliation_status:
+            conditions.append("reconciliation_status = ?")
+            parameters.append(reconciliation_status)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         parameters.append(limit)
         with database.connection() as connection:
@@ -3449,6 +3547,40 @@ def create_app(
                         "state": authoritative["state"],
                     },
                 )
+            reconciled_operation_ids = request.reconciled_operation_ids
+            if reconciled_operation_ids:
+                placeholders = ",".join("?" for _ in reconciled_operation_ids)
+                rows = connection.execute(
+                    "SELECT id, status, reconciliation_status FROM operations WHERE id IN ("
+                    + placeholders
+                    + ")",
+                    reconciled_operation_ids,
+                ).fetchall()
+                by_id = {row["id"]: row for row in rows}
+                missing = [operation_id for operation_id in reconciled_operation_ids if operation_id not in by_id]
+                if missing:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"message": "operation cannot be reconciled because it no longer exists", "operation_ids": missing},
+                    )
+                active = [
+                    operation_id
+                    for operation_id in reconciled_operation_ids
+                    if by_id[operation_id]["status"] in {"queued", "running"}
+                ]
+                if active:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"message": "active operation cannot be reconciled", "operation_ids": active},
+                    )
+                connection.execute(
+                    "UPDATE operations SET reconciliation_status = 'acknowledged', "
+                    "reconciled_at = COALESCE(reconciled_at, ?), "
+                    "reconciled_by = COALESCE(reconciled_by, ?) WHERE id IN ("
+                    + placeholders
+                    + ") AND reconciliation_status <> 'acknowledged'",
+                    [now, admin["username"]] + reconciled_operation_ids,
+                )
             for kind, documents in resources.items():
                 ids = [item[0] for item in documents]
                 if ids:
@@ -3502,9 +3634,15 @@ def create_app(
                 "ui_state_updated",
                 "ui_state",
                 "1",
-                {"revision": next_revision, "state_sha256": _sha256_text(full_state_json), "role": admin["role"]},
+                {
+                    "revision": next_revision,
+                    "state_sha256": _sha256_text(full_state_json),
+                    "role": admin["role"],
+                    "reconciled_operation_count": len(request.reconciled_operation_ids),
+                    "reconciled_operation_ids": request.reconciled_operation_ids,
+                },
             )
-        return {"revision": next_revision, "state": request.state}
+        return {"revision": next_revision, "state": request.state, "reconciled_operation_ids": request.reconciled_operation_ids}
 
     return api
 

@@ -3662,6 +3662,7 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
         # to prevent a later certificate update from overwriting an unknown key.
         details = {
             "certificate_path": raw.get("certificate_path"),
+            "private_key_path": raw.get("private_key_path"),
             "certificate_sha256": raw.get("certificate_sha256"),
             "key_material_sha256": raw.get("private_key_sha256"),
             "certificate_fingerprint": raw.get("certificate_fingerprint"),

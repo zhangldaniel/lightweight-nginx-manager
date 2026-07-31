@@ -1042,6 +1042,8 @@ class AgentTestCase(unittest.TestCase):
         serialized = json.dumps(server_result)
         self.assertNotIn("VERY-SECRET-MATERIAL", serialized)
         self.assertNotIn("private_key_sha256", serialized)
+        self.assertTrue(Path(server_result["details"]["certificate_path"]).samefile(cert_path))
+        self.assertTrue(Path(server_result["details"]["private_key_path"]).samefile(key_path))
         self.assertEqual(hashlib.sha256(private_key.encode()).hexdigest(), server_result["details"]["key_material_sha256"])
         if os.name == "posix":
             self.assertEqual(0o600, key_path.stat().st_mode & 0o777)

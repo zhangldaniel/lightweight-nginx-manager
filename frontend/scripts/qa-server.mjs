@@ -101,10 +101,15 @@ const certificate = {
   nodePaths: Object.fromEntries(
     nodes.map((node) => [
       node.id,
-      {
-        certificatePath: '/apps/nginx/cert/int.example.com.pem',
-        keyPath: '/apps/nginx/cert/int.example.com.key',
-      },
+      node.id === 'node-bj-01'
+        ? {
+            certificatePath: '/usr/local/nginx/certs/int.example.com.pem',
+            keyPath: '/usr/local/nginx/certs/int.example.com.key',
+          }
+        : {
+            certificatePath: '/apps/nginx/cert/int.example.com.pem',
+            keyPath: '/apps/nginx/cert/int.example.com.key',
+          },
     ]),
   ),
 }

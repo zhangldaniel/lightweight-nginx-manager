@@ -2,8 +2,12 @@ import { spawn } from 'node:child_process'
 import { access, mkdir } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { qaServer } from './qa-server.mjs'
 
+process.env.QA_PORT ||= '4180'
+const port = Number(process.env.QA_PORT)
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error(`Invalid QA_PORT: ${process.env.QA_PORT}`)
+}
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const outputRoot = resolve(projectRoot, 'artifacts')
 await mkdir(outputRoot, { recursive: true })
@@ -29,8 +33,8 @@ if (!browser) throw new Error('No supported headless browser was found')
 async function capture(route, filename) {
   const target = resolve(outputRoot, filename)
   const url = route.startsWith('/')
-    ? `http://127.0.0.1:4179${route}`
-    : `http://127.0.0.1:4179/#/${route}`
+    ? `http://127.0.0.1:${port}${route}`
+    : `http://127.0.0.1:${port}/#/${route}`
   await new Promise((resolveCapture, rejectCapture) => {
     const child = spawn(
       browser,
@@ -53,6 +57,8 @@ async function capture(route, filename) {
     })
   })
 }
+
+const { qaServer } = await import('./qa-server.mjs')
 
 try {
   await capture('/logout-preview#/login', 'vue-login.png')

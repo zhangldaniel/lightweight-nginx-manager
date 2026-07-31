@@ -8,6 +8,7 @@ import {
   sha256,
   uid,
 } from '../utils/config'
+import { configForCertificateNode } from '../utils/certificateConfig'
 import { processInventoryJobs } from '../utils/inventory'
 import type {
   AuditRecord,
@@ -24,6 +25,8 @@ import type {
   Tone,
   UiState,
 } from '../types'
+
+const MAX_RECONCILE_BATCH = 500
 
 const emptyState = (): UiState => ({
   sites: [],
@@ -45,12 +48,40 @@ function normalizedState(value?: Partial<UiState>): UiState {
     importedCertificateInventoryJobs: Array.isArray(value?.importedCertificateInventoryJobs)
       ? value.importedCertificateInventoryJobs
       : [],
+    // Legacy persisted shape only; recovery is driven exclusively by Server pending reconciliation.
     processedOperationIds: Array.isArray(value?.processedOperationIds)
       ? value.processedOperationIds
       : [],
   }
 }
 
+function clonePlain<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function isRetryableApiError(error: unknown) {
+  if (!(error instanceof ApiError)) return true
+  return error.status >= 500 || [408, 409, 425, 429].includes(error.status)
+}
+
+function isPermanentApiError(error: unknown) {
+  return error instanceof ApiError && error.status >= 400 && !isRetryableApiError(error)
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(',')}]`
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+function sameUiState(left: UiState, right: UiState) {
+  return canonicalJson(normalizedState(left)) === canonicalJson(normalizedState(right))
+}
 export const useConsoleStore = defineStore('console', () => {
   const session = ref<Session | null>(null)
   const booting = ref(true)
@@ -160,22 +191,45 @@ export const useConsoleStore = defineStore('console', () => {
         api.uiState(),
         api.nodes(),
         api.jobs(),
-        api.operations(),
+        api.operations(500),
         api.enrollments(),
+        api.reconciliationOperations(),
       ] as const
-      const [stateDoc, nodeDoc, jobDoc, operationDoc, enrollmentDoc] = await Promise.all(requests)
-      stateRevision.value = stateDoc.revision
-      ui.value = normalizedState(stateDoc.state)
+      const [stateDoc, nodeDoc, jobDoc, operationDoc, enrollmentDoc, reconciliationDoc] =
+        await Promise.all(requests)
+      if (!lastRefreshAt.value || stateDoc.revision > stateRevision.value) {
+        stateRevision.value = stateDoc.revision
+        ui.value = normalizedState(stateDoc.state)
+      }
       nodes.value = nodeDoc.items
       jobs.value = jobDoc.items
       operations.value = operationDoc.items
+      const listedOperationIds = new Set(operations.value.map((item) => item.id))
+      for (const operation of reconciliationDoc.items) {
+        if (!listedOperationIds.has(operation.id)) operations.value.push(operation)
+      }
       enrollments.value = enrollmentDoc.items
+      const recovery = recoverOrphanOperations(reconciliationDoc.items)
       const imported = processInventoryJobs(ui.value, nodes.value, jobs.value)
-      if (imported.changed && canOperate.value) {
+      if (
+        (imported.changed || recovery.recovered > 0 || recovery.orphanOperationIds.length > 0) &&
+        canOperate.value
+      ) {
         try {
-          const saved = await api.saveUiState(stateRevision.value, ui.value)
+          const saved = await api.saveUiState(
+            stateRevision.value,
+            ui.value,
+            recovery.orphanOperationIds,
+          )
           stateRevision.value = saved.revision
           ui.value = normalizedState(saved.state)
+          if (recovery.orphanOperationIds.length) {
+            notify(
+              '已释放无法关联的历史任务',
+              'warning',
+              `${recovery.orphanOperationIds.length} 条终态任务找不到对应资源；已记录审计，请核对节点实际状态。`,
+            )
+          }
           if (imported.failures) {
             notify(
               '部分节点扫描失败',
@@ -228,15 +282,107 @@ export const useConsoleStore = defineStore('console', () => {
     }
   }
 
+  function recoverOrphanOperations(pendingOperations: OperationRecord[]) {
+    let recovered = 0
+    const orphanOperationIds: string[] = []
+    for (const operation of pendingOperations) {
+      const terminal = !['queued', 'running'].includes(operation.status)
+      const metadata = operation.metadata || {}
+      const rawJobs = Array.isArray(metadata.reconcile_jobs) ? metadata.reconcile_jobs : []
+      if (Number(metadata.reconcile_version || 0) !== 1 || !rawJobs.length) {
+        if (terminal) orphanOperationIds.push(operation.id)
+        continue
+      }
+      const recoveryJobs = rawJobs
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => item as Record<string, unknown>)
+      if (!recoveryJobs.length) {
+        if (terminal) orphanOperationIds.push(operation.id)
+        continue
+      }
+
+      if (operation.site_id.startsWith('certificate:')) {
+        const certificateId = operation.site_id.slice('certificate:'.length)
+        const certificate = certificates.value.find((item) => item.id === certificateId)
+        if (!certificate) {
+          if (terminal) orphanOperationIds.push(operation.id)
+          continue
+        }
+        if (certificate.pendingRemote) continue
+        certificate.pendingRemote = {
+          operationId: operation.id,
+          recovered: true,
+          jobs: recoveryJobs.map((job) => ({
+            id: String(job.id || ''),
+            nodeId: String(job.node_id || ''),
+            certificatePath: String(job.certificate_path || ''),
+            keyPath: String(job.private_key_path || ''),
+          })),
+        }
+        if (!terminal) certificate.status = 'replacing'
+        recovered += 1
+        continue
+      }
+
+      const site = sites.value.find((item) => item.id === operation.site_id)
+      if (!site) {
+        if (terminal) orphanOperationIds.push(operation.id)
+        continue
+      }
+      if (site.pendingRemote) continue
+      const transferTargets = Array.isArray(metadata.transfer_targets)
+        ? (metadata.transfer_targets as Array<Record<string, unknown>>)
+        : []
+      const action = String(recoveryJobs[0]?.action || '')
+      const operationKind =
+        operation.kind === 'validate' && action === 'nginx_reload' ? 'reload' : operation.kind
+      const baseStatus =
+        operationKind === 'reload'
+          ? 'published'
+          : site.status === 'publishing'
+            ? 'published'
+            : site.status
+      site.pendingRemote = {
+        operationId: operation.id,
+        operation: operationKind,
+        publish: operation.kind === 'publish',
+        baseStatus,
+        recovered: true,
+        targetNodeIds: recoveryJobs.map((job) => String(job.node_id || '')).filter(Boolean),
+        jobs: recoveryJobs.map((job) => {
+          const nodeId = String(job.node_id || '')
+          const target = transferTargets.find((item) => String(item.node_id || '') === nodeId)
+          return {
+            id: String(job.id || ''),
+            nodeId,
+            candidateHash: String(job.new_sha256 || ''),
+            path: String(target?.path || job.target_path || job.path || ''),
+            entryId: String(target?.entry_id || ''),
+            migration: Boolean(target?.migration),
+          }
+        }),
+      }
+      if (!terminal) site.status = 'publishing'
+      recovered += 1
+    }
+    return { recovered, orphanOperationIds: [...new Set(orphanOperationIds)] }
+  }
   async function reconcilePendingOperations() {
+    if (!canOperate.value) return
+    const stateBeforeReconcile = clonePlain(ui.value)
+    const reconciledOperationIds: string[] = []
+    const missingOperationIds: string[] = []
     let changed = false
+    let processedResourceCount = 0
     for (const site of sites.value) {
+      if (processedResourceCount >= MAX_RECONCILE_BATCH) break
       const pending = site.pendingRemote as
         | {
             operationId?: string
             operation?: string
             publish?: boolean
             baseStatus?: string
+            recovered?: boolean
             targetNodeIds?: string[]
             jobs?: Array<{
               id: string
@@ -245,59 +391,112 @@ export const useConsoleStore = defineStore('console', () => {
               path?: string
               entryId?: string
               migration?: boolean
+              content?: string
             }>
           }
         | undefined
       if (!pending?.operationId) continue
-      const operation = operations.value.find((item) => item.id === pending.operationId)
-      if (!operation || ['queued', 'running'].includes(operation.status)) continue
-      const operationJobs = jobs.value.filter((item) => item.operation_id === operation.id)
-      const allSucceeded = operation.status === 'succeeded'
-      if (allSucceeded && pending.operation === 'delete') {
-        const removed = new Set(pending.targetNodeIds || [])
+      let detail: Awaited<ReturnType<typeof api.operation>>
+      try {
+        detail = await api.operation(pending.operationId)
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          site.updatedAt = new Date().toISOString()
+          site.status =
+            pending.operation === 'validate'
+              ? pending.baseStatus || site.status || 'published'
+              : 'failed'
+          site.lastFailure = {
+            summary: '操作记录已不存在，已释放待处理状态；请核对节点上的实际配置。',
+            stage: 'operation_missing',
+            node: '',
+            operationId: pending.operationId,
+          }
+          missingOperationIds.push(pending.operationId)
+          delete site.pendingRemote
+          processedResourceCount += 1
+          changed = true
+          continue
+        }
+        if (isRetryableApiError(error)) continue
+        ui.value = stateBeforeReconcile
+        throw error
+      }
+      const operation = detail.operation
+      if (['queued', 'running'].includes(operation.status)) continue
+
+      const operationJobs = detail.jobs
+      const jobById = new Map(operationJobs.map((item) => [item.id, item]))
+      const pendingJobs = pending.jobs || []
+      if (
+        pendingJobs.some((item) => {
+          const job = jobById.get(item.id)
+          return !job || ['queued', 'running'].includes(job.status)
+        })
+      ) continue
+      const successfulItems = pendingJobs.filter(
+        (item) => jobById.get(item.id)?.status === 'succeeded',
+      )
+      const allSucceeded =
+        operation.status === 'succeeded' && successfulItems.length === pendingJobs.length
+      site.nodeHashes ||= {}
+      site.nodeConfigPaths ||= {}
+      site.nodeConfigEntryIds ||= {}
+      site.nodeConfigs ||= {}
+
+      if (pending.operation === 'delete') {
+        const removed = new Set(successfulItems.map((item) => item.nodeId))
         site.nodeIds = site.nodeIds.filter((nodeId) => !removed.has(nodeId))
         for (const nodeId of removed) {
-          delete site.nodeHashes?.[nodeId]
-          delete site.nodeConfigPaths?.[nodeId]
-          delete site.nodeConfigs?.[nodeId]
-          delete site.nodeConfigEntryIds?.[nodeId]
+          delete site.nodeHashes[nodeId]
+          delete site.nodeConfigPaths[nodeId]
+          delete site.nodeConfigs[nodeId]
+          delete site.nodeConfigEntryIds[nodeId]
         }
-        site.status = site.nodeIds.length ? 'published' : 'unassigned'
-        site.updatedAt = new Date().toISOString()
-        delete site.lastFailure
-      } else if (allSucceeded && pending.operation === 'transfer') {
-        site.nodeHashes ||= {}
-        site.nodeConfigPaths ||= {}
-        site.nodeConfigEntryIds ||= {}
-        site.nodeConfigs ||= {}
-        for (const item of pending.jobs || []) {
-          const job = operationJobs.find((candidate) => candidate.id === item.id)
+      } else if (pending.operation === 'transfer') {
+        const certificate = site.certificateId
+          ? certificates.value.find((item) => item.id === site.certificateId)
+          : undefined
+        for (const item of successfulItems) {
+          const job = jobById.get(item.id)
           const hash = String(job?.result?.config_hash || item.candidateHash || '')
           if (hash) site.nodeHashes[item.nodeId] = hash
           if (item.path) site.nodeConfigPaths[item.nodeId] = item.path
           if (item.entryId) site.nodeConfigEntryIds[item.nodeId] = item.entryId
-          delete site.nodeConfigs[item.nodeId]
+          const node = nodes.value.find((candidate) => candidate.id === item.nodeId)
+          const expected = node ? configForCertificateNode(site.config, certificate, node) : site.config
+          if (item.content && item.content !== expected) site.nodeConfigs[item.nodeId] = item.content
+          else delete site.nodeConfigs[item.nodeId]
           if (!site.nodeIds.includes(item.nodeId)) site.nodeIds.push(item.nodeId)
         }
-        site.status = 'published'
-        site.updatedAt = new Date().toISOString()
-        delete site.lastFailure
-      } else if (allSucceeded && pending.publish) {
-        site.version = Number(site.version || 0) + 1
-        site.status = 'published'
-        site.updatedAt = new Date().toISOString()
-        site.nodeHashes = site.nodeHashes || {}
-        for (const item of pending.jobs || []) {
+      } else if (pending.publish) {
+        for (const item of successfulItems) {
           if (item.candidateHash) site.nodeHashes[item.nodeId] = item.candidateHash
+          delete site.nodeConfigs[item.nodeId]
         }
-        delete site.lastFailure
-      } else if (allSucceeded) {
-        site.status = pending.baseStatus || site.status || 'published'
+        if (allSucceeded) site.version = Number(site.version || 0) + 1
+      }
+
+      site.updatedAt = new Date().toISOString()
+      if (allSucceeded) {
+        site.status =
+          pending.operation === 'delete' && !site.nodeIds.length
+            ? 'unassigned'
+            : pending.publish || ['delete', 'transfer'].includes(pending.operation || '')
+              ? 'published'
+              : pending.baseStatus || site.status || 'published'
+        if (pending.operation === 'transfer' && pending.recovered) {
+          site.status = 'drift'
+          site.changeNote = '已恢复配置迁移任务；请扫描节点配置确认实际正文'
+        }
         delete site.lastFailure
       } else {
         const failed = operationJobs.find((item) => item.status !== 'succeeded')
         const result = failed?.result || {}
-        site.status = pending.publish ? 'failed' : pending.baseStatus || site.status || 'published'
+        site.status =
+          pending.operation === 'validate'
+            ? pending.baseStatus || site.status || 'published'
+            : 'failed'
         site.lastFailure = {
           summary: String(result.error || result.output || 'Agent 未完成本次操作'),
           stage: String(result.failure_stage || operation.kind || 'operation'),
@@ -305,44 +504,87 @@ export const useConsoleStore = defineStore('console', () => {
           operationId: operation.id,
         }
       }
+      reconciledOperationIds.push(operation.id)
       delete site.pendingRemote
+      processedResourceCount += 1
       changed = true
     }
+
     for (const certificate of certificates.value) {
+      if (processedResourceCount >= MAX_RECONCILE_BATCH) break
       const pending = certificate.pendingRemote as
         | {
             operationId?: string
-            jobs?: Array<{ id: string; nodeId: string }>
+            jobs?: Array<{
+              id: string
+              nodeId: string
+              certificatePath?: string
+              keyPath?: string
+            }>
           }
         | undefined
       if (!pending?.operationId) continue
-      const operation = operations.value.find((item) => item.id === pending.operationId)
-      if (!operation || ['queued', 'running'].includes(operation.status)) continue
-      const operationJobs = jobs.value.filter((item) => item.operation_id === operation.id)
-      if (operation.status === 'succeeded') {
-        certificate.nodeHashes ||= {}
-        certificate.nodePaths ||= {}
-        for (const item of pending.jobs || []) {
-          const job = operationJobs.find((candidate) => candidate.id === item.id)
-          if (!job || job.status !== 'succeeded') continue
-          const result = job.result || {}
-          certificate.nodeHashes[item.nodeId] = {
-            certificateHash: String(result.certificate_sha256 || ''),
-            keyHash: String(result.key_material_sha256 || result.private_key_sha256 || ''),
+      let detail: Awaited<ReturnType<typeof api.operation>>
+      try {
+        detail = await api.operation(pending.operationId)
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          certificate.status = 'failed'
+          certificate.lastFailure = {
+            summary: '操作记录已不存在，已释放待处理状态；请核对节点上的实际证书。',
+            node: '',
+            operationId: pending.operationId,
           }
-          const certificatePath = String(result.certificate_path || '')
-          const keyPath = String(result.private_key_path || '')
-          if (certificatePath && keyPath) {
-            certificate.nodePaths[item.nodeId] = { certificatePath, keyPath }
-          }
-          if (!certificate.nodeIds.includes(item.nodeId)) certificate.nodeIds.push(item.nodeId)
-          certificate.fingerprint =
-            String(result.certificate_fingerprint || certificate.fingerprint || '') || undefined
-          certificate.issuer =
-            String(result.certificate_issuer || certificate.issuer || '') || undefined
-          certificate.expiresAt =
-            String(result.certificate_not_after || certificate.expiresAt || '') || undefined
+          missingOperationIds.push(pending.operationId)
+          delete certificate.pendingRemote
+          processedResourceCount += 1
+          changed = true
+          continue
         }
+        if (isRetryableApiError(error)) continue
+        ui.value = stateBeforeReconcile
+        throw error
+      }
+      const operation = detail.operation
+      if (['queued', 'running'].includes(operation.status)) continue
+
+      const operationJobs = detail.jobs
+      const jobById = new Map(operationJobs.map((item) => [item.id, item]))
+      const pendingJobs = pending.jobs || []
+      if (
+        pendingJobs.some((item) => {
+          const job = jobById.get(item.id)
+          return !job || ['queued', 'running'].includes(job.status)
+        })
+      ) continue
+      certificate.nodeHashes ||= {}
+      certificate.nodePaths ||= {}
+      for (const item of pending.jobs || []) {
+        const job = jobById.get(item.id)
+        if (!job || job.status !== 'succeeded') continue
+        const result = job.result || {}
+        const certificateHash = String(result.certificate_sha256 || '')
+        const keyHash = String(result.key_material_sha256 || result.private_key_sha256 || '')
+        const knownHashes = certificate.nodeHashes[item.nodeId] || {}
+        certificate.nodeHashes[item.nodeId] = {
+          certificateHash: certificateHash || knownHashes.certificateHash,
+          keyHash: keyHash || knownHashes.keyHash,
+        }
+        const certificatePath = String(result.certificate_path || item.certificatePath || '')
+        const keyPath = String(result.private_key_path || item.keyPath || '')
+        if (certificatePath && keyPath) {
+          certificate.nodePaths[item.nodeId] = { certificatePath, keyPath }
+        }
+        if (!certificate.nodeIds.includes(item.nodeId)) certificate.nodeIds.push(item.nodeId)
+        certificate.fingerprint =
+          String(result.certificate_fingerprint || certificate.fingerprint || '') || undefined
+        certificate.issuer =
+          String(result.certificate_issuer || certificate.issuer || '') || undefined
+        certificate.expiresAt =
+          String(result.certificate_not_after || certificate.expiresAt || '') || undefined
+      }
+
+      if (operation.status === 'succeeded') {
         certificate.status = 'normal'
         delete certificate.lastFailure
       } else {
@@ -356,24 +598,115 @@ export const useConsoleStore = defineStore('console', () => {
           operationId: operation.id,
         }
       }
+      reconciledOperationIds.push(operation.id)
       delete certificate.pendingRemote
+      processedResourceCount += 1
       changed = true
     }
-    if (changed && canOperate.value) {
+
+    if (changed) {
+      const attemptedRevision = stateRevision.value
+      const desiredState = clonePlain(ui.value)
       try {
-        const response = await api.saveUiState(stateRevision.value, ui.value)
+        const response = await api.saveUiState(
+          attemptedRevision,
+          desiredState,
+          reconciledOperationIds,
+        )
         stateRevision.value = response.revision
         ui.value = normalizedState(response.state)
-      } catch {
-        // A concurrent UI save wins. The next refresh reloads the authoritative state.
+      } catch (error) {
+        if (isPermanentApiError(error)) {
+          ui.value = stateBeforeReconcile
+          notify('对账结果无法保存', 'danger', apiMessage(error))
+          throw error
+        }
+        try {
+          const fresh = await api.uiState()
+          const committed =
+            fresh.revision > attemptedRevision && sameUiState(fresh.state, desiredState)
+          stateRevision.value = fresh.revision
+          ui.value = normalizedState(fresh.state)
+          if (!committed) return
+        } catch {
+          ui.value = stateBeforeReconcile
+          throw error
+        }
+      }
+      if (missingOperationIds.length) {
+        notify(
+          '已释放缺失的操作记录',
+          'warning',
+          `${missingOperationIds.length} 条记录无法读取；已保留失败说明，请核对节点实际状态。`,
+        )
       }
     }
   }
-
+  async function persistRemoteState(apply: () => void, successMessage: string) {
+    const stateBeforeApply = clonePlain(ui.value)
+    let lastError: unknown = new Error('远端任务状态保存失败')
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      apply()
+      const attemptedRevision = stateRevision.value
+      const desiredState = clonePlain(ui.value)
+      try {
+        const response = await api.saveUiState(attemptedRevision, desiredState)
+        stateRevision.value = response.revision
+        ui.value = normalizedState(response.state)
+        notify(successMessage, 'success')
+        return
+      } catch (error) {
+        lastError = error
+        if (isPermanentApiError(error)) {
+          try {
+            const fresh = await api.uiState()
+            stateRevision.value = fresh.revision
+            ui.value = normalizedState(fresh.state)
+          } catch {
+            ui.value = stateBeforeApply
+            lastRefreshAt.value = null
+          }
+          notify(
+            '远端任务已创建，但状态保存被拒绝',
+            'danger',
+            `${apiMessage(error)}；任务可由后续刷新从服务端恢复。`,
+          )
+          throw error
+        }
+        try {
+          const fresh = await api.uiState()
+          const committed =
+            fresh.revision > attemptedRevision && sameUiState(fresh.state, desiredState)
+          stateRevision.value = fresh.revision
+          ui.value = normalizedState(fresh.state)
+          if (committed) {
+            notify(successMessage, 'success')
+            return
+          }
+        } catch {
+          if (attempt === 2) {
+            ui.value = stateBeforeApply
+            lastRefreshAt.value = null
+            throw error
+          }
+        }
+      }
+    }
+    ui.value = stateBeforeApply
+    lastRefreshAt.value = null
+    try {
+      await refresh(false, true)
+    } catch {
+      // The server-side operation metadata remains the recovery source.
+    }
+    throw lastError
+  }
   async function saveUiState(successMessage = '已保存') {
     if (!canOperate.value) throw new Error('当前账号只有查看权限')
+    const attemptedRevision = stateRevision.value
+    const desiredState = clonePlain(ui.value)
     try {
-      const response = await api.saveUiState(stateRevision.value, ui.value)
+      const response = await api.saveUiState(attemptedRevision, desiredState)
       stateRevision.value = response.revision
       ui.value = normalizedState(response.state)
       if (successMessage) notify(successMessage, 'success')
@@ -398,10 +731,22 @@ export const useConsoleStore = defineStore('console', () => {
         notify('保存冲突，已加载服务器最新内容', 'warning', '请核对后重新提交。')
         return false
       }
+      try {
+        const fresh = await api.uiState()
+        const committed =
+          fresh.revision > attemptedRevision && sameUiState(fresh.state, desiredState)
+        stateRevision.value = fresh.revision
+        ui.value = normalizedState(fresh.state)
+        if (committed) {
+          if (successMessage) notify(successMessage, 'success')
+          return true
+        }
+      } catch {
+        lastRefreshAt.value = null
+      }
       throw error
     }
   }
-
   async function upsertSite(site: SiteRecord) {
     const index = sites.value.findIndex((item) => item.id === site.id)
     if (index >= 0) sites.value[index] = site
@@ -515,12 +860,27 @@ export const useConsoleStore = defineStore('console', () => {
       jobs: jobSpecs,
       ttl_seconds: 300,
     })
-    certificate.pendingRemote = {
+    const pendingRemote = {
       operationId: response.operation.id,
-      jobs: response.jobs.map((job) => ({ id: job.id, nodeId: job.node_id })),
+      jobs: response.jobs.map((job) => {
+        const spec = jobSpecs.find((item) => item.node_id === job.node_id)
+        const payload = spec?.payload as Record<string, unknown> | undefined
+        const certificateTarget = payload?.certificate as Record<string, unknown> | undefined
+        const keyTarget = payload?.private_key as Record<string, unknown> | undefined
+        return {
+          id: job.id,
+          nodeId: job.node_id,
+          certificatePath: String(certificateTarget?.path || ''),
+          keyPath: String(keyTarget?.path || ''),
+        }
+      }),
     }
-    certificate.status = 'replacing'
-    await saveUiState('证书替换任务已提交')
+    await persistRemoteState(() => {
+      const current = certificates.value.find((item) => item.id === certificate.id)
+      if (!current) throw new Error('证书记录不存在')
+      current.pendingRemote = pendingRemote
+      current.status = 'replacing'
+    }, '证书替换任务已提交')
   }
 
   async function runSite(siteId: string, publish: boolean) {
@@ -536,6 +896,10 @@ export const useConsoleStore = defineStore('console', () => {
     if (!saved) return
     site = sites.value.find((item) => item.id === siteId)
     if (!site) return
+    const certificate = site.certificateId
+      ? certificates.value.find((item) => item.id === site?.certificateId)
+      : undefined
+    if (site.certificateId && !certificate) throw new Error('所选证书已不存在，请重新绑定')
 
     const jobsToCreate: Array<Record<string, unknown>> = []
     const pendingJobs: Array<{ id: string; nodeId: string; candidateHash: string }> = []
@@ -545,7 +909,7 @@ export const useConsoleStore = defineStore('console', () => {
       if (!knownHash && site.version > 0) {
         throw new Error(`${node.node_name} 缺少当前配置 Hash，请先重新扫描节点配置`)
       }
-      const content = String(site.config || '')
+      const content = configForCertificateNode(String(site.config || ''), certificate, node)
       const candidateHash = await sha256(content)
       if (publish && knownHash && knownHash.toLowerCase() === candidateHash) {
         unchanged += 1
@@ -566,16 +930,40 @@ export const useConsoleStore = defineStore('console', () => {
     }
 
     if (publish && unchanged === targets.length) {
-      await api.createJobs(
-        targets.map((node) => node.id),
-        'nginx_reload',
-      )
-      notify('配置未变化，已提交 nginx -t 和 reload', 'success', `版本保持 v${site.version}`)
+      const candidate = clonePlain(site)
+      delete candidate.pendingRemote
+      delete candidate.lastFailure
+      const response = await api.createOperation({
+        request_id: uid('operation'),
+        site_id: site.id,
+        kind: 'validate',
+        base_version: Number(site.version || 0),
+        candidate,
+        jobs: targets.map((node) => ({ node_id: node.id, action: 'nginx_reload', payload: {} })),
+        ttl_seconds: 300,
+      })
+      const pendingRemote = {
+        operationId: response.operation.id,
+        operation: 'reload',
+        publish: false,
+        baseStatus: 'published',
+        jobs: response.jobs.map((job) => ({
+          id: job.id,
+          nodeId: job.node_id,
+          candidateHash: site?.nodeHashes?.[job.node_id] || '',
+        })),
+      }
+      await persistRemoteState(() => {
+        const current = sites.value.find((item) => item.id === siteId)
+        if (!current) throw new Error('站点不存在')
+        current.pendingRemote = pendingRemote
+        current.status = 'publishing'
+      }, `配置未变化，已提交 nginx -t 和 reload；版本保持 v${site.version}`)
       return
     }
     if (!jobsToCreate.length) throw new Error('没有需要提交的目标任务')
 
-    const candidate = structuredClone(site)
+    const candidate = clonePlain(site)
     delete candidate.pendingRemote
     delete candidate.lastFailure
     const response = await api.createOperation({
@@ -596,15 +984,19 @@ export const useConsoleStore = defineStore('console', () => {
         candidateHash: String(payload?.new_sha256 || ''),
       })
     }
-    site.pendingRemote = {
+    const pendingRemote = {
       operationId: response.operation.id,
       operation: publish ? 'publish' : 'validate',
       publish,
       baseStatus: site.status,
       jobs: pendingJobs,
     }
-    if (publish) site.status = 'publishing'
-    await saveUiState(publish ? '发布任务已提交' : '逐节点校验已提交')
+    await persistRemoteState(() => {
+      const current = sites.value.find((item) => item.id === siteId)
+      if (!current) throw new Error('站点不存在')
+      current.pendingRemote = pendingRemote
+      if (publish) current.status = 'publishing'
+    }, publish ? '发布任务已提交' : '逐节点校验已提交')
   }
 
   async function removeSiteFromNodes(siteId: string, nodeIds: string[]) {
@@ -642,7 +1034,7 @@ export const useConsoleStore = defineStore('console', () => {
       jobs: jobSpecs,
       ttl_seconds: 300,
     })
-    site.pendingRemote = {
+    const pendingRemote = {
       operationId: response.operation.id,
       operation: 'delete',
       publish: false,
@@ -650,8 +1042,12 @@ export const useConsoleStore = defineStore('console', () => {
       targetNodeIds: nodeIds,
       jobs: response.jobs.map((job) => ({ id: job.id, nodeId: job.node_id })),
     }
-    site.status = 'publishing'
-    await saveUiState('安全移除任务已提交')
+    await persistRemoteState(() => {
+      const current = sites.value.find((item) => item.id === siteId)
+      if (!current) throw new Error('站点不存在')
+      current.pendingRemote = pendingRemote
+      current.status = 'publishing'
+    }, '安全移除任务已提交')
   }
 
   async function transferSite(
@@ -670,8 +1066,13 @@ export const useConsoleStore = defineStore('console', () => {
     site = sites.value.find((item) => item.id === siteId)
     if (!site) return
 
-    const candidateHash = await sha256(site.config)
+    const certificate = site.certificateId
+      ? certificates.value.find((item) => item.id === site?.certificateId)
+      : undefined
+    if (site.certificateId && !certificate) throw new Error('所选证书已不存在，请重新绑定')
     const jobs: Array<Record<string, unknown>> = []
+    const candidateHashes = new Map<string, string>()
+    const candidateContents = new Map<string, string>()
     const targetMetadata: Array<{
       node_id: string
       path: string
@@ -684,6 +1085,11 @@ export const useConsoleStore = defineStore('console', () => {
       if (node.status === 'offline') throw new Error(`${node.node_name} 当前离线`)
       const path = configPathForEntry(site, node, target.entryId)
       const migration = site.nodeIds.includes(node.id)
+      const sourceContent = migration ? site.nodeConfigs?.[node.id] || site.config : site.config
+      const content = configForCertificateNode(sourceContent, certificate, node)
+      const candidateHash = await sha256(content)
+      candidateHashes.set(node.id, candidateHash)
+      candidateContents.set(node.id, content)
       if (migration) {
         const sourcePath = managedConfigPath(site, node)
         const sourceHash = site.nodeHashes?.[node.id]
@@ -698,7 +1104,7 @@ export const useConsoleStore = defineStore('console', () => {
           payload: {
             source_path: sourcePath,
             target_path: path,
-            content: site.nodeConfigs?.[node.id] || site.config,
+            content,
             expected_sha256: sourceHash,
             target_expected_sha256: mode === 'replace' ? 'present' : 'missing',
             reload: true,
@@ -710,7 +1116,7 @@ export const useConsoleStore = defineStore('console', () => {
           action: 'config_apply',
           payload: {
             path,
-            content: site.config,
+            content,
             expected_sha256: mode === 'replace' ? 'present' : 'missing',
             new_sha256: candidateHash,
             validate_only: false,
@@ -734,7 +1140,7 @@ export const useConsoleStore = defineStore('console', () => {
       jobs,
       ttl_seconds: 300,
     })
-    site.pendingRemote = {
+    const pendingRemote = {
       operationId: response.operation.id,
       operation: 'transfer',
       publish: false,
@@ -745,15 +1151,20 @@ export const useConsoleStore = defineStore('console', () => {
         return {
           id: job.id,
           nodeId: job.node_id,
-          candidateHash,
+          candidateHash: candidateHashes.get(job.node_id) || '',
+          content: candidateContents.get(job.node_id) || '',
           path: target.path,
           entryId: target.entry_id,
           migration: target.migration,
         }
       }),
     }
-    site.status = 'publishing'
-    await saveUiState('配置复制 / 迁移任务已提交')
+    await persistRemoteState(() => {
+      const current = sites.value.find((item) => item.id === siteId)
+      if (!current) throw new Error('配置不存在')
+      current.pendingRemote = pendingRemote
+      current.status = 'publishing'
+    }, '配置复制 / 迁移任务已提交')
   }
 
   async function revokeNode(nodeId: string) {

@@ -76,15 +76,30 @@ export const api = {
     }),
   logout: () => request<{ ok: boolean }>('/api/v1/auth/logout', { method: 'POST' }),
   uiState: () => request<{ revision: number; state: UiState }>('/api/v1/admin/ui-state'),
-  saveUiState: (revision: number, state: UiState) =>
-    request<{ revision: number; state: UiState }>('/api/v1/admin/ui-state', {
-      method: 'PUT',
-      body: jsonBody({ revision, state }),
-    }),
+  saveUiState: (revision: number, state: UiState, reconciledOperationIds: string[] = []) =>
+    request<{ revision: number; state: UiState; reconciled_operation_ids?: string[] }>(
+      '/api/v1/admin/ui-state',
+      {
+        method: 'PUT',
+        body: jsonBody({
+          revision,
+          state,
+          reconciled_operation_ids: reconciledOperationIds,
+        }),
+      },
+    ),
   nodes: () => request<{ items: NodeRecord[] }>('/api/v1/admin/nodes'),
   jobs: (limit = 200) => request<{ items: JobRecord[] }>(`/api/v1/admin/jobs?limit=${limit}`),
   operations: (limit = 200) =>
     request<{ items: OperationRecord[] }>(`/api/v1/admin/operations?limit=${limit}`),
+  reconciliationOperations: (limit = 500) =>
+    request<{ items: OperationRecord[] }>(
+      `/api/v1/admin/operations?reconciliation_status=pending&limit=${limit}`,
+    ),
+  operation: (operationId: string) =>
+    request<{ operation: OperationRecord; jobs: JobRecord[] }>(
+      `/api/v1/admin/operations/${encodeURIComponent(operationId)}`,
+    ),
   enrollments: () =>
     request<{ items: EnrollmentRecord[] }>('/api/v1/admin/enrollments?status=pending&limit=100'),
   decideEnrollment: (id: string, decision: 'approve' | 'reject') =>
@@ -104,7 +119,7 @@ export const api = {
       idempotent: boolean
     }>('/api/v1/admin/operations', {
       method: 'POST',
-      body: jsonBody(body),
+      body: jsonBody({ ...body, reconciliation_protocol: 'ui-state-v1' }),
     }),
   monitoringSummary: () =>
     request<{ items: MonitoringItem[]; server_time: string }>('/api/v1/admin/monitoring/summary'),
