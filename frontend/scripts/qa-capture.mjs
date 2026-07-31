@@ -41,7 +41,6 @@ async function capture(route, filename) {
       [
         '--headless=new',
         '--disable-gpu',
-        '--hide-scrollbars',
         '--force-device-scale-factor=1',
         '--window-size=1680,980',
         '--virtual-time-budget=1800',

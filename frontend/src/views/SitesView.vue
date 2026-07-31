@@ -76,7 +76,6 @@ const form = reactive({
   type: 'proxy',
   target: '',
   context: 'http' as 'http' | 'stream' | 'main',
-  environment: '生产',
   nodeIds: [] as string[],
   certificateId: '',
   note: '',
@@ -219,7 +218,6 @@ function operationalSnapshot(value: typeof form) {
     type: value.type,
     target: value.target,
     context: value.context,
-    environment: value.environment,
     nodeIds: [...value.nodeIds].sort(),
     certificateId: value.certificateId,
     config: value.config,
@@ -239,7 +237,6 @@ function editorSnapshot() {
     type: form.type,
     target: form.target,
     context: form.context,
-    environment: form.environment,
     nodeIds: [...form.nodeIds].sort(),
     certificateId: form.certificateId,
     note: form.note,
@@ -264,7 +261,6 @@ function resetForm() {
     type: 'proxy',
     target: '',
     context: 'http',
-    environment: '生产',
     nodeIds: [],
     certificateId: '',
     note: '',
@@ -298,7 +294,6 @@ function openEdit(site: SiteRecord) {
     type: site.type || 'proxy',
     target: site.target || '',
     context: site.context === 'main' ? 'main' : site.context === 'stream' ? 'stream' : 'http',
-    environment: site.environment || '生产',
     nodeIds: [...(site.nodeIds || [])],
     certificateId: site.certificateId || '',
     note: site.note || '',
@@ -524,7 +519,6 @@ async function saveDraft() {
       context: form.context,
       configMode: resourceType === 'generic' ? 'generic' : editorTab.value === 'guided' ? 'guided' : 'conf',
       config: form.config,
-      environment: form.environment,
       nodeIds: [...form.nodeIds],
       certificateId: resourceType === 'generic' ? '' : form.certificateId,
       version: Number(previous?.version || 0),
@@ -836,7 +830,7 @@ function deleteRecord() {
         <div class="detail-head">
           <div>
             <h2>{{ siteTitle(selected) }}</h2>
-            <p>{{ selected.environment || '生产' }} · {{ siteKind(selected) }} · 配置 v{{ selected.version }}</p>
+            <p>{{ siteKind(selected) }} · 配置 v{{ selected.version }}</p>
           </div>
           <StatusTag v-bind="siteStatus(selected)" :pulse="Boolean(selected.pendingRemote)" />
         </div>
@@ -996,23 +990,10 @@ function deleteRecord() {
               />
             </label>
           </div>
-          <div v-else class="field-grid">
-            <label>
-              <span>域名</span>
-              <NInput v-model:value="form.domain" placeholder="api.example.com" />
-            </label>
-            <label>
-              <span>环境</span>
-              <NSelect
-                v-model:value="form.environment"
-                :options="[
-                  { label: '生产', value: '生产' },
-                  { label: '预发布', value: '预发布' },
-                  { label: '测试', value: '测试' },
-                ]"
-              />
-            </label>
-          </div>
+          <label v-else>
+            <span>域名</span>
+            <NInput v-model:value="form.domain" placeholder="api.example.com" />
+          </label>
 
           <label v-if="editorTab !== 'generic' && form.type !== 'static'">
             <span>上游地址或站点目录</span>

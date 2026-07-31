@@ -64,6 +64,7 @@ export interface SiteRecord {
   context?: 'http' | 'stream' | 'main'
   configMode?: 'guided' | 'conf' | 'generic'
   config: string
+  /** @deprecated Retained only for older saved UI state. */
   environment?: string
   nodeIds: string[]
   certificateId?: string

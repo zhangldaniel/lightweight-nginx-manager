@@ -145,7 +145,6 @@ function importConfiguration(ui: UiState, file: InventoryFile, node: NodeRecord)
       domain: info.resourceType === 'site' ? info.domain : undefined,
       type: info.type,
       target: info.target,
-      environment: '生产',
       nodeIds: [],
       certificateId: '',
       configMode: info.resourceType === 'generic' ? 'generic' : 'conf',

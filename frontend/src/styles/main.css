@@ -740,8 +740,29 @@ pre {
 .detail-panel {
   position: sticky;
   top: 14px;
+  min-width: 0;
   max-height: calc(100vh - var(--topbar) - 40px);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: rgba(112, 132, 154, .5) transparent;
+  scrollbar-width: thin;
+}
+
+.detail-panel::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.detail-panel::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: rgba(112, 132, 154, .5);
+  background-clip: padding-box;
+}
+
+.detail-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(78, 101, 128, .68);
+  background-clip: padding-box;
 }
 
 .detail-head {
@@ -948,6 +969,9 @@ pre {
 }
 
 .code-panel {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   max-height: 330px;
   margin: 10px 0 0;
   overflow: auto;

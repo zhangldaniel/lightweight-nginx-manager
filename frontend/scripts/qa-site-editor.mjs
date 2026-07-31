@@ -104,6 +104,39 @@ try {
   await command('Runtime.enable')
   await wait(700)
 
+  const detailPresentation = await evaluate(`(() => {
+    const detail = document.querySelector('.detail-panel')
+    const style = detail ? getComputedStyle(detail) : null
+    return {
+      found: Boolean(detail),
+      subtitle: detail?.querySelector('.detail-head p')?.textContent.trim() || '',
+      overflowX: style?.overflowX || '',
+      overflowY: style?.overflowY || '',
+      supportsScrollbarWidth: CSS.supports('scrollbar-width', 'thin'),
+      scrollbarWidth: style?.scrollbarWidth || '',
+    }
+  })()`)
+  assert(detailPresentation.found, 'The site detail panel was not found')
+  assert(detailPresentation.subtitle.includes('配置 v'), 'The site detail subtitle was not found')
+  assert(
+    !['生产', '预发布', '测试'].some((label) => detailPresentation.subtitle.includes(label)),
+    `The site detail still renders an environment label: ${detailPresentation.subtitle}`,
+  )
+  assert(
+    detailPresentation.overflowX === 'hidden',
+    `The site detail can overflow horizontally (${detailPresentation.overflowX})`,
+  )
+  assert(
+    detailPresentation.overflowY === 'auto',
+    `The site detail is not the intended vertical scroll container (${detailPresentation.overflowY})`,
+  )
+  if (detailPresentation.supportsScrollbarWidth) {
+    assert(
+      detailPresentation.scrollbarWidth === 'thin',
+      `The site detail does not use a thin scrollbar (${detailPresentation.scrollbarWidth})`,
+    )
+  }
+
   assert(
     await evaluate(`(() => {
       const button = [...document.querySelectorAll('button')]
@@ -124,10 +157,13 @@ try {
       tabs: modal?.querySelectorAll('.n-tabs').length || 0,
       templates: templates.map((item) => item.textContent.trim()),
       nodePressed: node?.getAttribute('aria-pressed'),
+      labels: [...(modal?.querySelectorAll('label > span') || [])]
+        .map((item) => item.textContent.trim()),
     }
   })()`)
   assert(initial.modal, 'The unified site editor did not open')
   assert(initial.tabs === 0, 'Legacy mode tabs are still rendered')
+  assert(!initial.labels.includes('环境'), 'The site editor still renders the obsolete environment selector')
   assert(initial.templates.length === 8, 'Expected eight site templates')
   assert(initial.templates.some((item) => item.includes('负载均衡 HTTPS')), 'HTTPS load-balancer template is missing')
   assert(initial.templates.some((item) => item.includes('Nginx Stub Status')), 'Stub Status template is missing')
