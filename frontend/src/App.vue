@@ -18,38 +18,38 @@ import { useConsoleStore } from './stores/console'
 const store = useConsoleStore()
 const themeOverrides: GlobalThemeOverrides = {
   common: {
-    primaryColor: '#1677ff',
-    primaryColorHover: '#4096ff',
-    primaryColorPressed: '#0958d9',
-    primaryColorSuppl: '#1677ff',
-    successColor: '#22a06b',
-    warningColor: '#d97706',
-    errorColor: '#dc3c4d',
-    borderRadius: '10px',
-    borderRadiusSmall: '8px',
+    primaryColor: '#40545c',
+    primaryColorHover: '#526a73',
+    primaryColorPressed: '#2f3d43',
+    primaryColorSuppl: '#40545c',
+    successColor: '#4f8873',
+    warningColor: '#b47e2c',
+    errorColor: '#d45f59',
+    borderRadius: '5px',
+    borderRadiusSmall: '4px',
     fontFamily:
       '"Noto Sans SC Variable", "Geist Variable", "PingFang SC", "Microsoft YaHei", sans-serif',
     fontSize: '15px',
   },
   Button: {
     heightMedium: '40px',
-    borderRadiusMedium: '10px',
+    borderRadiusMedium: '4px',
     fontWeight: '650',
   },
   Input: {
     heightMedium: '40px',
-    borderRadius: '10px',
+    borderRadius: '4px',
   },
   Select: {
     peers: {
       InternalSelection: {
         heightMedium: '40px',
-        borderRadius: '10px',
+        borderRadius: '4px',
       },
     },
   },
   Dialog: {
-    borderRadius: '16px',
+    borderRadius: '7px',
   },
 }
 

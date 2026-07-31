@@ -63,7 +63,10 @@ try {
   await capture('/logout-preview#/login', 'vue-login.png')
   await capture('sites', 'vue-sites.png')
   await capture('certificates', 'vue-certificates.png')
+  await capture('nodes', 'vue-nodes.png')
+  await capture('logs', 'vue-logs.png')
   await capture('monitoring', 'vue-monitoring.png')
+  await capture('records', 'vue-records.png')
 } finally {
   await new Promise((resolveClose) => qaServer.close(resolveClose))
 }

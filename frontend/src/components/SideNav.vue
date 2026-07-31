@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import {
-  Activity,
-  FileClock,
-  FileKey2,
-  FileText,
-  Logs,
-  Server,
+  FileTerminal,
+  Gauge,
+  History,
+  PanelsTopLeft,
+  ServerCog,
+  ShieldCheck,
 } from '@lucide/vue'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
@@ -15,18 +15,18 @@ const route = useRoute()
 const store = useConsoleStore()
 
 const items = computed(() => [
-  { to: '/sites', label: '站点与配置', icon: FileText, count: store.sites.length },
+  { to: '/sites', label: '站点与配置', icon: PanelsTopLeft, count: store.sites.length },
   {
     to: '/certificates',
     label: '证书',
-    icon: FileKey2,
+    icon: ShieldCheck,
     count: store.certificates.length,
     alert: store.riskyCertificateCount > 0,
   },
-  { to: '/nodes', label: '节点 Agent', icon: Server, count: store.nodes.length },
-  { to: '/logs', label: '实时日志', icon: Logs },
-  { to: '/monitoring', label: '监控', icon: Activity, alert: store.unhealthyCount > 0 },
-  { to: '/records', label: '执行记录', icon: FileClock, count: store.jobs.length },
+  { to: '/nodes', label: '节点 Agent', icon: ServerCog, count: store.nodes.length },
+  { to: '/logs', label: '实时日志', icon: FileTerminal },
+  { to: '/monitoring', label: '运行监控', icon: Gauge, alert: store.unhealthyCount > 0 },
+  { to: '/records', label: '执行记录', icon: History, count: store.jobs.length },
 ])
 </script>
 
@@ -49,7 +49,9 @@ const items = computed(() => [
         class="nav-item"
         :class="{ active: route.path === item.to }"
       >
-        <component :is="item.icon" :size="18" stroke-width="1.8" aria-hidden="true" />
+        <span class="nav-icon" aria-hidden="true">
+          <component :is="item.icon" :size="19" stroke-width="2" />
+        </span>
         <span>{{ item.label }}</span>
         <span v-if="item.alert" class="nav-alert" aria-label="存在需处理项目">!</span>
         <span v-else-if="item.count !== undefined" class="nav-count">{{ item.count }}</span>

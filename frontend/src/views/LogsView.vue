@@ -10,7 +10,11 @@ import { useConsoleStore } from '../stores/console'
 type LogPreset = 'all' | 'error' | 'warn' | 'http4xx' | 'http5xx'
 
 const store = useConsoleStore()
-const selectedNodeId = ref(store.nodes.find((node) => node.status !== 'offline')?.id || '')
+const selectedNodeId = ref(
+  store.nodes.find(
+    (node) => node.status !== 'offline' && (node.capabilities || []).includes('log_stream_v1'),
+  )?.id || '',
+)
 const selectedPath = ref('')
 const preset = ref<LogPreset>('all')
 const include = ref('')
@@ -20,14 +24,26 @@ const tailLines = ref(200)
 const lines = ref<string[]>([])
 const pausedLines = ref<string[]>([])
 const paused = ref(false)
+const wrapLines = ref(false)
 const connecting = ref(false)
+const restarting = ref(false)
 const session = ref<Record<string, unknown> | null>(null)
 const connectionState = ref<'idle' | 'connecting' | 'open' | 'retrying'>('idle')
+const connectionProblem = ref('')
+const activeCapture = ref<{
+  preset: LogPreset
+  include: string
+  exclude: string
+  caseSensitive: boolean
+} | null>(null)
 const stats = ref({ read: 0, sent: 0, dropped: 0 })
 const output = ref<HTMLElement | null>(null)
 let eventSource: EventSource | null = null
+let retryTimer: number | undefined
+let sessionGeneration = 0
 
 const selectedNode = computed(() => store.nodes.find((node) => node.id === selectedNodeId.value))
+const sourceLocked = computed(() => connecting.value || restarting.value || Boolean(session.value))
 const nodeOptions = computed(() =>
   store.nodes.map((node) => ({
     label: `${node.node_name}${node.status === 'offline' ? ' · 离线' : ''}`,
@@ -50,6 +66,27 @@ const displayText = computed(() => {
     return '当前窗口没有匹配的日志。\n\n请调整右侧快捷条件、包含内容或排除内容。'
   }
   return visibleLines.value.join('\n')
+})
+const hiddenCount = computed(() => Math.max(0, sourceLines.value.length - visibleLines.value.length))
+const activeFilterCount = computed(
+  () => Number(preset.value !== 'all') + Number(Boolean(include.value)) + Number(Boolean(exclude.value)),
+)
+const filtersChangedSinceConnect = computed(() => {
+  const active = activeCapture.value
+  if (!session.value || !active) return false
+  return (
+    active.preset !== preset.value ||
+    active.include !== include.value ||
+    active.exclude !== exclude.value ||
+    active.caseSensitive !== caseSensitive.value
+  )
+})
+const connectionLabel = computed(() => {
+  if (paused.value) return '显示已暂停，后台仍在接收'
+  if (connectionState.value === 'open') return '实时接收中'
+  if (connectionState.value === 'retrying') return '连接中断，正在重试'
+  if (connectionState.value === 'connecting') return '正在建立日志会话'
+  return '尚未连接'
 })
 
 watch(
@@ -113,69 +150,125 @@ function consume(event: MessageEvent) {
   }
 }
 
-function openStream(id: string) {
+function openStream(id: string, generation: number) {
   eventSource?.close()
-  eventSource = new EventSource(
+  const source = new EventSource(
     `/api/v1/admin/log-sessions/${encodeURIComponent(id)}/events`,
   )
-  eventSource.addEventListener('log', consume as EventListener)
-  eventSource.addEventListener('end', () => {
-    eventSource?.close()
+  eventSource = source
+  source.addEventListener('log', (event) => {
+    if (eventSource !== source || generation !== sessionGeneration) return
+    consume(event as MessageEvent)
+  })
+  source.addEventListener('end', () => {
+    if (eventSource !== source || generation !== sessionGeneration) return
+    source.close()
     eventSource = null
     session.value = null
+    activeCapture.value = null
     connectionState.value = 'idle'
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    retryTimer = undefined
+    connectionProblem.value = '日志会话已经结束，可以重新连接。'
   })
-  eventSource.onopen = () => {
+  source.onopen = () => {
+    if (eventSource !== source || generation !== sessionGeneration) return
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    retryTimer = undefined
+    connectionProblem.value = ''
     connectionState.value = 'open'
   }
-  eventSource.onerror = () => {
-    if (session.value) connectionState.value = 'retrying'
+  source.onerror = () => {
+    if (eventSource !== source || generation !== sessionGeneration) return
+    if (!session.value) return
+    connectionState.value = 'retrying'
+    if (retryTimer === undefined) {
+      retryTimer = window.setTimeout(() => {
+        if (connectionState.value === 'retrying') {
+          connectionProblem.value = '连接持续中断，请检查 Agent 状态或重新建立会话。'
+        }
+      }, 12_000)
+    }
   }
 }
 
 async function start() {
+  if (connecting.value) return
   if (!selectedNodeId.value || !selectedPath.value) {
     store.notify('请选择在线节点和日志文件', 'warning')
     return
   }
   connecting.value = true
   connectionState.value = 'connecting'
+  connectionProblem.value = ''
   lines.value = []
   paused.value = false
   stats.value = { read: 0, sent: 0, dropped: 0 }
+  const generation = ++sessionGeneration
+  const nodeId = selectedNodeId.value
+  const path = selectedPath.value
+  const capture = {
+    preset: preset.value,
+    include: include.value,
+    exclude: exclude.value,
+    caseSensitive: caseSensitive.value,
+  }
   try {
-    session.value = await api.createLogSession({
-      node_id: selectedNodeId.value,
-      path: selectedPath.value,
-      include: include.value,
-      exclude: exclude.value,
-      case_sensitive: caseSensitive.value,
-      preset: preset.value,
+    const created = await api.createLogSession({
+      node_id: nodeId,
+      path,
+      include: capture.include,
+      exclude: capture.exclude,
+      case_sensitive: capture.caseSensitive,
+      preset: capture.preset,
       tail_lines: tailLines.value,
     })
-    openStream(String(session.value.id))
+    if (generation !== sessionGeneration) {
+      if (created.id) void api.stopLogSession(String(created.id)).catch(() => undefined)
+      return
+    }
+    session.value = created
+    activeCapture.value = capture
+    openStream(String(created.id), generation)
   } catch (error) {
+    if (generation !== sessionGeneration) return
     session.value = null
     connectionState.value = 'idle'
     store.notify('实时日志启动失败', 'danger', store.apiMessage(error))
   } finally {
-    connecting.value = false
+    if (generation === sessionGeneration) connecting.value = false
   }
 }
 
 async function stop() {
+  sessionGeneration += 1
   const current = session.value
   eventSource?.close()
   eventSource = null
   session.value = null
+  activeCapture.value = null
+  connecting.value = false
   connectionState.value = 'idle'
   paused.value = false
+  if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+  retryTimer = undefined
   if (current?.id) {
     try {
       await api.stopLogSession(String(current.id))
     } catch {
       // The server expires abandoned sessions; leaving the page must remain responsive.
     }
+  }
+}
+
+async function restart() {
+  if (restarting.value) return
+  restarting.value = true
+  try {
+    await stop()
+    await start()
+  } finally {
+    restarting.value = false
   }
 }
 
@@ -191,6 +284,7 @@ function clearWindow() {
 }
 
 onBeforeUnmount(() => {
+  if (retryTimer !== undefined) window.clearTimeout(retryTimer)
   void stop()
 })
 </script>
@@ -216,19 +310,20 @@ onBeforeUnmount(() => {
     <div class="log-toolbar">
       <label>
         <span>Agent 节点</span>
-        <NSelect v-model:value="selectedNodeId" :options="nodeOptions" />
+        <NSelect v-model:value="selectedNodeId" :options="nodeOptions" :disabled="sourceLocked" />
       </label>
       <label class="log-path-select">
         <span>日志文件</span>
         <NSelect
           v-model:value="selectedPath"
           :options="pathOptions"
+          :disabled="sourceLocked"
           placeholder="选择 Agent 上报的日志路径"
         />
       </label>
       <label>
         <span>初始读取</span>
-        <NInputNumber v-model:value="tailLines" :min="1" :max="1000" />
+        <NInputNumber v-model:value="tailLines" :min="1" :max="1000" :disabled="sourceLocked" />
       </label>
       <NButton
         v-if="!session"
@@ -246,6 +341,35 @@ onBeforeUnmount(() => {
       </NButton>
     </div>
 
+    <div class="log-session-summary" aria-live="polite">
+      <div class="log-summary-cell">
+        <span>会话状态</span>
+        <strong>{{ connectionLabel }}</strong>
+        <small>{{ selectedNode?.node_name || '选择支持实时日志的 Agent' }}</small>
+      </div>
+      <div class="log-summary-cell">
+        <span>Agent 已读取</span>
+        <strong>{{ stats.read }}</strong>
+        <small>当前会话累计行数</small>
+      </div>
+      <div class="log-summary-cell">
+        <span>窗口显示</span>
+        <strong>{{ visibleLines.length }}</strong>
+        <small>{{ activeFilterCount ? `${activeFilterCount} 个过滤条件` : '未启用窗口过滤' }}</small>
+      </div>
+      <div class="log-summary-cell">
+        <span>窗口隐藏</span>
+        <strong>{{ hiddenCount }}</strong>
+        <small>{{ stats.dropped ? `Agent 丢弃 ${stats.dropped} 行` : '浏览器保留 5,000 行' }}</small>
+      </div>
+    </div>
+
+    <div v-if="connectionProblem" class="inline-error" role="alert">
+      <strong>实时日志连接需要处理</strong>
+      <span>{{ connectionProblem }}</span>
+      <NButton size="small" :loading="connecting || restarting" @click="restart">重新连接</NButton>
+    </div>
+
     <div class="log-workspace">
       <section class="terminal-card">
         <header>
@@ -258,9 +382,9 @@ onBeforeUnmount(() => {
             {{ paused ? '显示已暂停' : connectionState === 'open' ? '实时接收' : '等待连接' }}
           </span>
         </header>
-        <pre ref="output" class="log-output" tabindex="0">{{ displayText }}</pre>
+        <pre ref="output" class="log-output" :class="{ wrapped: wrapLines }" tabindex="0">{{ displayText }}</pre>
         <footer>
-          <span>读取 {{ stats.read }} · 显示 {{ visibleLines.length }} · 过滤 {{ Math.max(0, lines.length - visibleLines.length) }}</span>
+          <span>读取 {{ stats.read }} · 显示 {{ visibleLines.length }} · 过滤 {{ hiddenCount }}</span>
           <span>浏览器最多保留 5,000 行<span v-if="stats.dropped"> · Agent 丢弃 {{ stats.dropped }}</span></span>
         </footer>
       </section>
@@ -270,8 +394,8 @@ onBeforeUnmount(() => {
           <div>
             <span class="section-icon success"><Search :size="18" /></span>
             <div>
-              <h2>过滤与显示</h2>
-              <p>当前窗口即时过滤</p>
+              <h2>窗口过滤</h2>
+              <p>对已经接收的日志即时生效</p>
             </div>
           </div>
         </div>
@@ -306,6 +430,11 @@ onBeforeUnmount(() => {
           <NInput v-model:value="exclude" clearable placeholder="例如 healthcheck" />
         </label>
         <NCheckbox v-model:checked="caseSensitive">区分大小写</NCheckbox>
+        <NCheckbox v-model:checked="wrapLines">自动换行</NCheckbox>
+
+        <div v-if="filtersChangedSinceConnect" class="filter-change-note">
+          当前条件已在窗口生效；Agent 采集范围仍沿用连接时条件。重新连接后可按新条件采集。
+        </div>
 
         <div class="filter-actions">
           <NButton :disabled="!session" @click="togglePause">
@@ -315,6 +444,14 @@ onBeforeUnmount(() => {
           <NButton @click="clearWindow">
             <template #icon><Eraser :size="17" /></template>
             清空当前窗口
+          </NButton>
+          <NButton
+            v-if="filtersChangedSinceConnect || connectionState === 'retrying'"
+            :loading="connecting || restarting"
+            @click="restart"
+          >
+            <template #icon><Radio :size="17" /></template>
+            按当前条件重新连接
           </NButton>
         </div>
 

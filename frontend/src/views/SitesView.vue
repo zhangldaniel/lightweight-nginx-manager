@@ -24,6 +24,7 @@ import {
 } from 'naive-ui'
 import PageHeader from '../components/PageHeader.vue'
 import MetricCard from '../components/MetricCard.vue'
+import ReleaseChannel from '../components/ReleaseChannel.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useConsoleStore } from '../stores/console'
 import { api } from '../api'
@@ -757,6 +758,8 @@ function deleteRecord() {
         :tone="pendingCount ? 'info' : 'neutral'"
       />
     </div>
+
+    <ReleaseChannel :site="selected" />
 
     <div class="master-detail">
       <section class="data-panel">

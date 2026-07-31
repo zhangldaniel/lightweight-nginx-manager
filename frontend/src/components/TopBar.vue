@@ -12,7 +12,7 @@ const labels: Record<string, string> = {
   certificates: '证书',
   nodes: '节点 Agent',
   logs: '实时日志',
-  monitoring: '监控',
+  monitoring: '运行监控',
   records: '执行记录',
 }
 

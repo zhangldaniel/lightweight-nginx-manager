@@ -17,7 +17,7 @@ withDefaults(
 
 <template>
   <article class="metric-card" :class="{ featured }" :data-tone="tone">
-    <span class="metric-icon"><component :is="icon" :size="20" stroke-width="1.8" /></span>
+    <span class="metric-icon"><component :is="icon" :size="18" stroke-width="2" /></span>
     <div class="metric-copy">
       <span>{{ label }}</span>
       <strong>{{ value }}</strong>
