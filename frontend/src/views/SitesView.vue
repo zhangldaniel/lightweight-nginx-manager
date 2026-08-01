@@ -2,7 +2,6 @@
 import { computed, reactive, ref, watch } from 'vue'
 import {
   AlertTriangle,
-  ArrowRightLeft,
   Check,
   Copy,
   FileCode2,
@@ -10,7 +9,6 @@ import {
   Plus,
   RotateCcw,
   Search,
-  Server,
   ShieldCheck,
 } from '@lucide/vue'
 import {
@@ -22,8 +20,6 @@ import {
   NSelect,
   useDialog,
 } from 'naive-ui'
-import PageHeader from '../components/PageHeader.vue'
-import MetricCard from '../components/MetricCard.vue'
 import ReleaseChannel from '../components/ReleaseChannel.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useConsoleStore } from '../stores/console'
@@ -121,9 +117,28 @@ const draftCount = computed(
   () => store.sites.filter((site) => ['draft', 'failed', 'drift'].includes(site.status)).length,
 )
 const pendingCount = computed(() => store.sites.filter((site) => Boolean(site.pendingRemote)).length)
+const releaseSite = computed(
+  () =>
+    (selected.value?.pendingRemote ? selected.value : null) ||
+    store.sites.find((site) => Boolean(site.pendingRemote)) ||
+    selected.value,
+)
+const additionalPendingCount = computed(() =>
+  Math.max(0, pendingCount.value - (releaseSite.value?.pendingRemote ? 1 : 0)),
+)
+const offlineCount = computed(() => Math.max(0, store.nodes.length - store.onlineCount))
+const heroHeadline = computed(() => {
+  if (pendingCount.value) {
+    return `${store.onlineCount} 个节点在线，${pendingCount.value} 个配置操作正在收尾。`
+  }
+  if (offlineCount.value) {
+    return `${store.onlineCount} 个节点在线，${offlineCount.value} 个连接需要处理。`
+  }
+  return `${store.onlineCount} 个节点在线，发布通道当前空闲。`
+})
 const activeConfigScan = computed(() =>
   store.jobs.some(
-    (job) => job.action === 'config_inventory' && ['queued', 'running'].includes(job.status),
+    (job) => job.action === 'config_inventory' && ['queued', 'claimed', 'running'].includes(job.status),
   ),
 )
 const availableCertificates = computed(() => {
@@ -713,56 +728,60 @@ function deleteRecord() {
 
 <template>
   <section class="page page-sites">
-    <PageHeader title="站点与配置" description="以站点为中心管理配置、证书和多节点发布。">
-      <NButton
-        secondary
-        :loading="scanning || activeConfigScan"
-        :disabled="!store.canOperate || activeConfigScan"
-        @click="scanSites"
-      >
-        {{ activeConfigScan ? '扫描进行中' : '导入节点现有配置' }}
-      </NButton>
-      <NButton type="primary" :disabled="!store.canOperate" @click="openCreate">
-        <template #icon><Plus :size="18" /></template>
-        新增站点
-      </NButton>
-    </PageHeader>
+    <header class="sites-hero">
+      <div class="sites-hero-copy">
+        <span class="sites-eyebrow"><i aria-hidden="true"></i> Configuration desk</span>
+        <h1>{{ heroHeadline }}</h1>
+        <p>证书、配置、Agent 和 reload 状态集中在一条链路里。</p>
+      </div>
+      <ReleaseChannel
+        :site="releaseSite"
+        variant="summary"
+        :additional-active-count="additionalPendingCount"
+      />
+    </header>
 
-    <div class="metrics-grid">
-      <MetricCard
-        label="托管配置"
-        :value="store.sites.length"
-        note="站点、Stream 与通用 Conf"
-        :icon="FileCode2"
-        featured
-      />
-      <MetricCard
-        label="在线 Agent"
-        :value="`${store.onlineCount}/${store.nodes.length}`"
-        note="主动出站连接"
-        :icon="Server"
-        tone="success"
-      />
-      <MetricCard
-        label="待处理"
-        :value="draftCount"
-        note="草稿、漂移与失败"
-        :icon="AlertTriangle"
-        :tone="draftCount ? 'warning' : 'neutral'"
-      />
-      <MetricCard
-        label="执行中"
-        :value="pendingCount"
-        note="Agent 正在处理"
-        :icon="ArrowRightLeft"
-        :tone="pendingCount ? 'info' : 'neutral'"
-      />
-    </div>
+    <section class="sites-fact-command" aria-label="配置概览与快捷操作">
+      <div class="site-fact">
+        <strong>{{ store.sites.length }}</strong>
+        <span>托管配置<small>站点与通用 Conf</small></span>
+      </div>
+      <div class="site-fact">
+        <strong>{{ store.certificates.length }}</strong>
+        <span>域名证书<small>已纳管证书</small></span>
+      </div>
+      <div class="site-fact" :data-tone="draftCount ? 'warning' : 'neutral'">
+        <strong>{{ draftCount }}</strong>
+        <span>需要处理<small>草稿、漂移与失败</small></span>
+      </div>
+      <div class="site-fact" :data-tone="pendingCount ? 'active' : 'neutral'">
+        <strong>{{ pendingCount }}</strong>
+        <span>执行中<small>{{ pendingCount ? '配置操作待完成' : '当前空闲' }}</small></span>
+      </div>
+      <div class="sites-command-actions">
+        <NButton
+          secondary
+          :loading="scanning || activeConfigScan"
+          :disabled="!store.canOperate || activeConfigScan"
+          @click="scanSites"
+        >
+          {{ activeConfigScan ? '扫描进行中' : '导入节点配置' }}
+        </NButton>
+        <NButton type="primary" :disabled="!store.canOperate" @click="openCreate">
+          <template #icon><Plus :size="17" /></template>
+          新增站点
+        </NButton>
+      </div>
+    </section>
 
-    <ReleaseChannel :site="selected" />
+    <ReleaseChannel
+      :site="releaseSite"
+      variant="flow"
+      :additional-active-count="additionalPendingCount"
+    />
 
     <div class="master-detail">
-      <section class="data-panel">
+      <section class="data-panel sites-config-table">
         <div class="filter-bar">
           <NInput v-model:value="search" clearable placeholder="搜索域名、配置备注或变更说明">
             <template #prefix><Search :size="17" /></template>
@@ -793,11 +812,12 @@ function deleteRecord() {
             type="button"
             class="site-table site-row"
             :class="{ selected: store.selectedSiteId === site.id }"
+            :aria-current="store.selectedSiteId === site.id ? 'true' : undefined"
             @click="store.selectedSiteId = site.id"
           >
             <span class="site-primary">
-              <strong>{{ siteTitle(site) }}</strong>
-              <small>{{ site.note || siteKind(site) }}</small>
+              <strong :title="siteTitle(site)">{{ siteTitle(site) }}</strong>
+              <small :title="site.note || siteKind(site)">{{ site.note || siteKind(site) }}</small>
             </span>
             <span class="node-chip-stack">
               <span
@@ -829,9 +849,10 @@ function deleteRecord() {
         </div>
       </section>
 
-      <aside v-if="selected" class="detail-panel">
+      <aside v-if="selected" class="detail-panel sites-detail-panel">
         <div class="detail-head">
           <div>
+            <span class="detail-eyebrow">Selected configuration</span>
             <h2>{{ siteTitle(selected) }}</h2>
             <p>{{ siteKind(selected) }} · 配置 v{{ selected.version }}</p>
           </div>
@@ -869,6 +890,7 @@ function deleteRecord() {
           </NButton>
           <NButton
             type="primary"
+            class="detail-publish-action"
             :loading="running"
             :disabled="!store.canOperate || !selected.nodeIds.length"
             @click="run(true)"
@@ -879,6 +901,7 @@ function deleteRecord() {
             v-if="selected.nodeIds.length"
             type="error"
             secondary
+            class="detail-danger-action"
             :disabled="!store.canOperate"
             @click="removeFromNodes"
           >
@@ -888,6 +911,7 @@ function deleteRecord() {
             v-else
             type="error"
             secondary
+            class="detail-danger-action"
             :disabled="!store.canOperate"
             @click="deleteRecord"
           >
@@ -895,10 +919,15 @@ function deleteRecord() {
           </NButton>
         </div>
 
-        <div class="detail-section">
-          <h3>配置备注</h3>
-          <p>{{ selected.note || '尚未填写配置用途和负责人。' }}</p>
-          <small v-if="selected.changeNote">最近变更：{{ selected.changeNote }}</small>
+        <div class="detail-context-grid">
+          <div>
+            <h3>配置备注</h3>
+            <p>{{ selected.note || '尚未填写配置用途和负责人。' }}</p>
+          </div>
+          <div>
+            <h3>最近变更</h3>
+            <p>{{ selected.changeNote || '暂无变更说明' }}</p>
+          </div>
         </div>
 
         <div class="detail-section">
