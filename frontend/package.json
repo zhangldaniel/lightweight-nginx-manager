@@ -4,9 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "predev": "node scripts/build-font-css.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/build-font-css.mjs",
     "build": "vue-tsc --noEmit && vite build",
     "package:server": "npm run build && node scripts/qa-contract.mjs && node scripts/package-release.mjs",
     "test": "npm run build && node scripts/qa-contract.mjs && node scripts/qa-certificate-config.mjs && node scripts/qa-operation-recovery.mjs && node scripts/qa-site-editor.mjs && node scripts/qa-template-dirty.mjs && node scripts/qa-live-logs.mjs",
@@ -19,8 +17,6 @@
     "preview:qa": "node scripts/qa-server.mjs"
   },
   "dependencies": {
-    "@fontsource-variable/geist": "5.3.0",
-    "@fontsource-variable/noto-sans-sc": "5.3.0",
     "@fontsource/jetbrains-mono": "5.3.0",
     "gsap": "3.15.0",
     "@lucide/vue": "1.27.0",

@@ -28,7 +28,7 @@ const themeOverrides: GlobalThemeOverrides = {
     borderRadius: '5px',
     borderRadiusSmall: '4px',
     fontFamily:
-      '"Noto Sans SC Variable", "Geist Variable", "PingFang SC", "Microsoft YaHei", sans-serif',
+      '"HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
     fontSize: '15px',
   },
   Button: {

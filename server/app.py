@@ -130,6 +130,13 @@ PRIVATE_KEY_MARKERS = (
 INVENTORY_MAX_FILES = 200
 INVENTORY_MAX_FILE_BYTES = 256 * 1024
 INVENTORY_MAX_TOTAL_BYTES = 1024 * 1024
+UI_FONT_ASSETS = frozenset(
+    {
+        "HarmonyOS_Sans_SC_Regular.ttf",
+        "HarmonyOS_Sans_SC_Medium.ttf",
+        "HarmonyOS_Sans_SC_Bold.ttf",
+    }
+)
 
 
 class LDAPAuthenticationError(Exception):
@@ -2029,7 +2036,8 @@ def create_app(
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
             "form-action 'self'; connect-src 'self'; img-src 'self' data:; "
-            "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+            "font-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline'"
         )
         if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
@@ -2170,6 +2178,22 @@ def create_app(
             status_code=503,
             content={"detail": "UI file is not configured; set NGINX_MANAGER_UI_PATH"},
         )
+
+    @api.get("/ui-assets/{asset_name}", include_in_schema=False)
+    def ui_font_asset(asset_name: str) -> Any:
+        if asset_name not in UI_FONT_ASSETS or not settings.ui_path:
+            raise HTTPException(status_code=404, detail="UI asset not found")
+        ui_index = Path(settings.ui_path).expanduser()
+        if ui_index.is_dir():
+            ui_index = ui_index / "index.html"
+        if not ui_index.is_file():
+            raise HTTPException(status_code=404, detail="UI asset not found")
+        candidate = ui_index.parent / "ui-assets" / asset_name
+        if not candidate.is_file():
+            raise HTTPException(status_code=404, detail="UI asset not found")
+        response = FileResponse(str(candidate), media_type="font/ttf")
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
 
     def login_rate_limited(client_key: str, now: int) -> bool:
         cutoff = now - settings.login_window_seconds

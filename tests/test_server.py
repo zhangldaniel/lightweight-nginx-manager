@@ -148,6 +148,40 @@ class ServerTestCase(unittest.TestCase):
             self.assertEqual(session.status_code, 200, session.text)
             self.assertEqual(session.json()["username"], "admin")
 
+    def test_ui_font_assets_are_same_origin_and_strictly_allowlisted(self):
+        ui_root = Path(self.tempdir.name) / "ui"
+        asset_root = ui_root / "ui-assets"
+        asset_root.mkdir(parents=True)
+        ui_index = ui_root / "index.html"
+        ui_index.write_text("<!doctype html><title>test</title>", encoding="utf-8")
+        font_name = "HarmonyOS_Sans_SC_Regular.ttf"
+        font_payload = b"test-font-payload"
+        (asset_root / font_name).write_bytes(font_payload)
+        (asset_root / "not-allowlisted.ttf").write_bytes(b"must-not-be-served")
+
+        ui_settings = replace(
+            self.settings,
+            db_path=str(Path(self.tempdir.name) / "ui-test.db"),
+            ui_path=str(ui_index),
+        )
+        with TestClient(create_app(ui_settings), base_url="https://testserver") as ui_client:
+            index = ui_client.get("/")
+            self.assertEqual(200, index.status_code, index.text)
+            self.assertIn("font-src 'self'", index.headers["content-security-policy"])
+
+            font = ui_client.get("/ui-assets/" + font_name)
+            self.assertEqual(200, font.status_code, font.text)
+            self.assertEqual(font_payload, font.content)
+            self.assertEqual("font/ttf", font.headers["content-type"])
+            self.assertEqual("public, max-age=3600", font.headers["cache-control"])
+            self.assertEqual("same-origin", font.headers["cross-origin-resource-policy"])
+
+            rejected = ui_client.get("/ui-assets/not-allowlisted.ttf")
+            self.assertEqual(404, rejected.status_code, rejected.text)
+
+            missing = ui_client.get("/ui-assets/HarmonyOS_Sans_SC_Bold.ttf")
+            self.assertEqual(404, missing.status_code, missing.text)
+
     def test_ldap_roles_are_enforced_server_side_and_local_admin_has_priority(self):
         ldap_settings = replace(
             self.settings,
@@ -1666,6 +1700,9 @@ class ServerTestCase(unittest.TestCase):
         self.assertIn("NGINX_MANAGER_LDAP_BIND_PASSWORD_FILE", installer)
         self.assertIn('UI_SOURCE="${PACKAGE_DIR}/frontend/release/index.html"', installer)
         self.assertIn('UI_SOURCE="${PACKAGE_DIR}/nginx-cluster-console.html"', installer)
+        self.assertIn('UI_ASSETS_SOURCE="$(dirname -- "${UI_SOURCE}")/ui-assets"', installer)
+        self.assertIn('UI_ASSETS_SOURCE="${PACKAGE_DIR}/frontend/public/ui-assets"', installer)
+        self.assertIn('"${STAGING_DIR}/ui/ui-assets/${relative_asset}"', installer)
         self.assertIn('sed "s|${CURRENT_LINK}|${NEW_RELEASE}|g"', installer)
         self.assertIn('systemctl is-enabled --quiet "${APP_NAME}.service" 2>/dev/null', installer)
         self.assertIn('chown -R root:"${APP_GROUP}" "${STAGING_DIR}"', installer)
@@ -1681,6 +1718,11 @@ class ServerTestCase(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("ldap3==2.9.1", requirements)
+        packager = (Path(__file__).resolve().parents[1] / "frontend" / "scripts" / "package-release.mjs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("dist/ui-assets", packager)
+        self.assertIn("release/ui-assets", packager)
 
     def test_server_uninstaller_preserves_data_unless_purge_is_explicit(self):
         root = Path(__file__).resolve().parents[1]

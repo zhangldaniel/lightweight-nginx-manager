@@ -1,12 +1,47 @@
-@import '@fontsource-variable/geist';
-@import './noto-ui.css';
 @import '@fontsource/jetbrains-mono/latin-400.css';
 @import '@fontsource/jetbrains-mono/latin-600.css';
 
+/*
+ * HarmonyOS Sans SC is served by the control plane from the same origin.
+ * Keep the original font files unmodified as required by their license.
+ */
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  src:
+    local("HarmonyOS Sans SC"),
+    local("HarmonyOS_Sans_SC"),
+    url("/ui-assets/HarmonyOS_Sans_SC_Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 300 499;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  src:
+    local("HarmonyOS Sans SC Medium"),
+    local("HarmonyOS_Sans_SC_Medium"),
+    url("/ui-assets/HarmonyOS_Sans_SC_Medium.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 500 699;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  src:
+    local("HarmonyOS Sans SC Bold"),
+    local("HarmonyOS_Sans_SC_Bold"),
+    url("/ui-assets/HarmonyOS_Sans_SC_Bold.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 700 900;
+  font-display: swap;
+}
+
 :root {
   color-scheme: light;
-  --font-sans: "Noto Sans SC Variable", "Geist Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-display: "Geist Variable", "Noto Sans SC Variable", "PingFang SC", sans-serif;
+  --font-sans: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-display: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
   --bg: #eff6ff;
   --surface: rgba(255, 255, 255, .82);

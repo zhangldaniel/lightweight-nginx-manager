@@ -27,6 +27,8 @@ SERVER_SOURCE="${PACKAGE_DIR}/server"
 UI_SOURCE="${PACKAGE_DIR}/frontend/release/index.html"
 [[ -f "${UI_SOURCE}" ]] || UI_SOURCE="${PACKAGE_DIR}/nginx-cluster-console.html"
 [[ -f "${UI_SOURCE}" ]] || UI_SOURCE="${PACKAGE_DIR}/../nginx-cluster-console.html"
+UI_ASSETS_SOURCE="$(dirname -- "${UI_SOURCE}")/ui-assets"
+[[ -d "${UI_ASSETS_SOURCE}" ]] || UI_ASSETS_SOURCE="${PACKAGE_DIR}/frontend/public/ui-assets"
 
 MANAGER_HOST=""
 LISTEN_PORT="${DEFAULT_PORT}"
@@ -618,18 +620,30 @@ ensure_identity() {
 }
 
 prepare_release() {
-  local source_digest release_id import_db
-  source_digest="$("${PYTHON_BIN}" - "${SERVER_SOURCE}" "${UI_SOURCE}" <<'PY'
+  local source_digest release_id import_db asset relative_asset
+  source_digest="$("${PYTHON_BIN}" - "${SERVER_SOURCE}" "${UI_SOURCE}" "${UI_ASSETS_SOURCE}" <<'PY'
 import hashlib
 import pathlib
 import sys
 
 server = pathlib.Path(sys.argv[1])
-files = sorted(path for path in server.iterdir() if path.suffix == ".py" or path.name == "requirements.txt")
-files.append(pathlib.Path(sys.argv[2]))
+ui = pathlib.Path(sys.argv[2])
+ui_assets = pathlib.Path(sys.argv[3])
+files = [
+    ("server/" + path.name, path)
+    for path in sorted(server.iterdir())
+    if path.suffix == ".py" or path.name == "requirements.txt"
+]
+files.append(("ui/index.html", ui))
+if ui_assets.is_dir():
+    files.extend(
+        ("ui/ui-assets/" + path.relative_to(ui_assets).as_posix(), path)
+        for path in sorted(ui_assets.rglob("*"))
+        if path.is_file()
+    )
 digest = hashlib.sha256()
-for path in files:
-    digest.update(path.name.encode("utf-8"))
+for name, path in files:
+    digest.update(name.encode("utf-8"))
     digest.update(b"\0")
     digest.update(path.read_bytes())
     digest.update(b"\0")
@@ -647,6 +661,12 @@ PY
   find "${SERVER_SOURCE}" -maxdepth 1 -type f \( -name '*.py' -o -name 'requirements.txt' \) \
     -exec install -m 0644 {} "${STAGING_DIR}/server/" \;
   install -m 0644 "${UI_SOURCE}" "${STAGING_DIR}/ui/index.html"
+  if [[ -d "${UI_ASSETS_SOURCE}" ]]; then
+    while IFS= read -r -d '' asset; do
+      relative_asset="${asset#${UI_ASSETS_SOURCE}/}"
+      install -D -m 0644 "${asset}" "${STAGING_DIR}/ui/ui-assets/${relative_asset}"
+    done < <(find "${UI_ASSETS_SOURCE}" -type f -print0)
+  fi
 
   "${PYTHON_BIN}" -m venv "${STAGING_DIR}/venv"
   "${STAGING_DIR}/venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip wheel

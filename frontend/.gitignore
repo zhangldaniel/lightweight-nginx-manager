@@ -2,3 +2,4 @@ node_modules/
 dist/
 src/styles/noto-ui.css
 artifacts/
+release/ui-assets/

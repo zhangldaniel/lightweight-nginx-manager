@@ -4,6 +4,8 @@
 
 每台 Nginx 主机安装一个主动连接 Server 的 Agent。Agent 只执行内置运维动作，不提供任意 Shell 入口。
 
+界面使用 [HarmonyOS Sans SC](frontend/public/ui-assets/HarmonyOS-Sans-LICENSE.txt)，字体文件保持原版并随 Server 同源提供。
+
 ## 界面
 
 ![站点与配置](docs/images/console-overview.png?v=20260731-2)
