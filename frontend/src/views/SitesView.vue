@@ -99,18 +99,103 @@ const statusOptions = [
   { label: '未部署', value: 'unassigned' },
 ]
 
-const filteredSites = computed(() => {
-  const keyword = search.value.trim().toLowerCase()
-  return store.sites.filter((site) => {
-    const matchedKeyword =
-      !keyword ||
-      [siteTitle(site), site.note, site.changeNote, site.filename]
+function normalizedSearchTerms(value: string) {
+  return value
+    .trim()
+    .toLocaleLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+function siteSearchSources(site: SiteRecord) {
+  return [
+    siteTitle(site),
+    site.domain,
+    site.name,
+    site.filename,
+    site.type,
+    site.target,
+    site.context,
+    site.note,
+    site.changeNote,
+    site.config,
+    ...Object.values(site.nodeConfigs || {}),
+    ...Object.values(site.nodeConfigPaths || {}),
+  ]
+    .filter(Boolean)
+    .map((value) => String(value))
+}
+
+function searchSourceIncludesTerm(value: string, term: string) {
+  if (/^\d+$/.test(term)) return new RegExp(`(?:^|\\D)${term}(?:\\D|$)`).test(value)
+  return value.includes(term)
+}
+
+function siteMatchesSearch(site: SiteRecord, terms: string[]) {
+  if (!terms.length) return true
+  const sources = siteSearchSources(site).map((value) => value.toLocaleLowerCase())
+  return terms.every((term) => sources.some((value) => searchSourceIncludesTerm(value, term)))
+}
+
+function clippedSearchLine(value: string) {
+  const compact = value.trim().replace(/\s+/g, ' ')
+  return compact.length > 96 ? `${compact.slice(0, 93)}…` : compact
+}
+
+function searchMatchHint(site: SiteRecord, terms: string[]) {
+  if (!terms.length) return ''
+
+  const visibleMetadata = [
+    siteTitle(site),
+    site.domain,
+    site.name,
+    site.filename,
+    site.note,
+    site.changeNote,
+  ]
+    .filter(Boolean)
+    .map((value) => String(value).toLocaleLowerCase())
+  if (
+    terms.every((term) =>
+      visibleMetadata.some((value) => searchSourceIncludesTerm(value, term)),
+    )
+  ) return ''
+
+  const candidates = [
+    { label: '命中目标', values: [site.target] },
+    {
+      label: '命中配置',
+      values: [site.config, ...Object.values(site.nodeConfigs || {})]
         .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(keyword))
+        .flatMap((value) => String(value).split(/\r?\n/)),
+    },
+    { label: '命中路径', values: Object.values(site.nodeConfigPaths || {}) },
+  ]
+  for (const candidate of candidates) {
+    const line = candidate.values
+      .filter(Boolean)
+      .map((value) => String(value))
+      .find((value) => {
+        const normalized = value.toLocaleLowerCase()
+        return terms.some((term) => searchSourceIncludesTerm(normalized, term))
+      })
+    if (line) return `${candidate.label} · ${clippedSearchLine(line)}`
+  }
+  return ''
+}
+
+const filteredSites = computed(() => {
+  const terms = normalizedSearchTerms(search.value)
+  return store.sites.filter((site) => {
+    const matchedKeyword = siteMatchesSearch(site, terms)
     const matchedNode = !nodeFilter.value || site.nodeIds.includes(nodeFilter.value)
     const matchedStatus = !statusFilter.value || site.status === statusFilter.value
     return matchedKeyword && matchedNode && matchedStatus
   })
+})
+const siteSearchHints = computed(() => {
+  const terms = normalizedSearchTerms(search.value)
+  return new Map(filteredSites.value.map((site) => [site.id, searchMatchHint(site, terms)]))
 })
 
 const selected = computed(() => store.selectedSite)
@@ -788,7 +873,11 @@ function deleteRecord() {
     <div class="master-detail">
       <section class="data-panel sites-config-table">
         <div class="filter-bar">
-          <NInput v-model:value="search" clearable placeholder="搜索域名、配置备注或变更说明">
+          <NInput
+            v-model:value="search"
+            clearable
+            placeholder="搜索域名、端口、IP、Nginx 指令或备注"
+          >
             <template #prefix><Search :size="17" /></template>
           </NInput>
           <NSelect
@@ -822,7 +911,9 @@ function deleteRecord() {
           >
             <span class="site-primary">
               <strong :title="siteTitle(site)">{{ siteTitle(site) }}</strong>
-              <small :title="site.note || siteKind(site)">{{ site.note || siteKind(site) }}</small>
+              <small :title="siteSearchHints.get(site.id) || site.note || siteKind(site)">
+                {{ siteSearchHints.get(site.id) || site.note || siteKind(site) }}
+              </small>
             </span>
             <span class="node-chip-stack">
               <span

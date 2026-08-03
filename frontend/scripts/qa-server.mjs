@@ -166,6 +166,9 @@ const state = {
       status: 'draft',
       note: '订单服务后端池',
       nodeHashes: { 'node-sh-01': 'dd'.repeat(32) },
+      nodeConfigs: {
+        'node-sh-01': 'server {\n  listen 8443;\n}\nupstream orders {\n  server 10.165.1.99:15432;\n}',
+      },
       nodeConfigPaths: {
         'node-sh-01': '/apps/nginx/conf/conf.d/orders-upstream.conf',
       },

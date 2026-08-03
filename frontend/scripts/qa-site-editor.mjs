@@ -104,6 +104,62 @@ try {
   await command('Runtime.enable')
   await wait(700)
 
+  const searchCases = [
+    { query: '443', expected: 'api.int.example.com', hint: '命中配置' },
+    { query: 'listen   443', expected: 'api.int.example.com', hint: '命中配置' },
+    { query: '32116', expected: '订单服务 upstream', hint: '命中配置' },
+    { query: '15432', expected: '订单服务 upstream', hint: '命中配置' },
+    { query: 'PROXY_SET_HEADER 443', expected: 'api.int.example.com', hint: '命中配置' },
+    { query: '10.165.0.29:8080', expected: 'api.int.example.com', hint: '命中目标' },
+    {
+      query: '/apps/nginx/conf/conf.d/api.int.example.com.conf',
+      expected: 'api.int.example.com',
+      hint: '命中路径',
+    },
+  ]
+  for (const testCase of searchCases) {
+    assert(
+      await evaluate(`(() => {
+        const input = document.querySelector('.filter-bar input')
+        if (!input) return false
+        input.value = ${JSON.stringify(testCase.query)}
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()`),
+      `The site search input was not available for ${testCase.query}`,
+    )
+    await wait(80)
+    const result = await evaluate(`(() => ({
+      rows: [...document.querySelectorAll('.site-row')].map((row) => ({
+        title: row.querySelector('.site-primary strong')?.textContent.trim() || '',
+        hint: row.querySelector('.site-primary small')?.textContent.trim() || '',
+      })),
+    }))()`)
+    assert(
+      result.rows.length === 1 && result.rows[0].title.includes(testCase.expected),
+      `Search ${testCase.query} returned the wrong site: ${JSON.stringify(result.rows)}`,
+    )
+    assert(
+      result.rows[0].hint.includes(testCase.hint),
+      `Search ${testCase.query} did not explain its ${testCase.hint} match`,
+    )
+  }
+  assert(
+    await evaluate(`(() => {
+      const input = document.querySelector('.filter-bar input')
+      if (!input) return false
+      input.value = '   '
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      return true
+    })()`),
+    'The site search input could not be cleared',
+  )
+  await wait(80)
+  assert(
+    await evaluate(`document.querySelectorAll('.site-row').length`) === 2,
+    'A whitespace-only site search did not restore the full list',
+  )
+
   const detailPresentation = await evaluate(`(() => {
     const data = document.querySelector('.data-panel')
     const detail = document.querySelector('.detail-panel')
@@ -807,6 +863,7 @@ try {
   assert(narrowEditor.offlineDisabled, 'An offline node remained selectable in the editor')
   assert(narrowEditor.offlineOpacity < 1, 'The offline node card has no distinct visual treatment')
 
+  console.log('PASS site search covers ports, directives, targets, paths, and node Conf')
   console.log('PASS unified site editor interaction')
   console.log('PASS dirty close protection and saving lock')
   console.log('PASS editor preview and saved payload stay consistent')
