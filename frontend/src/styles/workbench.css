@@ -414,7 +414,7 @@ body {
 
 /* Sites configuration desk: structure follows the approved D workbench, not the generic page shell. */
 .page-sites {
-  width: min(1390px, calc(100% - 56px));
+  width: min(1510px, calc(100% - 56px));
   --sites-ink: #172a36;
   --sites-muted: #68777e;
   --sites-line: #cbd5d8;
@@ -423,9 +423,9 @@ body {
 
 .page-sites .sites-hero {
   display: grid;
-  min-height: 109px;
-  grid-template-columns: minmax(0, 1fr) 430px;
-  gap: 28px;
+  min-height: 124px;
+  grid-template-columns: minmax(0, 1fr) 470px;
+  gap: 32px;
   align-items: stretch;
   margin-bottom: 18px;
 }
@@ -541,8 +541,8 @@ body {
 }
 
 .page-sites .master-detail {
-  grid-template-columns: minmax(0, 1fr) 410px;
-  gap: 20px;
+  grid-template-columns: minmax(0, 1fr) 460px;
+  gap: 24px;
   align-items: stretch;
 }
 
@@ -614,8 +614,8 @@ body {
 }
 
 .page-sites .detail-head {
-  min-height: 105px;
-  padding: 22px 18px 15px;
+  min-height: 118px;
+  padding: 25px 22px 18px;
 }
 
 .page-sites .detail-eyebrow {
@@ -625,21 +625,21 @@ body {
 }
 
 .page-sites .detail-head h2 {
-  max-width: 290px;
+  max-width: 340px;
   color: var(--sites-ink);
-  font-size: 20px;
-  line-height: 1.2;
+  font-size: 21px;
+  line-height: 1.25;
 }
 
 .page-sites .detail-actions {
-  gap: 6px;
-  padding: 13px 17px;
+  gap: 9px;
+  padding: 17px 20px;
 }
 
 .page-sites .detail-actions .n-button {
-  min-height: 37px;
+  min-height: 42px;
   border-radius: 2px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .page-sites .detail-actions .detail-publish-action {
@@ -656,9 +656,30 @@ body {
 }
 
 .page-sites .detail-actions .detail-danger-action {
-  color: #c45650;
-  background: #fff;
-  border-color: #e8aaa6;
+  --n-color: #fff0ed !important;
+  --n-color-hover: #fde4e0 !important;
+  --n-color-pressed: #f8d8d4 !important;
+  --n-color-focus: #fff0ed !important;
+  --n-border: 1px solid #e5a19b !important;
+  --n-border-hover: 1px solid #d97c74 !important;
+  --n-border-pressed: 1px solid #c9655e !important;
+  --n-text-color: #b54d47 !important;
+  --n-text-color-hover: #a7423d !important;
+  --n-text-color-pressed: #933833 !important;
+  color: #b54d47 !important;
+  background: #fff0ed !important;
+  border-color: #e5a19b !important;
+  box-shadow: inset 0 0 0 1px rgba(181, 77, 71, .05);
+}
+
+.page-sites .detail-actions .detail-danger-action .n-button__border {
+  border-color: #e5a19b !important;
+}
+
+.page-sites .detail-actions .detail-danger-action:hover {
+  color: #a7423d !important;
+  background: #fde4e0 !important;
+  border-color: #d97c74 !important;
 }
 
 .page-sites .detail-context-grid {
@@ -669,8 +690,8 @@ body {
 
 .page-sites .detail-context-grid > div {
   min-width: 0;
-  min-height: 84px;
-  padding: 14px 17px;
+  min-height: 98px;
+  padding: 17px 20px;
 }
 
 .page-sites .detail-context-grid > div + div {
@@ -698,8 +719,13 @@ body {
 }
 
 .page-sites .deployment-list article {
-  min-height: 58px;
+  min-height: 66px;
+  padding: 12px;
   border-radius: 1px;
+}
+
+.page-sites .detail-section {
+  padding: 19px 20px;
 }
 
 .page-sites .code-panel {
@@ -1134,10 +1160,10 @@ body {
 
 .page-sites .release-channel-summary {
   display: grid;
-  height: 109px;
-  min-height: 109px;
-  grid-template-columns: minmax(0, 1fr) 112px;
-  grid-template-rows: 46px 30px 31px;
+  height: 124px;
+  min-height: 124px;
+  grid-template-columns: minmax(0, 1fr) 138px;
+  grid-template-rows: 51px 33px 38px;
   margin: 0;
   overflow: hidden;
   border-color: #abb9bc;
@@ -1147,7 +1173,7 @@ body {
 .page-sites .release-summary-identity {
   grid-column: 1;
   grid-row: 1;
-  padding: 13px 16px 4px;
+  padding: 16px 19px 5px;
   border: 0;
 }
 
@@ -1165,7 +1191,7 @@ body {
   grid-column: 1;
   grid-row: 2;
   align-items: center;
-  padding: 1px 16px 4px 34px;
+  padding: 1px 19px 5px 38px;
 }
 
 .page-sites .release-summary-copy::before,
@@ -1207,7 +1233,9 @@ body {
   grid-column: 2;
   grid-row: 1 / -1;
   place-content: center;
+  gap: 2px;
   overflow: hidden;
+  padding: 14px;
   border-left: 1px solid #c4cebd;
   background: #e9efb6;
 }
@@ -1217,8 +1245,8 @@ body {
   z-index: -1;
   top: 50%;
   left: 50%;
-  width: 78px;
-  height: 78px;
+  width: 88px;
+  height: 88px;
   border-radius: 50%;
   background: conic-gradient(var(--green) var(--release-progress), rgba(255, 255, 255, .62) 0);
   content: '';
@@ -1230,12 +1258,14 @@ body {
 
 .page-sites .release-summary-result strong {
   color: var(--sites-ink);
-  font-size: 24px;
+  font-size: 25px;
+  line-height: 1;
 }
 
 .page-sites .release-summary-result small {
   color: #465a52;
   font-size: 10px;
+  line-height: 1.2;
 }
 
 .page-sites .release-summary-tools {
@@ -1244,7 +1274,7 @@ body {
   grid-row: 3;
   gap: 10px;
   align-items: center;
-  padding: 4px 16px 6px 34px;
+  padding: 5px 19px 7px 38px;
   border-top: 1px solid var(--sites-soft-line);
   border-left: 0;
 }
