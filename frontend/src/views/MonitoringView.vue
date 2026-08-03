@@ -352,6 +352,7 @@ onBeforeUnmount(() => {
           v-for="filesystem in filesystems"
           :key="String(filesystem.mount || filesystem.path)"
           class="filesystem-row"
+          :data-tone="Number(filesystem.percent || 0) >= 90 ? 'danger' : Number(filesystem.percent || 0) >= 80 ? 'warning' : 'healthy'"
         >
           <div>
             <strong>{{ filesystem.mount || filesystem.path }}</strong>

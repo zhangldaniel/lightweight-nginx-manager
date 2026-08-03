@@ -18,13 +18,13 @@ import { useConsoleStore } from './stores/console'
 const store = useConsoleStore()
 const themeOverrides: GlobalThemeOverrides = {
   common: {
-    primaryColor: '#40545c',
-    primaryColorHover: '#526a73',
-    primaryColorPressed: '#2f3d43',
-    primaryColorSuppl: '#40545c',
-    successColor: '#4f8873',
-    warningColor: '#b47e2c',
-    errorColor: '#d45f59',
+    primaryColor: '#17212a',
+    primaryColorHover: '#2b3a45',
+    primaryColorPressed: '#111820',
+    primaryColorSuppl: '#17212a',
+    successColor: '#16866a',
+    warningColor: '#b77917',
+    errorColor: '#b84540',
     borderRadius: '5px',
     borderRadiusSmall: '4px',
     fontFamily:
