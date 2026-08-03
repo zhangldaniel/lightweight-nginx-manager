@@ -23,7 +23,6 @@ const accountOptions = computed(() => [
     label: `${store.session?.username} · ${roleLabel(store.session?.role || '')}`,
     disabled: true,
   },
-  { key: 'density', label: store.density === 'comfortable' ? '切换紧凑模式' : '切换舒适模式' },
   { key: 'logout', label: '退出登录' },
 ])
 
@@ -34,11 +33,7 @@ function roleLabel(role: string) {
 }
 
 async function handleAccount(key: string) {
-  if (key === 'density') {
-    store.setDensity(store.density === 'comfortable' ? 'compact' : 'comfortable')
-  } else if (key === 'logout') {
-    await store.logout()
-  }
+  if (key === 'logout') await store.logout()
 }
 
 async function refresh() {

@@ -667,6 +667,81 @@ try {
   )
   assert(offlineState.dot, 'Offline deployment did not use the danger status indicator')
 
+  const assertWideEditorGeometry = async ({ width, height, minCodeWidth }) => {
+    await command('Emulation.setDeviceMetricsOverride', {
+      width,
+      height,
+      deviceScaleFactor: 1,
+      mobile: false,
+    })
+    await command('Page.reload', { ignoreCache: true })
+    await wait(700)
+    assert(
+      await evaluate(`(() => {
+        const button = [...document.querySelectorAll('button')]
+          .find((item) => item.textContent.includes('新增站点'))
+        button?.click()
+        return Boolean(button)
+      })()`),
+      `The create-site button was not available at ${width}px`,
+    )
+    await wait(350)
+    const layout = await evaluate(`(() => {
+      const modal = document.querySelector('.site-editor-modal')
+      const grid = document.querySelector('.site-editor-grid')
+      const template = grid?.querySelector('.template-rail')
+      const fields = grid?.querySelector('.editor-fields')
+      const code = grid?.querySelector('.editor-code')
+      const modalRect = modal?.getBoundingClientRect()
+      const gridRect = grid?.getBoundingClientRect()
+      const templateRect = template?.getBoundingClientRect()
+      const fieldsRect = fields?.getBoundingClientRect()
+      const codeRect = code?.getBoundingClientRect()
+      const style = grid ? getComputedStyle(grid) : null
+      return {
+        modalWidth: modalRect?.width ?? 0,
+        gridWidth: gridRect?.width ?? 0,
+        templateWidth: templateRect?.width ?? 0,
+        fieldsWidth: fieldsRect?.width ?? 0,
+        codeWidth: codeRect?.width ?? 0,
+        columnGap: Number.parseFloat(style?.columnGap || '0'),
+        columns: style?.gridTemplateColumns || '',
+        rightDelta:
+          gridRect && codeRect
+            ? Math.abs(gridRect.right - codeRect.right)
+            : Number.POSITIVE_INFINITY,
+      }
+    })()`)
+    const expectedModalWidth = Math.min(1840, width - 32)
+    const summedTracks =
+      layout.templateWidth + layout.fieldsWidth + layout.codeWidth + layout.columnGap * 2
+    assert(
+      Math.abs(layout.modalWidth - expectedModalWidth) <= 2,
+      `The editor does not use the intended ${width}px viewport width: ${JSON.stringify(layout)}`,
+    )
+    assert(
+      layout.templateWidth >= 223 && layout.templateWidth <= 225,
+      `The template rail is not fixed at 224px for ${width}px: ${JSON.stringify(layout)}`,
+    )
+    assert(
+      layout.fieldsWidth >= 339 && layout.fieldsWidth <= 381,
+      `The editor form column escaped its 340-380px range at ${width}px: ${JSON.stringify(layout)}`,
+    )
+    assert(
+      layout.codeWidth >= minCodeWidth,
+      `The Conf editor does not receive enough remaining width at ${width}px: ${JSON.stringify(layout)}`,
+    )
+    assert(
+      layout.rightDelta <= 1 && Math.abs(summedTracks - layout.gridWidth) <= 2,
+      `The Conf editor does not fill the remaining grid width at ${width}px: ${JSON.stringify(layout)}`,
+    )
+    await command('Page.reload', { ignoreCache: true })
+    await wait(700)
+  }
+
+  await assertWideEditorGeometry({ width: 1920, height: 980, minCodeWidth: 1050 })
+  await assertWideEditorGeometry({ width: 1440, height: 900, minCodeWidth: 680 })
+
   await command('Emulation.setDeviceMetricsOverride', {
     width: 960,
     height: 900,
@@ -697,6 +772,9 @@ try {
   const narrowEditor = await evaluate(`(() => {
     const modal = document.querySelector('.site-editor-modal')
     const rect = modal?.getBoundingClientRect()
+    const grid = document.querySelector('.site-editor-grid')
+    const gridRect = grid?.getBoundingClientRect()
+    const codeRect = grid?.querySelector('.editor-code')?.getBoundingClientRect()
     const offline = [...document.querySelectorAll('.choice-card.offline')]
       .find((item) => item.textContent.includes('it-nginx-bj-01'))
     return {
@@ -704,6 +782,12 @@ try {
       documentScrollWidth: document.documentElement.scrollWidth,
       modalLeft: rect?.left ?? -1,
       modalRight: rect?.right ?? -1,
+      gridWidth: gridRect?.width ?? 0,
+      codeWidth: codeRect?.width ?? 0,
+      codeRightDelta:
+        gridRect && codeRect
+          ? Math.abs(gridRect.right - codeRect.right)
+          : Number.POSITIVE_INFINITY,
       offlineDisabled: Boolean(offline?.disabled),
       offlineOpacity: offline ? Number(getComputedStyle(offline).opacity) : 1,
     }
@@ -715,6 +799,10 @@ try {
   assert(
     narrowEditor.modalLeft >= 0 && narrowEditor.modalRight <= narrowEditor.documentClientWidth,
     'The site editor extends outside the 960px viewport',
+  )
+  assert(
+    narrowEditor.codeWidth >= narrowEditor.gridWidth - 1 && narrowEditor.codeRightDelta <= 1,
+    `The Conf editor does not fill its single-column track at 960px: ${JSON.stringify(narrowEditor)}`,
   )
   assert(narrowEditor.offlineDisabled, 'An offline node remained selectable in the editor')
   assert(narrowEditor.offlineOpacity < 1, 'The offline node card has no distinct visual treatment')

@@ -171,22 +171,6 @@ pre {
   padding: 26px 0 44px;
 }
 
-.density-compact .page {
-  padding-top: 20px;
-}
-
-.density-compact {
-  font-size: 14px;
-}
-
-.density-compact .metric-card {
-  min-height: 92px;
-}
-
-.density-compact .site-row {
-  min-height: 66px;
-}
-
 .side-nav {
   position: relative;
   z-index: 20;
@@ -990,7 +974,7 @@ pre {
 }
 
 .n-card.site-editor-modal {
-  width: min(1480px, calc(100vw - 40px));
+  width: min(1840px, calc(100vw - 32px));
   height: min(850px, calc(100vh - 36px));
 }
 
@@ -1020,8 +1004,8 @@ pre {
 
 .site-editor-grid {
   display: grid;
-  grid-template-columns: 224px minmax(330px, .68fr) minmax(520px, 1.22fr);
-  gap: 16px;
+  grid-template-columns: 224px minmax(340px, 380px) minmax(0, 1fr);
+  gap: 14px;
 }
 
 .site-editor-grid.is-saving {
@@ -1034,6 +1018,10 @@ pre {
 .editor-fields,
 .editor-code {
   min-width: 0;
+}
+
+.editor-code {
+  width: 100%;
 }
 
 .template-rail {
@@ -2807,7 +2795,7 @@ button.record-row:hover {
   .detail-panel { position: static; max-height: none; }
   .node-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .log-workspace { grid-template-columns: minmax(0, 1fr) 270px; }
-  .site-editor-grid { grid-template-columns: 190px minmax(0, 1fr); }
+  .site-editor-grid { grid-template-columns: 200px minmax(0, 1fr); }
   .editor-code { grid-column: 2; min-height: 500px; }
 }
 

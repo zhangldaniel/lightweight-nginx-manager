@@ -1,5 +1,4 @@
 export type Role = 'admin' | 'operator' | 'viewer' | string
-export type Density = 'comfortable' | 'compact'
 export type Tone = 'success' | 'warning' | 'danger' | 'info' | 'neutral'
 
 export interface Session {

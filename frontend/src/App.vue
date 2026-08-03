@@ -91,11 +91,7 @@ onUnmounted(() => {
   >
     <NLoadingBarProvider>
       <NDialogProvider>
-        <div
-          class="application"
-          :class="`density-${store.density}`"
-          :aria-busy="store.loading"
-        >
+        <div class="application" :aria-busy="store.loading">
           <div v-if="store.booting" class="boot-screen">
             <span class="brand-orbit" aria-hidden="true"></span>
             <strong>NGINX MANAGER</strong>

@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Activity,
+  AlertTriangle,
+  CheckCircle2,
   Cpu,
   Gauge,
   HardDrive,
@@ -12,7 +14,6 @@ import {
 } from '@lucide/vue'
 import { NButton, NSelect } from 'naive-ui'
 import PageHeader from '../components/PageHeader.vue'
-import MetricCard from '../components/MetricCard.vue'
 import StatusTag from '../components/StatusTag.vue'
 import LineChart from '../components/LineChart.vue'
 import { api } from '../api'
@@ -61,6 +62,13 @@ const rangeLabel = computed(() => {
   if (rangeSeconds.value === 21600) return '最近 6 小时 · 分钟采样'
   return '最近 24 小时 · 分钟采样'
 })
+const healthSummary = computed(() => {
+  const reasons = selectedSummary.value?.health.reasons || []
+  if (reasons.length) return reasons.join('；')
+  if (selectedSummary.value?.health.status === 'healthy') return '宿主机与 Nginx 指标处于正常范围'
+  if (selectedSummary.value?.health.status === 'offline') return '节点目前无法连接，请检查 Agent 状态'
+  return '当前采样不足，等待 Agent 补充数据'
+})
 
 function healthLabel(status: string) {
   if (status === 'healthy') return '正常'
@@ -75,6 +83,21 @@ function healthTone(status: string) {
   if (status === 'warning') return 'warning' as const
   if (status === 'critical' || status === 'offline') return 'danger' as const
   return 'neutral' as const
+}
+
+function metricTone(path: string, warning: number, critical: number) {
+  const value = valueAt(path)
+  if (value === null) return 'neutral'
+  if (value >= critical) return 'danger'
+  if (value >= warning) return 'warning'
+  return 'healthy'
+}
+
+function chartTone(path: string, warning: number, critical: number): 'blue' | 'amber' | 'red' {
+  const value = valueAt(path)
+  if (value !== null && value >= critical) return 'red'
+  if (value !== null && value >= warning) return 'amber'
+  return 'blue'
 }
 
 function valueAt(path: string) {
@@ -208,20 +231,39 @@ onBeforeUnmount(() => {
 <template>
   <section class="page page-monitoring">
     <PageHeader title="运行监控" description="宿主机资源与 Nginx Stub Status；页面每 20 秒自动更新。">
-      <NSelect v-model:value="selectedNodeId" class="monitor-node-select" :options="nodeOptions" />
-      <NSelect
-        v-model:value="rangeSeconds"
-        class="range-select"
-        :options="[
-          { label: '最近 1 小时', value: 3600 },
-          { label: '最近 6 小时', value: 21600 },
-          { label: '最近 24 小时', value: 86400 },
-        ]"
-      />
-      <NButton :loading="refreshingSummary || loadingHistory" @click="refreshNow">
-        <template #icon><RefreshCw :size="16" /></template>
-        刷新
-      </NButton>
+      <div class="monitor-toolbar" aria-label="监控筛选">
+        <label class="monitor-filter">
+          <span>观察节点</span>
+          <NSelect
+            v-model:value="selectedNodeId"
+            class="monitor-node-select"
+            :options="nodeOptions"
+            aria-label="观察节点"
+          />
+        </label>
+        <label class="monitor-filter">
+          <span>时间范围</span>
+          <NSelect
+            v-model:value="rangeSeconds"
+            class="range-select"
+            :options="[
+              { label: '最近 1 小时', value: 3600 },
+              { label: '最近 6 小时', value: 21600 },
+              { label: '最近 24 小时', value: 86400 },
+            ]"
+            aria-label="时间范围"
+          />
+        </label>
+        <NButton
+          type="primary"
+          class="monitor-refresh"
+          :loading="refreshingSummary || loadingHistory"
+          @click="refreshNow"
+        >
+          <template #icon><RefreshCw :size="16" /></template>
+          刷新数据
+        </NButton>
+      </div>
     </PageHeader>
 
     <div v-if="summaryError" class="inline-error" role="alert">
@@ -229,145 +271,227 @@ onBeforeUnmount(() => {
       <span>{{ summaryError }}</span>
     </div>
 
-    <div v-if="selectedSummary" class="monitor-overview" :data-state="selectedSummary.health.status">
-      <div class="monitor-identity">
-        <span class="node-avatar"><Server :size="21" /></span>
-        <div>
-          <h2>{{ selectedSummary.node.node_name }}</h2>
-          <p>
-            {{ selectedSummary.node.hostname }} · 采样于 {{ relativeTime(selectedSummary.sampled_at) }}
-          </p>
+    <template v-if="selectedSummary">
+      <section class="monitor-signal" :data-state="selectedSummary.health.status">
+        <div class="monitor-signal-node">
+          <span class="monitor-kicker">当前节点</span>
+          <div class="monitor-node-row">
+            <span class="node-avatar"><Server :size="21" /></span>
+            <div class="monitor-node-copy">
+              <h2>{{ selectedSummary.node.node_name }}</h2>
+              <p>{{ selectedSummary.node.hostname }}</p>
+            </div>
+            <StatusTag
+              :label="healthLabel(selectedSummary.health.status)"
+              :tone="healthTone(selectedSummary.health.status)"
+            />
+          </div>
         </div>
-        <StatusTag
-          :label="healthLabel(selectedSummary.health.status)"
-          :tone="healthTone(selectedSummary.health.status)"
-        />
-      </div>
-      <div class="health-reasons">
-        <span v-for="reason in selectedSummary.health.reasons" :key="reason">{{ reason }}</span>
-        <span v-if="!selectedSummary.health.reasons.length" class="healthy-reason">
-          宿主机与 Nginx 指标在正常范围内
-        </span>
-      </div>
-    </div>
 
-    <div v-if="selectedSummary" class="metrics-grid monitor-metrics">
-      <MetricCard
-        label="CPU 使用率"
-        :value="display('cpu.percent', 1, '%')"
-        :note="valueAt('cpu.count') === null ? '尚无采样' : `${display('cpu.count', 0)} 个核心`"
-        :icon="Cpu"
-        :tone="valueAt('cpu.percent') === null ? 'neutral' : (valueAt('cpu.percent') || 0) >= 85 ? 'warning' : 'info'"
-        featured
-      />
-      <MetricCard
-        label="内存使用率"
-        :value="display('memory.percent', 1, '%')"
-        :note="valueAt('memory.used_bytes') === null ? '尚无采样' : displayBytes('memory.used_bytes')"
-        :icon="MemoryStick"
-        :tone="valueAt('memory.percent') === null ? 'neutral' : (valueAt('memory.percent') || 0) >= 90 ? 'warning' : 'success'"
-      />
-      <MetricCard
-        label="活跃连接"
-        :value="stubAvailable ? display('stub_status.active', 0) : '—'"
-        :note="stubAvailable ? 'Nginx Stub Status' : stubReason()"
-        :icon="Activity"
-        :tone="stubAvailable ? 'success' : 'warning'"
-      />
-      <MetricCard
-        label="请求速率"
-        :value="stubAvailable ? display('stub_status.requests_per_second', 1, '/s') : '—'"
-        :note="stubAvailable ? 'Agent 计算增量' : '没有可用采样'"
-        :icon="Gauge"
-        :tone="stubAvailable ? 'info' : 'neutral'"
-      />
-    </div>
-
-    <section v-if="selectedSummary" class="monitor-trends">
-      <header class="monitor-section-head">
-        <div>
-          <h2>资源趋势</h2>
-          <p>{{ rangeLabel }}</p>
+        <div class="monitor-signal-health">
+          <span class="monitor-health-icon" aria-hidden="true">
+            <CheckCircle2 v-if="selectedSummary.health.status === 'healthy'" :size="22" />
+            <AlertTriangle v-else :size="22" />
+          </span>
+          <div class="monitor-health-copy">
+            <span>运行结论</span>
+            <strong>{{ healthSummary }}</strong>
+          </div>
+          <div class="monitor-freshness">
+            <span>最近采样</span>
+            <strong>{{ relativeTime(selectedSummary.sampled_at) }}</strong>
+            <small>20 秒自动更新</small>
+          </div>
         </div>
-        <StatusTag
-          :label="loadingHistory ? '正在刷新' : historyError ? '刷新失败' : `${history.length} 个采样点`"
-          :tone="historyError ? 'danger' : loadingHistory ? 'info' : 'neutral'"
-          :pulse="loadingHistory"
-        />
-      </header>
-      <div v-if="historyError" class="trend-error" role="alert">
-        <span>{{ historyError }}</span>
-        <NButton size="small" @click="loadHistory()">重试</NButton>
-      </div>
-      <div class="monitor-charts" :class="{ loading: loadingHistory && !history.length }">
-        <LineChart label="CPU" :values="series('cpu.percent')" suffix="%" :ceiling="100" :warning="85" />
-        <LineChart label="内存" :values="series('memory.percent')" suffix="%" tone="amber" :ceiling="100" :warning="90" />
-        <LineChart label="Load / Core" :values="series('cpu.load_per_core')" :warning="1" tone="amber" />
-        <LineChart label="请求速率" :values="series('stub_status.requests_per_second')" suffix="/s" tone="green" />
-        <LineChart label="活跃连接" :values="series('stub_status.active')" tone="green" />
-        <LineChart label="网络接收" :values="scaledSeries('network.rx_bytes_per_second', 1024)" suffix=" KB/s" />
-      </div>
-    </section>
+      </section>
 
-    <div v-if="selectedSummary" class="monitor-detail-grid">
-      <article class="data-card">
-        <header><Cpu :size="18" /><strong>宿主机运行状态</strong></header>
-        <dl>
-          <div><dt>Load 1 / 5 / 15</dt><dd>{{ display('cpu.load1', 2) }} / {{ display('cpu.load5', 2) }} / {{ display('cpu.load15', 2) }}</dd></div>
-          <div><dt>Swap 使用</dt><dd>{{ display('memory.swap_percent', 1, '%') }}</dd></div>
-          <div><dt>网络发送</dt><dd>{{ displayBytes('network.tx_bytes_per_second') }}<template v-if="valueAt('network.tx_bytes_per_second') !== null">/s</template></dd></div>
-          <div><dt>网络错误</dt><dd>{{ display('network.errors', 0) }}</dd></div>
-          <div><dt>磁盘读取</dt><dd>{{ displayBytes('disk_io.read_bytes_per_second') }}<template v-if="valueAt('disk_io.read_bytes_per_second') !== null">/s</template></dd></div>
-          <div><dt>磁盘写入</dt><dd>{{ displayBytes('disk_io.write_bytes_per_second') }}<template v-if="valueAt('disk_io.write_bytes_per_second') !== null">/s</template></dd></div>
-          <div><dt>系统运行时间</dt><dd>{{ uptime(valueAt('system.uptime_seconds')) }}</dd></div>
-          <div><dt>内核</dt><dd>{{ String((metrics.system as Record<string, unknown> | undefined)?.kernel || '—') }}</dd></div>
-        </dl>
-      </article>
+      <section class="monitor-kpi-rail" aria-label="核心指标">
+        <article class="monitor-kpi" :data-tone="metricTone('cpu.percent', 85, 95)">
+          <header><Cpu :size="17" /><span>CPU 使用率</span></header>
+          <strong>{{ display('cpu.percent', 1, '%') }}</strong>
+          <p>{{ valueAt('cpu.count') === null ? '尚无核心数采样' : `${display('cpu.count', 0)} 个核心` }}</p>
+          <progress
+            v-if="valueAt('cpu.percent') !== null"
+            :value="valueAt('cpu.percent') || 0"
+            max="100"
+            aria-label="CPU 使用率"
+          ></progress>
+        </article>
+        <article class="monitor-kpi" :data-tone="metricTone('memory.percent', 90, 95)">
+          <header><MemoryStick :size="17" /><span>内存使用率</span></header>
+          <strong>{{ display('memory.percent', 1, '%') }}</strong>
+          <p>{{ valueAt('memory.used_bytes') === null ? '尚无内存采样' : `${displayBytes('memory.used_bytes')} 已用` }}</p>
+          <progress
+            v-if="valueAt('memory.percent') !== null"
+            :value="valueAt('memory.percent') || 0"
+            max="100"
+            aria-label="内存使用率"
+          ></progress>
+        </article>
+        <article class="monitor-kpi" :data-tone="stubAvailable ? 'healthy' : 'warning'">
+          <header><Activity :size="17" /><span>活跃连接</span></header>
+          <strong>{{ stubAvailable ? display('stub_status.active', 0) : '—' }}</strong>
+          <p>{{ stubAvailable ? 'Nginx Stub Status' : stubReason() }}</p>
+        </article>
+        <article class="monitor-kpi" :data-tone="stubAvailable ? 'info' : 'neutral'">
+          <header><Gauge :size="17" /><span>请求速率</span></header>
+          <strong>{{ stubAvailable ? display('stub_status.requests_per_second', 1, '/s') : '—' }}</strong>
+          <p>{{ stubAvailable ? 'Agent 按采样增量计算' : '没有可用采样' }}</p>
+        </article>
+      </section>
 
-      <article class="data-card">
-        <header>
-          <Network :size="18" />
-          <strong>Nginx 运行状态</strong>
+      <section class="monitor-trends">
+        <header class="monitor-section-head">
+          <div>
+            <span class="monitor-kicker">历史采样</span>
+            <h2>资源趋势</h2>
+            <p>{{ rangeLabel }}</p>
+          </div>
+          <div class="monitor-trend-status" aria-live="polite">
+            <span>20 秒自动刷新</span>
+            <StatusTag
+              :label="loadingHistory ? '正在刷新' : historyError ? '刷新失败' : `${history.length} 个采样点`"
+              :tone="historyError ? 'danger' : loadingHistory ? 'info' : 'neutral'"
+              :pulse="loadingHistory"
+            />
+          </div>
+        </header>
+        <div v-if="historyError" class="trend-error" role="alert">
+          <span>{{ historyError }}</span>
+          <NButton size="small" @click="loadHistory()">重试</NButton>
+        </div>
+        <div class="monitor-charts" :class="{ loading: loadingHistory && !history.length }">
+          <LineChart
+            label="CPU"
+            :values="series('cpu.percent')"
+            suffix="%"
+            :tone="chartTone('cpu.percent', 85, 95)"
+            :ceiling="100"
+            :warning="85"
+          />
+          <LineChart
+            label="内存"
+            :values="series('memory.percent')"
+            suffix="%"
+            :tone="chartTone('memory.percent', 90, 95)"
+            :ceiling="100"
+            :warning="90"
+          />
+          <LineChart
+            label="Load / Core"
+            :values="series('cpu.load_per_core')"
+            :tone="chartTone('cpu.load_per_core', 1, 1.5)"
+            :warning="1"
+          />
+          <LineChart label="请求速率" :values="series('stub_status.requests_per_second')" suffix="/s" tone="green" />
+          <LineChart label="活跃连接" :values="series('stub_status.active')" tone="green" />
+          <LineChart label="网络接收" :values="scaledSeries('network.rx_bytes_per_second', 1024)" suffix=" KB/s" />
+        </div>
+      </section>
+
+      <section class="monitor-details">
+        <header class="monitor-section-head">
+          <div>
+            <span class="monitor-kicker">即时明细</span>
+            <h2>运行指标</h2>
+            <p>用于定位资源、进程与磁盘问题的当前采样值</p>
+          </div>
           <StatusTag
             :label="stubAvailable ? 'Stub 可用' : stubConfigured ? 'Stub 异常' : 'Stub 未配置'"
             :tone="stubAvailable ? 'success' : 'warning'"
           />
         </header>
-        <p v-if="!stubAvailable" class="data-card-note">{{ stubReason() }}</p>
-        <dl>
-          <div><dt>Nginx 进程</dt><dd>{{ nginx.running === true ? `${nginx.processes || 0} 个` : nginx.running === false ? '未运行' : '—' }}</dd></div>
-          <div><dt>Worker</dt><dd>{{ nginx.workers ?? '—' }}</dd></div>
-          <div><dt>Nginx RSS</dt><dd>{{ bytes(nginx.rss_bytes) }}</dd></div>
-          <div><dt>Reading / Writing</dt><dd>{{ stubAvailable ? `${stub.reading ?? 0} / ${stub.writing ?? 0}` : '—' }}</dd></div>
-          <div><dt>Waiting</dt><dd>{{ stubAvailable ? stub.waiting ?? 0 : '—' }}</dd></div>
-          <div><dt>接受 / 已处理</dt><dd>{{ stubAvailable ? `${stub.accepts ?? 0} / ${stub.handled ?? 0}` : '—' }}</dd></div>
-          <div><dt>累计请求</dt><dd>{{ stubAvailable ? stub.requests ?? 0 : '—' }}</dd></div>
-          <div><dt>丢弃连接</dt><dd>{{ stubAvailable ? stub.dropped_connections ?? 0 : '—' }}</dd></div>
-        </dl>
-      </article>
 
-      <article class="data-card filesystem-card">
-        <header><HardDrive :size="18" /><strong>文件系统</strong></header>
-        <div
-          v-for="filesystem in filesystems"
-          :key="String(filesystem.mount || filesystem.path)"
-          class="filesystem-row"
-          :data-tone="Number(filesystem.percent || 0) >= 90 ? 'danger' : Number(filesystem.percent || 0) >= 80 ? 'warning' : 'healthy'"
-        >
-          <div>
-            <strong>{{ filesystem.mount || filesystem.path }}</strong>
-            <span>{{ bytes(filesystem.used_bytes) }} / {{ bytes(filesystem.total_bytes) }} · {{ filesystem.percent }}%</span>
-          </div>
-          <progress :value="Number(filesystem.percent || 0)" max="100"></progress>
+        <div class="monitor-detail-grid">
+          <article class="monitor-data-block">
+            <header>
+              <span><Cpu :size="18" /></span>
+              <div><strong>宿主机</strong><small>系统与 I/O</small></div>
+            </header>
+            <dl>
+              <div><dt>Load 1 / 5 / 15</dt><dd>{{ display('cpu.load1', 2) }} / {{ display('cpu.load5', 2) }} / {{ display('cpu.load15', 2) }}</dd></div>
+              <div><dt>Swap 使用</dt><dd>{{ display('memory.swap_percent', 1, '%') }}</dd></div>
+              <div><dt>网络发送</dt><dd>{{ displayBytes('network.tx_bytes_per_second') }}<template v-if="valueAt('network.tx_bytes_per_second') !== null">/s</template></dd></div>
+              <div><dt>网络错误</dt><dd>{{ display('network.errors', 0) }}</dd></div>
+              <div><dt>磁盘读取</dt><dd>{{ displayBytes('disk_io.read_bytes_per_second') }}<template v-if="valueAt('disk_io.read_bytes_per_second') !== null">/s</template></dd></div>
+              <div><dt>磁盘写入</dt><dd>{{ displayBytes('disk_io.write_bytes_per_second') }}<template v-if="valueAt('disk_io.write_bytes_per_second') !== null">/s</template></dd></div>
+              <div><dt>系统运行时间</dt><dd>{{ uptime(valueAt('system.uptime_seconds')) }}</dd></div>
+              <div><dt>内核</dt><dd>{{ String((metrics.system as Record<string, unknown> | undefined)?.kernel || '—') }}</dd></div>
+            </dl>
+          </article>
+
+          <article class="monitor-data-block">
+            <header>
+              <span><Network :size="18" /></span>
+              <div><strong>Nginx</strong><small>进程与连接</small></div>
+            </header>
+            <p v-if="!stubAvailable" class="data-card-note">{{ stubReason() }}</p>
+            <dl>
+              <div><dt>Nginx 进程</dt><dd>{{ nginx.running === true ? `${nginx.processes || 0} 个` : nginx.running === false ? '未运行' : '—' }}</dd></div>
+              <div><dt>Worker</dt><dd>{{ nginx.workers ?? '—' }}</dd></div>
+              <div><dt>Nginx RSS</dt><dd>{{ bytes(nginx.rss_bytes) }}</dd></div>
+              <div><dt>Reading / Writing</dt><dd>{{ stubAvailable ? `${stub.reading ?? 0} / ${stub.writing ?? 0}` : '—' }}</dd></div>
+              <div><dt>Waiting</dt><dd>{{ stubAvailable ? stub.waiting ?? 0 : '—' }}</dd></div>
+              <div><dt>接受 / 已处理</dt><dd>{{ stubAvailable ? `${stub.accepts ?? 0} / ${stub.handled ?? 0}` : '—' }}</dd></div>
+              <div><dt>累计请求</dt><dd>{{ stubAvailable ? stub.requests ?? 0 : '—' }}</dd></div>
+              <div><dt>丢弃连接</dt><dd>{{ stubAvailable ? stub.dropped_connections ?? 0 : '—' }}</dd></div>
+            </dl>
+          </article>
+
+          <article class="monitor-data-block filesystem-card">
+            <header>
+              <span><HardDrive :size="18" /></span>
+              <div><strong>文件系统</strong><small>{{ filesystems.length }} 个挂载点</small></div>
+            </header>
+            <div v-if="filesystems.length" class="monitor-filesystems">
+              <div
+                v-for="filesystem in filesystems"
+                :key="String(filesystem.mount || filesystem.path)"
+                class="filesystem-row"
+                :data-tone="Number(filesystem.percent || 0) >= 90 ? 'danger' : Number(filesystem.percent || 0) >= 80 ? 'warning' : 'healthy'"
+              >
+                <div>
+                  <strong>{{ filesystem.mount || filesystem.path }}</strong>
+                  <span>{{ bytes(filesystem.used_bytes) }} / {{ bytes(filesystem.total_bytes) }}</span>
+                  <b>{{ filesystem.percent }}%</b>
+                </div>
+                <progress
+                  :value="Number(filesystem.percent || 0)"
+                  max="100"
+                  :aria-label="`${filesystem.mount || filesystem.path} 使用率`"
+                ></progress>
+              </div>
+            </div>
+            <div v-else class="monitor-inline-empty">
+              <HardDrive :size="20" />
+              <span>尚未收到文件系统指标</span>
+            </div>
+          </article>
         </div>
-        <p v-if="!filesystems.length">尚未收到文件系统指标。</p>
-      </article>
-    </div>
+      </section>
+    </template>
 
-    <div v-else class="empty-state large">
-      <Activity :size="34" />
-      <strong>尚未收到监控数据</strong>
-      <span>检查 Agent 连接与 Stub Status 配置，并等待下一次心跳。</span>
-    </div>
+    <section v-else-if="refreshingSummary" class="empty-state large monitor-empty-state" aria-live="polite">
+      <span class="monitor-empty-icon loading"><RefreshCw :size="30" /></span>
+      <span class="monitor-kicker">正在建立观测</span>
+      <h2>读取节点监控数据</h2>
+      <p>正在获取最新心跳、资源指标与 Nginx 运行状态。</p>
+    </section>
+
+    <section v-else class="empty-state large monitor-empty-state">
+      <span class="monitor-empty-icon"><Activity :size="32" /></span>
+      <span class="monitor-kicker">暂无遥测信号</span>
+      <h2>尚未收到监控数据</h2>
+      <p>依次确认 Agent 在线、节点具备指标能力，并等待下一次心跳。</p>
+      <ol>
+        <li><strong>01</strong><span>确认 Agent 在线</span></li>
+        <li><strong>02</strong><span>检查 metrics_v1 能力</span></li>
+        <li><strong>03</strong><span>等待下一次采样</span></li>
+      </ol>
+      <NButton type="primary" :loading="refreshingSummary" @click="refreshNow">
+        <template #icon><RefreshCw :size="16" /></template>
+        重新获取
+      </NButton>
+    </section>
   </section>
 </template>

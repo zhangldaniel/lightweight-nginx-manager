@@ -13,7 +13,6 @@ import { processInventoryJobs } from '../utils/inventory'
 import type {
   AuditRecord,
   CertificateRecord,
-  Density,
   EnrollmentRecord,
   JobRecord,
   MonitoringItem,
@@ -99,9 +98,6 @@ export const useConsoleStore = defineStore('console', () => {
   const selectedSiteId = ref('')
   const selectedCertificateId = ref('')
   const selectedNodeId = ref('')
-  const density = ref<Density>(
-    localStorage.getItem('nginx-manager-density') === 'compact' ? 'compact' : 'comfortable',
-  )
   const toasts = reactive<ToastItem[]>([])
 
   const sites = computed(() => ui.value.sites)
@@ -1174,11 +1170,6 @@ export const useConsoleStore = defineStore('console', () => {
     await refresh()
   }
 
-  function setDensity(value: Density) {
-    density.value = value
-    localStorage.setItem('nginx-manager-density', value)
-  }
-
   return {
     session,
     booting,
@@ -1200,7 +1191,6 @@ export const useConsoleStore = defineStore('console', () => {
     selectedSite,
     selectedCertificate,
     selectedNode,
-    density,
     toasts,
     canOperate,
     isAdmin,
@@ -1225,6 +1215,5 @@ export const useConsoleStore = defineStore('console', () => {
     removeSiteFromNodes,
     transferSite,
     revokeNode,
-    setDensity,
   }
 })

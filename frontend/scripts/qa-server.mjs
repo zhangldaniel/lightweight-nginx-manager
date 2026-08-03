@@ -182,21 +182,224 @@ const monitoring = nodes.map((node, index) => ({
   sampled_at: now,
   health: { status: 'healthy', reasons: [] },
   metrics: {
-    cpu: { percent: 22.4 + index * 8 },
-    memory: { percent: 51.8 + index * 5, used_bytes: 8_589_934_592 },
-    network: { rx_bytes_per_second: 1_820_000, tx_bytes_per_second: 780_000 },
-    disk_io: { write_bytes_per_second: 430_000 },
-    filesystems: [{ mount: '/', percent: 42.5 }],
+    cpu: {
+      percent: 22.4 + index * 8,
+      count: 8,
+      load1: 1.08,
+      load5: 0.94,
+      load15: 0.82,
+      load_per_core: 0.135,
+    },
+    memory: {
+      percent: 51.8 + index * 5,
+      used_bytes: 8_589_934_592,
+      swap_percent: 0,
+    },
+    network: {
+      rx_bytes_per_second: 1_820_000,
+      tx_bytes_per_second: 780_000,
+      errors: 0,
+    },
+    disk_io: {
+      read_bytes_per_second: 264_000,
+      write_bytes_per_second: 430_000,
+    },
+    filesystems: [
+      { mount: '/', used_bytes: 91_268_055_040, total_bytes: 214_748_364_800, percent: 42.5 },
+      { mount: '/apps', used_bytes: 68_719_476_736, total_bytes: 161_061_273_600, percent: 42.7 },
+    ],
+    nginx: { running: true, processes: 3, workers: 2, rss_bytes: 49_283_072 },
+    system: { uptime_seconds: 4_322_400, kernel: '6.1.0-18-amd64' },
     stub_status: {
+      configured: true,
       available: true,
       active: 38 + index * 7,
       accepts: 1_923_002,
       handled: 1_923_002,
       requests: 8_230_104,
+      reading: 1,
+      writing: 3,
+      waiting: 34 + index * 7,
       requests_per_second: 132.6 + index * 24,
+      dropped_connections: 0,
     },
   },
 }))
+
+const monitoringHistory = Array.from({ length: 36 }, (_, index) => {
+  const phase = index / 35
+  const broadWave = Math.sin(phase * Math.PI * 4)
+  const detailWave = Math.sin(phase * Math.PI * 10)
+  const base = monitoring[0].metrics
+  return {
+    sampled_at: new Date(Date.now() - (35 - index) * 60_000).toISOString(),
+    metrics: {
+      ...base,
+      cpu: {
+        ...base.cpu,
+        percent: Number((22.4 + broadWave * 5.4 + detailWave * 1.4).toFixed(1)),
+        load1: Number((1.08 + broadWave * 0.26).toFixed(2)),
+        load_per_core: Number((0.135 + broadWave * 0.033).toFixed(3)),
+      },
+      memory: {
+        ...base.memory,
+        percent: Number((51.8 + Math.sin(phase * Math.PI * 3) * 2.2).toFixed(1)),
+      },
+      network: {
+        ...base.network,
+        rx_bytes_per_second: Math.round(1_820_000 + broadWave * 410_000 + detailWave * 120_000),
+      },
+      stub_status: {
+        ...base.stub_status,
+        active: Math.round(38 + broadWave * 7 + detailWave * 2),
+        requests_per_second: Number((132.6 + broadWave * 34 + detailWave * 11).toFixed(1)),
+      },
+    },
+  }
+})
+
+const minutesFromNow = (minutes) => new Date(Date.now() + minutes * 60_000).toISOString()
+const recordJobs = [
+  {
+    id: 'job-config-success',
+    batch_id: 'batch-release-1846',
+    operation_id: 'operation-config-success',
+    node_id: 'node-sh-01',
+    node_name: 'it-nginx-sh-01',
+    action: 'config_apply',
+    status: 'succeeded',
+    created_at: minutesFromNow(-18),
+    expires_at: minutesFromNow(12),
+    claimed_at: minutesFromNow(-17),
+    completed_at: minutesFromNow(-16),
+    created_by: 'admin',
+    result: { summary: 'nginx -t 通过，配置已原子替换并 reload' },
+  },
+  {
+    id: 'job-test-failed',
+    batch_id: 'batch-release-1847',
+    operation_id: 'operation-config-failed',
+    node_id: 'node-bj-01',
+    node_name: 'it-nginx-bj-01',
+    action: 'nginx_test',
+    status: 'failed',
+    created_at: minutesFromNow(-11),
+    expires_at: minutesFromNow(19),
+    claimed_at: minutesFromNow(-10),
+    completed_at: minutesFromNow(-9),
+    created_by: 'operator.li',
+    result: {
+      summary: 'nginx: [emerg] host not found in upstream "orders_backend"',
+      failure_stage: 'nginx -t',
+      reloaded: false,
+    },
+  },
+  {
+    id: 'job-certificate-running',
+    batch_id: 'batch-certificate-1848',
+    operation_id: 'operation-certificate-running',
+    node_id: 'node-sh-01',
+    node_name: 'it-nginx-sh-01',
+    action: 'certificate_apply',
+    status: 'running',
+    created_at: minutesFromNow(-3),
+    expires_at: minutesFromNow(27),
+    claimed_at: minutesFromNow(-2),
+    completed_at: null,
+    created_by: 'admin',
+    result: null,
+  },
+  {
+    id: 'job-inventory-expired',
+    batch_id: 'batch-inventory-1845',
+    operation_id: null,
+    node_id: 'node-bj-01',
+    node_name: 'it-nginx-bj-01',
+    action: 'inspect',
+    status: 'expired',
+    created_at: minutesFromNow(-48),
+    expires_at: minutesFromNow(-18),
+    claimed_at: null,
+    completed_at: minutesFromNow(-18),
+    created_by: 'admin',
+    result: { summary: 'Agent 未在任务有效期内领取扫描任务' },
+  },
+]
+
+const recordOperations = [
+  {
+    id: 'operation-config-success',
+    site_id: 'api.int.example.com',
+    kind: 'config_apply',
+    status: 'succeeded',
+    base_version: 3,
+    candidate_revision_id: 'revision-4',
+    created_by: 'admin',
+    created_at: minutesFromNow(-19),
+    updated_at: minutesFromNow(-16),
+    completed_at: minutesFromNow(-16),
+    metadata: {},
+  },
+  {
+    id: 'operation-config-failed',
+    site_id: 'orders.int.example.com',
+    kind: 'config_move',
+    status: 'failed',
+    base_version: 8,
+    candidate_revision_id: 'revision-9',
+    created_by: 'operator.li',
+    created_at: minutesFromNow(-12),
+    updated_at: minutesFromNow(-9),
+    completed_at: minutesFromNow(-9),
+    metadata: { summary: '目标节点 nginx -t 未通过，迁移已回滚' },
+  },
+  {
+    id: 'operation-certificate-running',
+    site_id: 'console.int.example.com',
+    kind: 'certificate_apply',
+    status: 'running',
+    base_version: 6,
+    candidate_revision_id: null,
+    created_by: 'admin',
+    created_at: minutesFromNow(-3),
+    updated_at: minutesFromNow(-1),
+    completed_at: null,
+    metadata: {},
+  },
+]
+
+const recordAudit = [
+  {
+    id: 203,
+    created_at: minutesFromNow(-2),
+    actor_type: 'user',
+    actor_id: 'admin',
+    event: 'certificate.replace.requested',
+    target_type: 'certificate',
+    target_id: 'cert-wildcard',
+    detail: {},
+  },
+  {
+    id: 202,
+    created_at: minutesFromNow(-9),
+    actor_type: 'user',
+    actor_id: 'operator.li',
+    event: 'configuration.publish.failed',
+    target_type: 'site',
+    target_id: 'orders.int.example.com',
+    detail: {},
+  },
+  {
+    id: 201,
+    created_at: minutesFromNow(-36),
+    actor_type: 'user',
+    actor_id: 'admin',
+    event: 'agent.enrollment.approved',
+    target_type: 'node',
+    target_id: 'node-bj-01',
+    detail: {},
+  },
+]
 
 function send(response, body, status = 200, contentType = 'application/json; charset=utf-8') {
   response.writeHead(status, {
@@ -207,7 +410,8 @@ function send(response, body, status = 200, contentType = 'application/json; cha
 }
 
 export const qaServer = createServer((request, response) => {
-  const path = new URL(request.url || '/', `http://127.0.0.1:${port}`).pathname
+  const requestUrl = new URL(request.url || '/', `http://127.0.0.1:${port}`)
+  const path = requestUrl.pathname
   if (path === '/logout-preview') {
     response.writeHead(302, {
       location: '/#/login',
@@ -231,8 +435,11 @@ export const qaServer = createServer((request, response) => {
   }
   if (path === '/api/v1/admin/ui-state') return send(response, { revision: 1, state })
   if (path === '/api/v1/admin/nodes') return send(response, { items: nodes })
-  if (path === '/api/v1/admin/jobs' || path === '/api/v1/admin/operations') {
-    return send(response, { items: [] })
+  if (path === '/api/v1/admin/jobs') return send(response, { items: recordJobs })
+  if (path === '/api/v1/admin/operations') {
+    return send(response, {
+      items: requestUrl.searchParams.has('reconciliation_status') ? [] : recordOperations,
+    })
   }
   if (path === '/api/v1/admin/enrollments') return send(response, { items: [] })
   if (path === '/api/v1/admin/monitoring/summary') {
@@ -240,14 +447,11 @@ export const qaServer = createServer((request, response) => {
   }
   if (path.includes('/metrics')) {
     return send(response, {
-      items: Array.from({ length: 36 }, (_, index) => ({
-        sampled_at: new Date(Date.now() - (35 - index) * 60_000).toISOString(),
-        metrics: monitoring[0].metrics,
-      })),
+      items: monitoringHistory,
     })
   }
   if (path === '/api/v1/admin/audit') {
-    return send(response, { items: [], next_before_id: null })
+    return send(response, { items: recordAudit, next_before_id: null })
   }
   return send(response, index, 200, 'text/html; charset=utf-8')
 }).listen(port, '127.0.0.1', () => {

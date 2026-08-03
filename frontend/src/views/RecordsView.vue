@@ -87,6 +87,56 @@ function actionLabel(action: string) {
   return labels[action] || action
 }
 
+function rowState(status: string) {
+  if (['failed', 'expired'].includes(status)) return 'is-failed'
+  if (status === 'partial') return 'is-warning'
+  if (['queued', 'running', 'claimed'].includes(status)) return 'is-active'
+  return ''
+}
+
+function payloadMessage(payload: Record<string, unknown> | null | undefined) {
+  if (!payload) return ''
+  const keys = ['error', 'message', 'summary', 'failure_reason', 'stderr', 'failure_stage']
+  for (const key of keys) {
+    const value = payload[key]
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim().split(/\r?\n/, 1)[0]
+    }
+    if (typeof value === 'number') return String(value)
+  }
+  return ''
+}
+
+function statusHint(status: string, payload?: Record<string, unknown> | null) {
+  const message = payloadMessage(payload)
+  if (message) return message
+  const hints: Record<string, string> = {
+    failed: '打开详情查看失败输出',
+    expired: '任务未在有效期内完成',
+    partial: '部分目标未完成',
+    queued: '等待 Agent 领取',
+    claimed: 'Agent 已领取任务',
+    running: 'Agent 正在执行',
+    succeeded: '任务已正常完成',
+  }
+  return hints[status] || '状态已记录'
+}
+
+function durationLabel(start: string | null | undefined, end: string | null | undefined, status: string) {
+  if (!end) return ['queued', 'claimed', 'running'].includes(status) ? '进行中' : '—'
+  const startAt = Date.parse(start || '')
+  const endAt = Date.parse(end)
+  if (!Number.isFinite(startAt) || !Number.isFinite(endAt)) return '—'
+  const seconds = Math.max(0, Math.round((endAt - startAt) / 1000))
+  if (seconds < 1) return '< 1 秒'
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 时 ${minutes % 60} 分`
+  return `${Math.floor(hours / 24)} 天 ${hours % 24} 时`
+}
+
 function showJob(job: JobRecord) {
   selectedJob.value = job
   detailOpen.value = true
@@ -131,45 +181,85 @@ onMounted(refreshAudit)
       <NTabs v-model:value="activeTab" type="line" animated>
         <NTabPane name="jobs" :tab="`Agent 任务（${jobs.length}）`">
           <div class="record-table record-table-jobs table-head">
-            <span>动作 / 目标</span><span>状态</span><span>操作者</span><span>开始时间</span><span>完成时间</span>
+            <span>任务 / 目标</span><span>状态</span><span>耗时</span><span>操作者</span><span>开始 / 完成</span>
           </div>
           <button
             v-for="job in jobs"
             :key="job.id"
             type="button"
             class="record-table record-table-jobs record-row"
+            :class="rowState(job.status)"
+            :aria-label="`查看 ${actionLabel(job.action)}，${job.node_name || job.node_id} 的任务详情`"
             @click="showJob(job)"
           >
-            <span><strong>{{ actionLabel(job.action) }}</strong><small>{{ job.node_name || job.node_id }}</small></span>
-            <span><StatusTag :label="statusLabel(job.status)" :tone="statusTone(job.status)" /></span>
-            <span>{{ job.created_by || '系统' }}</span>
-            <span>{{ dateTime(job.created_at) }}</span>
-            <span>{{ dateTime(job.completed_at) }}</span>
+            <span class="record-primary">
+              <strong>{{ actionLabel(job.action) }}</strong>
+              <small :title="job.node_name || job.node_id">{{ job.node_name || job.node_id }}</small>
+            </span>
+            <span class="record-status-cell">
+              <StatusTag :label="statusLabel(job.status)" :tone="statusTone(job.status)" />
+              <small :title="statusHint(job.status, job.result)">{{ statusHint(job.status, job.result) }}</small>
+            </span>
+            <span class="record-duration-cell">
+              <strong>{{ durationLabel(job.claimed_at || job.created_at, job.completed_at, job.status) }}</strong>
+              <small>{{ job.completed_at ? '执行耗时' : '尚未完成' }}</small>
+            </span>
+            <span class="record-operator-cell">
+              <small class="record-mobile-label">操作者</small>
+              {{ job.created_by || '系统' }}
+            </span>
+            <span class="record-time-cell">
+              <span class="record-time-line"><small>开始</small><time :datetime="job.created_at">{{ dateTime(job.created_at) }}</time></span>
+              <span class="record-time-line"><small>完成</small><time :datetime="job.completed_at || undefined">{{ dateTime(job.completed_at) }}</time></span>
+            </span>
           </button>
         </NTabPane>
 
         <NTabPane name="operations" :tab="`平台操作（${operations.length}）`">
-          <div class="record-table table-head">
-            <span>操作 / 站点</span><span>状态</span><span>基础版本</span><span>操作者</span><span>时间</span>
+          <div class="record-table record-table-operations table-head">
+            <span>操作 / 站点</span><span>状态</span><span>耗时</span><span>操作者</span><span>开始 / 完成</span>
           </div>
-          <article v-for="operation in operations" :key="operation.id" class="record-table record-row">
-            <span><strong>{{ actionLabel(operation.kind) }}</strong><small>{{ operation.site_id }}</small></span>
-            <span><StatusTag :label="statusLabel(operation.status)" :tone="statusTone(operation.status)" /></span>
-            <span>v{{ operation.base_version }}</span>
-            <span>{{ operation.created_by }}</span>
-            <span>{{ dateTime(operation.created_at) }}</span>
+          <article
+            v-for="operation in operations"
+            :key="operation.id"
+            class="record-table record-table-operations record-row"
+            :class="rowState(operation.status)"
+          >
+            <span class="record-primary">
+              <span class="record-title-line">
+                <strong>{{ actionLabel(operation.kind) }}</strong>
+                <em>基线 v{{ operation.base_version }}</em>
+              </span>
+              <small :title="operation.site_id">{{ operation.site_id }}</small>
+            </span>
+            <span class="record-status-cell">
+              <StatusTag :label="statusLabel(operation.status)" :tone="statusTone(operation.status)" />
+              <small :title="statusHint(operation.status, operation.metadata)">{{ statusHint(operation.status, operation.metadata) }}</small>
+            </span>
+            <span class="record-duration-cell">
+              <strong>{{ durationLabel(operation.created_at, operation.completed_at, operation.status) }}</strong>
+              <small>{{ operation.completed_at ? '总耗时' : '尚未完成' }}</small>
+            </span>
+            <span class="record-operator-cell">
+              <small class="record-mobile-label">操作者</small>
+              {{ operation.created_by || '系统' }}
+            </span>
+            <span class="record-time-cell">
+              <span class="record-time-line"><small>开始</small><time :datetime="operation.created_at">{{ dateTime(operation.created_at) }}</time></span>
+              <span class="record-time-line"><small>完成</small><time :datetime="operation.completed_at || undefined">{{ dateTime(operation.completed_at) }}</time></span>
+            </span>
           </article>
         </NTabPane>
 
         <NTabPane name="audit" :tab="`审计事件（${audits.length}）`">
-          <div class="record-table audit-table table-head">
+          <div class="record-table record-table-audit table-head">
             <span>事件</span><span>操作者</span><span>目标</span><span>时间</span>
           </div>
-          <article v-for="item in audits" :key="item.id" class="record-table audit-table record-row">
-            <span><strong>{{ item.event }}</strong><small>#{{ item.id }}</small></span>
-            <span>{{ item.actor_id }}</span>
-            <span>{{ item.target_type }} · {{ item.target_id || '—' }}</span>
-            <span>{{ dateTime(item.created_at) }}</span>
+          <article v-for="item in audits" :key="item.id" class="record-table record-table-audit record-row">
+            <span class="record-primary"><strong>{{ item.event }}</strong><small>#{{ item.id }}</small></span>
+            <span class="record-operator-cell"><small class="record-mobile-label">操作者</small>{{ item.actor_id }}</span>
+            <span class="record-audit-target"><small class="record-mobile-label">目标</small>{{ item.target_type }} · {{ item.target_id || '—' }}</span>
+            <span class="record-audit-time"><time :datetime="item.created_at">{{ dateTime(item.created_at) }}</time></span>
           </article>
         </NTabPane>
       </NTabs>
