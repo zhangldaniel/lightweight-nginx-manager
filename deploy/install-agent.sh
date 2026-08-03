@@ -396,13 +396,19 @@ prepare_managed_directories() {
     MANAGED_CONFIG_DIRS+=("${NGINX_ROOT}/nginx-manager.d")
   fi
   [[ -n "${MANAGED_CERT_DIR}" ]] || MANAGED_CERT_DIR="${NGINX_ROOT}/ssl/nginx-manager"
-  all_managed_dirs=("${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}")
+  # Bash 4.2 treats an empty array as unset under `set -u`.  The `+` form
+  # expands to no arguments when the array is empty, while preserving every
+  # element when it has values.
+  all_managed_dirs=(
+    "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}"
+    "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}"
+  )
   resolved_root="$(readlink -m -- "${NGINX_ROOT}")"
   resolved_cert="$(readlink -m -- "${MANAGED_CERT_DIR}")"
   [[ "${resolved_cert}" == "${resolved_root}/"* ]] || \
     die "托管证书目录必须位于 nginx-root 的严格子目录中：${MANAGED_CERT_DIR}"
   resolved_main="$(readlink -m -- "${NGINX_CONFIG}")"
-  for directory in "${all_managed_dirs[@]}"; do
+  for directory in "${all_managed_dirs[@]+"${all_managed_dirs[@]}"}"; do
     resolved_config="$(readlink -m -- "${directory}")"
     [[ "${resolved_config}" == "${resolved_root}/"* ]] || \
       die "托管配置入口必须位于 nginx-root 的严格子目录中：${directory}"
@@ -414,7 +420,7 @@ prepare_managed_directories() {
       && "${resolved_cert}" != "${resolved_config}/"*
     ]] || die "托管配置入口与证书目录不能重叠：${directory}"
   done
-  for directory in "${all_managed_dirs[@]}"; do
+  for directory in "${all_managed_dirs[@]+"${all_managed_dirs[@]}"}"; do
     if [[ -e "${directory}" ]]; then
       [[ -d "${directory}" && ! -L "${directory}" ]] || \
         die "托管配置路径必须是普通目录：${directory}"
@@ -432,7 +438,7 @@ prepare_managed_directories() {
   # The privileged helper validates paths before using them.  Root-owned,
   # non-writable directory chains prevent a local nginx/Agent account from
   # swapping an allowed parent for a symlink between validation and replace.
-  for directory in "${all_managed_dirs[@]}"; do
+  for directory in "${all_managed_dirs[@]+"${all_managed_dirs[@]}"}"; do
     harden_managed_path_chain "${directory}"
   done
   harden_managed_path_chain "${MANAGED_CERT_DIR}"
@@ -442,12 +448,12 @@ prepare_managed_directories() {
     for context in http stream; do
       if [[ "${context}" == "http" ]]; then
         suffix=".conf"
-        all_managed_dirs=("${MANAGED_CONFIG_DIRS[@]}")
+        all_managed_dirs=("${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}")
       else
         suffix=".stream"
-        all_managed_dirs=("${MANAGED_STREAM_DIRS[@]}")
+        all_managed_dirs=("${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}")
       fi
-      for directory in "${all_managed_dirs[@]}"; do
+      for directory in "${all_managed_dirs[@]+"${all_managed_dirs[@]}"}"; do
         probe="$(mktemp "${directory}/zz-nginx-manager-probe.XXXXXX${suffix}")"
         printf '%s\n' '# nginx-manager managed directory probe' >"${probe}"
         chmod 0644 "${probe}"
@@ -473,12 +479,12 @@ prepare_managed_directories() {
   [[ -n "${MANAGED_INCLUDE_FILE}" ]] || MANAGED_INCLUDE_FILE="${NGINX_ROOT}/conf.d/00-nginx-manager.conf"
   include_dir="$(dirname -- "${MANAGED_INCLUDE_FILE}")"
   [[ -d "${include_dir}" ]] || die "托管 include 文件的父目录不存在：${include_dir}"
-  for directory in "${MANAGED_CONFIG_DIRS[@]}"; do
+  for directory in "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}"; do
     [[ "$(readlink -f -- "${directory}")" != "$(readlink -f -- "${include_dir}")" ]] || \
       die "HTTP 入口已是 include 文件所在目录；请移除 --managed-include-file 并添加 --managed-config-already-included"
   done
   expected_file="$(mktemp)"
-  for directory in "${MANAGED_CONFIG_DIRS[@]}"; do
+  for directory in "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}"; do
     printf 'include %s/*.conf;\n' "${directory}" >>"${expected_file}"
   done
   created="0"
@@ -579,7 +585,7 @@ prepare_monitoring_options() {
       fi
     done
   fi
-  for candidate in "${NGINX_LOG_DIRS[@]}"; do
+  for candidate in "${NGINX_LOG_DIRS[@]+"${NGINX_LOG_DIRS[@]}"}"; do
     [[ "${candidate}" = /* ]] || die "--nginx-log-dir 必须是绝对路径：${candidate}"
     [[ ! "${candidate}" =~ [[:space:]] ]] || die "日志目录不能包含空白字符：${candidate}"
     [[ -d "${candidate}" && ! -L "${candidate}" ]] || die "日志目录必须是现有普通目录：${candidate}"
@@ -633,9 +639,9 @@ write_config() {
     ca_target="${ETC_DIR}/ca.crt"
   fi
 
-  printf -v log_dirs_text '%s\n' "${NGINX_LOG_DIRS[@]}"
-  printf -v config_dirs_text '%s\n' "${MANAGED_CONFIG_DIRS[@]}"
-  printf -v stream_dirs_text '%s\n' "${MANAGED_STREAM_DIRS[@]}"
+  printf -v log_dirs_text '%s\n' "${NGINX_LOG_DIRS[@]+"${NGINX_LOG_DIRS[@]}"}"
+  printf -v config_dirs_text '%s\n' "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}"
+  printf -v stream_dirs_text '%s\n' "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}"
   "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${LABELS}" \
     "${ca_target}" "${TLS_SKIP_VERIFY}" "${ALLOW_INSECURE_HTTP}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
     "${config_dirs_text}" "${stream_dirs_text}" "${ALLOW_MAIN_CONFIG_EDIT}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" <<'PY'
@@ -757,7 +763,9 @@ write_services() {
   [[ "${systemd_version}" =~ ^[0-9]+$ ]] || die "无法识别 systemd 版本"
   [[ ! -d /var/log/nginx ]] || nginx_write_paths+=" /var/log/nginx"
   [[ ! -d /var/cache/nginx ]] || nginx_write_paths+=" /var/cache/nginx"
-  for directory in "${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}"; do
+  for directory in \
+    "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
+    "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}"; do
     [[ " ${managed_write_paths} " == *" ${directory} "* ]] || managed_write_paths+=" ${directory}"
   done
   [[ "${ALLOW_MAIN_CONFIG_EDIT}" != "1" ]] || managed_write_paths+=" ${NGINX_CONFIG}"
@@ -926,10 +934,22 @@ require_root
 [[ "${TLS_SKIP_VERIFY}" != "1" || -z "${CA_SOURCE}" ]] || die "--ca-file 与 --insecure-skip-tls-verify 不能同时使用"
 [[ "${MANAGED_CONFIG_ALREADY_INCLUDED}" != "1" || -z "${MANAGED_INCLUDE_FILE}" ]] || die "--managed-config-already-included 不能与 --managed-include-file 同时使用"
 [[ "${NGINX_ROOT}" = /* && "${NGINX_CONFIG}" = /* ]] || die "Nginx 路径必须是绝对路径"
-for optional_path in "${NGINX_BINARY}" "${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}" "${MANAGED_CERT_DIR}" "${MANAGED_INCLUDE_FILE}"; do
+for optional_path in \
+  "${NGINX_BINARY}" \
+  "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
+  "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}" \
+  "${MANAGED_CERT_DIR}" \
+  "${MANAGED_INCLUDE_FILE}"; do
   [[ -z "${optional_path}" || "${optional_path}" = /* ]] || die "自定义 Nginx 路径必须是绝对路径：${optional_path}"
 done
-for nginx_path in "${NGINX_ROOT}" "${NGINX_CONFIG}" "${NGINX_BINARY}" "${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}" "${MANAGED_CERT_DIR}" "${MANAGED_INCLUDE_FILE}"; do
+for nginx_path in \
+  "${NGINX_ROOT}" \
+  "${NGINX_CONFIG}" \
+  "${NGINX_BINARY}" \
+  "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
+  "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}" \
+  "${MANAGED_CERT_DIR}" \
+  "${MANAGED_INCLUDE_FILE}"; do
   [[ ! "${nginx_path}" =~ [[:space:]] ]] || die "Nginx 路径不能包含空白字符：${nginx_path}"
 done
 [[ "${NGINX_SERVICE}" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || die "--nginx-service 必须是合法的 .service 单元名"

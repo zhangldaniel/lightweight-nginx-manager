@@ -2,6 +2,8 @@ import hashlib
 import http.server
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1610,7 +1612,8 @@ class AgentTestCase(unittest.TestCase):
         self.assertIn("--managed-config-already-included", installer)
         self.assertIn("zz-nginx-manager-probe.", installer)
         self.assertIn("is not loaded by nginx", installer)
-        self.assertIn('for directory in "${MANAGED_CONFIG_DIRS[@]}" "${MANAGED_STREAM_DIRS[@]}"', installer)
+        self.assertIn('${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}', installer)
+        self.assertIn('${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}', installer)
         self.assertIn('if [[ -e "${MANAGED_CERT_DIR}" ]]', installer)
         self.assertIn('harden_managed_path_chain "${directory}"', installer)
         self.assertIn('harden_managed_path_chain "${MANAGED_CERT_DIR}"', installer)
@@ -1620,6 +1623,54 @@ class AgentTestCase(unittest.TestCase):
         bootstrap = (AGENT_DIR.parent / "install-agent.sh").read_text(encoding="utf-8")
         self.assertIn("NGINX_MANAGER_REQUIRE_PINNED_REF", bootstrap)
         self.assertIn("NGINX_MANAGER_ARCHIVE_SHA256", bootstrap)
+
+    def test_installer_empty_optional_arrays_are_safe_with_nounset(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        for name in ("MANAGED_CONFIG_DIRS", "MANAGED_STREAM_DIRS", "NGINX_LOG_DIRS", "all_managed_dirs"):
+            guarded = '${' + name + '[@]+"${' + name + '[@]}"}'
+            self.assertIn(guarded, installer)
+            bare = '${' + name + '[@]}'
+            for line_number, line in enumerate(installer.splitlines(), start=1):
+                if bare in line:
+                    self.assertIn(
+                        '${' + name + '[@]+',
+                        line,
+                        "unsafe nounset array expansion for {} on installer line {}".format(name, line_number),
+                    )
+
+        bash = shutil.which("bash")
+        if bash is None and os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+            if candidate.exists():
+                bash = str(candidate)
+        if bash is None:
+            self.skipTest("bash is unavailable")
+
+        probe = r'''
+set -Eeuo pipefail
+MANAGED_CONFIG_DIRS=(/apps/nginx/conf/conf.d)
+MANAGED_STREAM_DIRS=()
+NGINX_LOG_DIRS=()
+values=()
+for value in \
+  "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
+  "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}"; do
+  values+=("$value")
+done
+printf '%s\n' "${values[@]+"${values[@]}"}"
+printf -v empty_logs '%s\n' "${NGINX_LOG_DIRS[@]+"${NGINX_LOG_DIRS[@]}"}"
+[[ "$empty_logs" == $'\n' ]]
+'''
+        result = subprocess.run(
+            [bash, "-c", probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            check=False,
+            env=dict(os.environ, BASH_COMPAT="4.2"),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("/apps/nginx/conf/conf.d\n", result.stdout)
 
     def test_privileged_units_allow_custom_nginx_test_to_bind_low_ports(self):
         root = AGENT_DIR.parent
