@@ -28,7 +28,7 @@ const themeOverrides: GlobalThemeOverrides = {
     borderRadius: '5px',
     borderRadiusSmall: '4px',
     fontFamily:
-      '"HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
+      '"Sarasa UI SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
     fontSize: '15px',
   },
   Button: {

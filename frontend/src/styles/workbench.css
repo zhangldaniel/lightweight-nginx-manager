@@ -287,9 +287,12 @@ body {
 }
 
 .page-header h1 {
-  font-size: clamp(26px, 2vw, 32px);
-  font-weight: 790;
-  letter-spacing: -.04em;
+  font-family: var(--font-accent);
+  font-size: clamp(28px, 2vw, 34px);
+  font-style: oblique;
+  font-weight: 700;
+  letter-spacing: -.015em;
+  line-height: 1.15;
 }
 
 .page-header h1::before {
@@ -402,8 +405,11 @@ body {
 .metric-copy strong {
   margin-top: 0;
   color: var(--text);
-  font-size: 21px;
-  font-weight: 760;
+  font-family: var(--font-accent);
+  font-size: 23px;
+  font-style: oblique;
+  font-weight: 700;
+  letter-spacing: -.01em;
 }
 
 .metric-copy small {
@@ -438,7 +444,7 @@ body {
 .page-sites .sites-eyebrow,
 .page-sites .detail-eyebrow {
   color: #3f7668;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 760;
   letter-spacing: .11em;
   text-transform: uppercase;
@@ -460,11 +466,12 @@ body {
   max-width: 860px;
   margin: 7px 0 0;
   color: var(--sites-ink);
-  font-family: var(--font-display);
-  font-size: clamp(30px, 2.15vw, 36px);
-  font-weight: 800;
-  letter-spacing: -.045em;
-  line-height: 1.12;
+  font-family: var(--font-accent);
+  font-size: clamp(32px, 2.25vw, 39px);
+  font-style: oblique;
+  font-weight: 700;
+  letter-spacing: -.015em;
+  line-height: 1.08;
 }
 
 .page-sites .sites-hero p {
@@ -498,8 +505,10 @@ body {
 
 .page-sites .site-fact strong {
   color: var(--sites-ink);
-  font: 790 23px/1 var(--font-display);
+  font: 700 27px/1 var(--font-accent);
+  font-style: oblique;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -.01em;
 }
 
 .page-sites .site-fact > span {
@@ -513,7 +522,7 @@ body {
 .page-sites .site-fact small {
   margin-top: 3px;
   color: var(--sites-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 520;
 }
 
@@ -537,7 +546,8 @@ body {
   min-height: 38px;
   padding-inline: 15px;
   border-radius: 2px;
-  font-size: 11px;
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
 .page-sites .master-detail {
@@ -566,7 +576,7 @@ body {
 .page-sites .table-head {
   min-height: 40px;
   color: #6d7b81;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 650;
 }
 
@@ -588,14 +598,14 @@ body {
 
 .page-sites .site-row strong {
   color: var(--sites-ink);
-  font-size: 13px;
-  font-weight: 690;
+  font-size: 13.5px;
+  font-weight: 600;
 }
 
 .page-sites .site-row small {
   margin-top: 3px;
   color: var(--sites-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .page-sites .node-chip {
@@ -639,7 +649,8 @@ body {
 .page-sites .detail-actions .n-button {
   min-height: 42px;
   border-radius: 2px;
-  font-size: 12px;
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
 .page-sites .detail-actions .detail-publish-action {
@@ -1266,7 +1277,11 @@ body {
 
 .page-sites .release-summary-result strong {
   color: var(--sites-ink);
-  font-size: 25px;
+  font-family: var(--font-accent);
+  font-size: 29px;
+  font-style: oblique;
+  font-weight: 700;
+  letter-spacing: -.01em;
   line-height: 1;
 }
 
@@ -2676,11 +2691,12 @@ body:has(.site-editor-modal) .toast-host {
 
 .page-monitoring .monitor-kpi > strong {
   margin-top: 3px;
-  font-family: var(--font-display);
+  font-family: var(--font-accent);
   font-size: 27px;
-  font-weight: 780;
+  font-style: oblique;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -.035em;
+  letter-spacing: -.01em;
   line-height: 1.15;
 }
 

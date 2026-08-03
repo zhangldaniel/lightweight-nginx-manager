@@ -132,11 +132,15 @@ INVENTORY_MAX_FILE_BYTES = 256 * 1024
 INVENTORY_MAX_TOTAL_BYTES = 1024 * 1024
 UI_FONT_ASSETS = frozenset(
     {
-        "HarmonyOS_Sans_SC_Regular.ttf",
-        "HarmonyOS_Sans_SC_Medium.ttf",
-        "HarmonyOS_Sans_SC_Bold.ttf",
+        "SmileySans-Oblique.woff2",
+        "SarasaUiSC-Regular.ttf",
+        "SarasaUiSC-SemiBold.ttf",
     }
 )
+UI_FONT_MEDIA_TYPES = {
+    ".ttf": "font/ttf",
+    ".woff2": "font/woff2",
+}
 
 
 class LDAPAuthenticationError(Exception):
@@ -2191,7 +2195,10 @@ def create_app(
         candidate = ui_index.parent / "ui-assets" / asset_name
         if not candidate.is_file():
             raise HTTPException(status_code=404, detail="UI asset not found")
-        response = FileResponse(str(candidate), media_type="font/ttf")
+        response = FileResponse(
+            str(candidate),
+            media_type=UI_FONT_MEDIA_TYPES[candidate.suffix.lower()],
+        )
         response.headers["Cache-Control"] = "public, max-age=3600"
         return response
 

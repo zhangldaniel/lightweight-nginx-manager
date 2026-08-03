@@ -9,15 +9,16 @@ const size = (await stat(output)).size
 const appSource = await readFile(resolve(root, 'src/App.vue'), 'utf8')
 const storeSource = await readFile(resolve(root, 'src/stores/console.ts'), 'utf8')
 const certificateSource = await readFile(resolve(root, 'src/views/CertificatesView.vue'), 'utf8')
-const harmonyAssets = {
-  'HarmonyOS_Sans_SC_Regular.ttf': '297b088424be212207df2ce8b98e335468b782aa6b96832af0b8b773d711e2b1',
-  'HarmonyOS_Sans_SC_Medium.ttf': '6ed1553edccddc48eb27ff25d134a4a715cf54211238d4840b3038576cba1944',
-  'HarmonyOS_Sans_SC_Bold.ttf': '43a424b85e47fb53a17b3b32026a71801f86f8e022ca6798d186b47d39fa5f01',
-  'HarmonyOS-Sans-LICENSE.txt': 'b2ffec0e6269ee41c3b5fc0345ab37600b46d66ebea6c9c58ff37f517bdfa164',
+const fontAssets = {
+  'SmileySans-Oblique.woff2': '4895e7a5b72753b7d4bf090581fbc4375e0ec53484944f369a584588f1eeaf08',
+  'SarasaUiSC-Regular.ttf': '9f6c9e41b3d9cc982c7d57653f956aa23c896f6833d58862447a9a8c584a36dd',
+  'SarasaUiSC-SemiBold.ttf': '8e44ca2705bffe1ab341e413b381a1d065a9825a162eb7397010fed59a93c9dd',
+  'SmileySans-LICENSE.txt': '9401f4050f1b66c26b6ccdc8b0e14a3c1cc37aac122eda84386f25854a9bec72',
+  'SarasaGothic-LICENSE.txt': '32c932e0dbae4f6e6386964bbc2d04178707665a05ca65cf636241af13d50a53',
 }
-const harmonyAssetsUnmodified = (
+const fontAssetsUnmodified = (
   await Promise.all(
-    Object.entries(harmonyAssets).map(async ([name, expected]) => {
+    Object.entries(fontAssets).map(async ([name, expected]) => {
       try {
         const payload = await readFile(resolve(root, 'dist/ui-assets', name))
         return createHash('sha256').update(payload).digest('hex') === expected
@@ -32,8 +33,8 @@ const checks = [
   ['单文件输出', !/<script[^>]+src=|<link[^>]+rel=["']stylesheet/i.test(html)],
   ['无公网字体或静态资源', !/(?:src|href)=["']https?:\/\//i.test(html)],
   [
-    'HarmonyOS Sans SC 原版字体与授权文件已打包',
-    html.includes('HarmonyOS Sans SC') && harmonyAssetsUnmodified,
+    'Smiley Sans 与 Sarasa Gothic 原版字体及许可证已打包',
+    html.includes('Smiley Sans') && html.includes('Sarasa UI SC') && fontAssetsUnmodified,
   ],
   ['Vue 应用入口存在', html.includes('id="app"')],
   ['站点管理能力已打包', html.includes('站点与配置')],

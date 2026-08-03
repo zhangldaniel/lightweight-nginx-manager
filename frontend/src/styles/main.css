@@ -2,46 +2,44 @@
 @import '@fontsource/jetbrains-mono/latin-600.css';
 
 /*
- * HarmonyOS Sans SC is served by the control plane from the same origin.
- * Keep the original font files unmodified as required by their license.
+ * Fonts are served by the control plane from the same origin so the console
+ * keeps its typography in isolated management networks.
  */
 @font-face {
-  font-family: "HarmonyOS Sans SC";
+  font-family: "Sarasa UI SC";
   src:
-    local("HarmonyOS Sans SC"),
-    local("HarmonyOS_Sans_SC"),
-    url("/ui-assets/HarmonyOS_Sans_SC_Regular.ttf") format("truetype");
+    local("Sarasa UI SC"),
+    local("SarasaUiSC-Regular"),
+    url("/ui-assets/SarasaUiSC-Regular.ttf") format("truetype");
   font-style: normal;
-  font-weight: 300 499;
+  font-weight: 300 500;
   font-display: swap;
 }
 
 @font-face {
-  font-family: "HarmonyOS Sans SC";
+  font-family: "Sarasa UI SC";
   src:
-    local("HarmonyOS Sans SC Medium"),
-    local("HarmonyOS_Sans_SC_Medium"),
-    url("/ui-assets/HarmonyOS_Sans_SC_Medium.ttf") format("truetype");
+    local("Sarasa UI SC SemiBold"),
+    local("SarasaUiSC-SemiBold"),
+    url("/ui-assets/SarasaUiSC-SemiBold.ttf") format("truetype");
   font-style: normal;
-  font-weight: 500 699;
+  font-weight: 501 900;
   font-display: swap;
 }
 
 @font-face {
-  font-family: "HarmonyOS Sans SC";
-  src:
-    local("HarmonyOS Sans SC Bold"),
-    local("HarmonyOS_Sans_SC_Bold"),
-    url("/ui-assets/HarmonyOS_Sans_SC_Bold.ttf") format("truetype");
-  font-style: normal;
-  font-weight: 700 900;
+  font-family: "Smiley Sans";
+  src: url("/ui-assets/SmileySans-Oblique.woff2") format("woff2");
+  font-style: oblique;
+  font-weight: 100 900;
   font-display: swap;
 }
 
 :root {
   color-scheme: light;
-  --font-sans: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  --font-display: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-sans: "Sarasa UI SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-display: "Sarasa UI SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-accent: "Smiley Sans", "Sarasa UI SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
   --bg: #eff6ff;
   --surface: rgba(255, 255, 255, .82);
@@ -490,11 +488,12 @@ pre {
 
 .page-header h1 {
   color: var(--text);
-  font-family: var(--font-display);
-  font-size: 28px;
-  font-weight: 760;
-  letter-spacing: -.035em;
-  line-height: 1.2;
+  font-family: var(--font-accent);
+  font-size: 30px;
+  font-style: oblique;
+  font-weight: 700;
+  letter-spacing: -.015em;
+  line-height: 1.15;
 }
 
 .page-header p {
@@ -599,10 +598,12 @@ pre {
 .metric-copy strong {
   margin-top: 2px;
   color: #091d36;
-  font-family: var(--font-display);
+  font-family: var(--font-accent);
   font-size: 27px;
+  font-style: oblique;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -.04em;
+  letter-spacing: -.01em;
   line-height: 1.25;
 }
 

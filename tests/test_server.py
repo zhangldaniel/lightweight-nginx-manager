@@ -154,9 +154,13 @@ class ServerTestCase(unittest.TestCase):
         asset_root.mkdir(parents=True)
         ui_index = ui_root / "index.html"
         ui_index.write_text("<!doctype html><title>test</title>", encoding="utf-8")
-        font_name = "HarmonyOS_Sans_SC_Regular.ttf"
-        font_payload = b"test-font-payload"
-        (asset_root / font_name).write_bytes(font_payload)
+        font_payloads = {
+            "SmileySans-Oblique.woff2": b"test-woff2-font-payload",
+            "SarasaUiSC-Regular.ttf": b"test-regular-ttf-font-payload",
+            "SarasaUiSC-SemiBold.ttf": b"test-semibold-ttf-font-payload",
+        }
+        for font_name, font_payload in font_payloads.items():
+            (asset_root / font_name).write_bytes(font_payload)
         (asset_root / "not-allowlisted.ttf").write_bytes(b"must-not-be-served")
 
         ui_settings = replace(
@@ -169,18 +173,26 @@ class ServerTestCase(unittest.TestCase):
             self.assertEqual(200, index.status_code, index.text)
             self.assertIn("font-src 'self'", index.headers["content-security-policy"])
 
-            font = ui_client.get("/ui-assets/" + font_name)
-            self.assertEqual(200, font.status_code, font.text)
-            self.assertEqual(font_payload, font.content)
-            self.assertEqual("font/ttf", font.headers["content-type"])
-            self.assertEqual("public, max-age=3600", font.headers["cache-control"])
-            self.assertEqual("same-origin", font.headers["cross-origin-resource-policy"])
+            expected_media_types = {
+                "SmileySans-Oblique.woff2": "font/woff2",
+                "SarasaUiSC-Regular.ttf": "font/ttf",
+                "SarasaUiSC-SemiBold.ttf": "font/ttf",
+            }
+            for font_name, font_payload in font_payloads.items():
+                font = ui_client.get("/ui-assets/" + font_name)
+                self.assertEqual(200, font.status_code, font.text)
+                self.assertEqual(font_payload, font.content)
+                self.assertEqual(expected_media_types[font_name], font.headers["content-type"])
+                self.assertEqual("public, max-age=3600", font.headers["cache-control"])
+                self.assertEqual("same-origin", font.headers["cross-origin-resource-policy"])
 
             rejected = ui_client.get("/ui-assets/not-allowlisted.ttf")
             self.assertEqual(404, rejected.status_code, rejected.text)
 
-            missing = ui_client.get("/ui-assets/HarmonyOS_Sans_SC_Bold.ttf")
-            self.assertEqual(404, missing.status_code, missing.text)
+            for missing_name in ("SmileySans-Oblique.woff2", "SarasaUiSC-SemiBold.ttf"):
+                (asset_root / missing_name).unlink()
+                missing = ui_client.get("/ui-assets/" + missing_name)
+                self.assertEqual(404, missing.status_code, missing.text)
 
     def test_ldap_roles_are_enforced_server_side_and_local_admin_has_priority(self):
         ldap_settings = replace(
