@@ -9,10 +9,12 @@
     "prebuild": "node scripts/build-font-css.mjs",
     "build": "vue-tsc --noEmit && vite build",
     "package:server": "npm run build && node scripts/qa-contract.mjs && node scripts/package-release.mjs",
-    "test": "npm run build && node scripts/qa-contract.mjs && node scripts/qa-certificate-config.mjs && node scripts/qa-operation-recovery.mjs && node scripts/qa-site-editor.mjs",
+    "test": "npm run build && node scripts/qa-contract.mjs && node scripts/qa-certificate-config.mjs && node scripts/qa-operation-recovery.mjs && node scripts/qa-site-editor.mjs && node scripts/qa-template-dirty.mjs && node scripts/qa-live-logs.mjs",
     "qa:certificate-config": "node scripts/qa-certificate-config.mjs",
+    "qa:live-logs": "node scripts/qa-live-logs.mjs",
     "qa:visual": "npm run build && node scripts/qa-capture.mjs",
     "qa:site-editor": "npm run build && node scripts/qa-site-editor.mjs",
+    "qa:template-dirty": "npm run build && node scripts/qa-template-dirty.mjs",
     "preview": "vite preview",
     "preview:qa": "node scripts/qa-server.mjs"
   },

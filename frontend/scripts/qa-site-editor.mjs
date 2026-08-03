@@ -145,6 +145,49 @@ try {
 
   assert(
     await evaluate(`(() => {
+      const button = [...document.querySelectorAll('.detail-panel button')]
+        .find((item) => item.textContent.includes('编辑配置'))
+      button?.click()
+      return Boolean(button)
+    })()`),
+    'The existing-site editor button was not found',
+  )
+  await wait(180)
+  const existingEditorLayout = await evaluate(`(() => {
+    const modal = document.querySelector('.site-editor-modal')
+    const footer = modal?.querySelector('.modal-footer')
+    const content = modal?.querySelector('.n-card-content')
+    const modalRect = modal?.getBoundingClientRect()
+    const footerRect = footer?.getBoundingClientRect()
+    return {
+      viewportHeight: window.innerHeight,
+      modalTop: modalRect?.top ?? -1,
+      modalBottom: modalRect?.bottom ?? Number.POSITIVE_INFINITY,
+      footerTop: footerRect?.top ?? Number.POSITIVE_INFINITY,
+      footerBottom: footerRect?.bottom ?? Number.POSITIVE_INFINITY,
+      footerHeight: footerRect?.height ?? 0,
+      contentBottom: content?.getBoundingClientRect().bottom ?? Number.POSITIVE_INFINITY,
+    }
+  })()`)
+  assert(existingEditorLayout.footerHeight > 0, 'The existing-site editor footer is not rendered')
+  assert(
+    existingEditorLayout.modalTop >= 8 &&
+      existingEditorLayout.modalBottom <= existingEditorLayout.viewportHeight - 8,
+    `The existing-site editor extends outside the viewport: ${JSON.stringify(existingEditorLayout)}`,
+  )
+  assert(
+    existingEditorLayout.footerBottom <= existingEditorLayout.modalBottom + 1,
+    `The existing-site editor footer extends outside its modal: ${JSON.stringify(existingEditorLayout)}`,
+  )
+  assert(
+    existingEditorLayout.contentBottom <= existingEditorLayout.footerTop + 1,
+    `The existing-site editor content overlaps its footer: ${JSON.stringify(existingEditorLayout)}`,
+  )
+  await command('Page.reload', { ignoreCache: true })
+  await wait(700)
+
+  assert(
+    await evaluate(`(() => {
       const button = [...document.querySelectorAll('button')]
         .find((item) => item.textContent.includes('新增站点'))
       button?.click()
@@ -173,6 +216,36 @@ try {
   assert(initial.templates.length === 8, 'Expected eight site templates')
   assert(initial.templates.some((item) => item.includes('负载均衡 HTTPS')), 'HTTPS load-balancer template is missing')
   assert(initial.templates.some((item) => item.includes('Nginx Stub Status')), 'Stub Status template is missing')
+
+  const editorLayout = await evaluate(`(() => {
+    const modal = document.querySelector('.site-editor-modal')
+    const footer = modal?.querySelector('.modal-footer')
+    const content = modal?.querySelector('.n-card-content')
+    const modalRect = modal?.getBoundingClientRect()
+    const footerRect = footer?.getBoundingClientRect()
+    return {
+      viewportHeight: window.innerHeight,
+      modalTop: modalRect?.top ?? -1,
+      modalBottom: modalRect?.bottom ?? Number.POSITIVE_INFINITY,
+      footerTop: footerRect?.top ?? Number.POSITIVE_INFINITY,
+      footerBottom: footerRect?.bottom ?? Number.POSITIVE_INFINITY,
+      footerHeight: footerRect?.height ?? 0,
+      contentBottom: content?.getBoundingClientRect().bottom ?? Number.POSITIVE_INFINITY,
+    }
+  })()`)
+  assert(editorLayout.footerHeight > 0, 'The site editor footer is not rendered')
+  assert(
+    editorLayout.modalTop >= 8 && editorLayout.modalBottom <= editorLayout.viewportHeight - 8,
+    `The site editor extends outside the viewport: ${JSON.stringify(editorLayout)}`,
+  )
+  assert(
+    editorLayout.footerBottom <= editorLayout.modalBottom + 1,
+    `The site editor footer extends outside its modal: ${JSON.stringify(editorLayout)}`,
+  )
+  assert(
+    editorLayout.contentBottom <= editorLayout.footerTop + 1,
+    `The site editor content overlaps its footer: ${JSON.stringify(editorLayout)}`,
+  )
 
   assert(
     await evaluate(`(() => {
@@ -419,6 +492,27 @@ try {
   assert(stubState.context === 'HTTP', 'Stub Status context did not update')
   assert(stubState.config.includes('stub_status;'), 'Stub Status template content was not applied')
   assert(stubState.namedField, 'Generic configuration fields were not shown')
+
+  const toastFooterLayout = await evaluate(`(() => {
+    const toast = document.querySelector('.toast')
+    const footer = document.querySelector('.site-editor-modal .n-card__footer')
+    const toastRect = toast?.getBoundingClientRect()
+    const footerRect = footer?.getBoundingClientRect()
+    const intersects = Boolean(
+      toastRect && footerRect &&
+      toastRect.left < footerRect.right && toastRect.right > footerRect.left &&
+      toastRect.top < footerRect.bottom && toastRect.bottom > footerRect.top
+    )
+    return {
+      hasFooter: Boolean(footerRect),
+      intersects,
+    }
+  })()`)
+  assert(toastFooterLayout.hasFooter, 'The site editor footer is missing before visual capture')
+  assert(
+    !toastFooterLayout.intersects,
+    `A toast obscures the site editor footer: ${JSON.stringify(toastFooterLayout)}`,
+  )
 
   const screenshot = await command('Page.captureScreenshot', { format: 'png' })
   await writeFile(resolve(artifactRoot, 'vue-site-editor.png'), Buffer.from(screenshot.data, 'base64'))

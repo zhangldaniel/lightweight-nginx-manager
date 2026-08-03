@@ -49,6 +49,7 @@ const editorMode = ref<'create' | 'edit'>('create')
 const editorTab = ref<'guided' | 'conf' | 'generic'>('guided')
 const activeTemplate = ref<SiteTemplateKey>('http')
 const templateManaged = ref(true)
+const configManuallyEdited = ref(false)
 const saving = ref(false)
 const running = ref(false)
 const scanning = ref(false)
@@ -293,6 +294,7 @@ function openCreate() {
   resetForm()
   originalOperational.value = ''
   templateManaged.value = true
+  configManuallyEdited.value = false
   certificatePreviewConfirmed.value = false
   editorBaseline.value = editorSnapshot()
   editorOpen.value = true
@@ -320,6 +322,7 @@ function openEdit(site: SiteRecord) {
   certificatePreviewConfirmed.value = Boolean(site.certificateId)
   activeTemplate.value = inferTemplate(site)
   templateManaged.value = false
+  configManuallyEdited.value = false
   originalOperational.value = operationalSnapshot(form)
   editorBaseline.value = editorSnapshot()
   editorOpen.value = true
@@ -344,6 +347,7 @@ function applyTemplateNow(kind: SiteTemplateKey) {
   if (!template) return
   activeTemplate.value = kind
   templateManaged.value = true
+  configManuallyEdited.value = false
   editorTab.value = template.resourceType === 'generic' ? 'generic' : 'conf'
   form.context = template.context
   form.type = template.type
@@ -362,7 +366,7 @@ function applyTemplateNow(kind: SiteTemplateKey) {
 
 function applyTemplate(kind: SiteTemplateKey) {
   if (saving.value || templateConfirming.value) return
-  if (templateManaged.value || !form.config.trim()) {
+  if (!configManuallyEdited.value || !form.config.trim()) {
     applyTemplateNow(kind)
     return
   }
@@ -416,6 +420,7 @@ function selectCertificate(value: string | null) {
 
 function handleConfigInput() {
   templateManaged.value = false
+  configManuallyEdited.value = true
   certificatePreviewConfirmed.value = false
 }
 

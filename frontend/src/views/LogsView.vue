@@ -6,8 +6,7 @@ import PageHeader from '../components/PageHeader.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { api } from '../api'
 import { useConsoleStore } from '../stores/console'
-
-type LogPreset = 'all' | 'error' | 'warn' | 'http4xx' | 'http5xx'
+import { logLineMatches, type LogPreset } from '../utils/logFilters'
 
 const store = useConsoleStore()
 const selectedNodeId = ref(
@@ -30,12 +29,6 @@ const restarting = ref(false)
 const session = ref<Record<string, unknown> | null>(null)
 const connectionState = ref<'idle' | 'connecting' | 'open' | 'retrying'>('idle')
 const connectionProblem = ref('')
-const activeCapture = ref<{
-  preset: LogPreset
-  include: string
-  exclude: string
-  caseSensitive: boolean
-} | null>(null)
 const stats = ref({ read: 0, sent: 0, dropped: 0 })
 const output = ref<HTMLElement | null>(null)
 let eventSource: EventSource | null = null
@@ -69,18 +62,29 @@ const displayText = computed(() => {
 })
 const hiddenCount = computed(() => Math.max(0, sourceLines.value.length - visibleLines.value.length))
 const activeFilterCount = computed(
-  () => Number(preset.value !== 'all') + Number(Boolean(include.value)) + Number(Boolean(exclude.value)),
+  () => {
+    const hasTextFilter = Boolean(include.value.trim() || exclude.value.trim())
+    return (
+      Number(preset.value !== 'all') +
+      Number(Boolean(include.value.trim())) +
+      Number(Boolean(exclude.value.trim())) +
+      Number(hasTextFilter && caseSensitive.value)
+    )
+  },
 )
-const filtersChangedSinceConnect = computed(() => {
-  const active = activeCapture.value
-  if (!session.value || !active) return false
-  return (
-    active.preset !== preset.value ||
-    active.include !== include.value ||
-    active.exclude !== exclude.value ||
-    active.caseSensitive !== caseSensitive.value
-  )
-})
+const presetItems = computed(() =>
+  ([
+    ['all', '全部'],
+    ['error', 'Error'],
+    ['warn', 'Warn'],
+    ['http4xx', 'HTTP 4xx'],
+    ['http5xx', 'HTTP 5xx'],
+  ] as const).map(([value, label]) => ({
+    value,
+    label,
+    count: sourceLines.value.filter((line) => logLineMatches(line, value, '', '', false)).length,
+  })),
+)
 const connectionLabel = computed(() => {
   if (paused.value) return '显示已暂停，后台仍在接收'
   if (connectionState.value === 'open') return '实时接收中'
@@ -107,29 +111,6 @@ watch([visibleLines, paused], async () => {
   if (output.value) output.value.scrollTop = output.value.scrollHeight
 })
 
-function logLineHasHttpStatus(line: string, prefix: '4' | '5') {
-  return new RegExp(`(?:^|[^0-9])${prefix}[0-9]{2}(?:[^0-9]|$)`).test(line)
-}
-
-function logLineMatches(
-  line: string,
-  currentPreset: LogPreset,
-  mustInclude: string,
-  mustExclude: string,
-  sensitive: boolean,
-) {
-  const haystack = sensitive ? line : line.toLowerCase()
-  const includeNeedle = sensitive ? mustInclude : mustInclude.toLowerCase()
-  const excludeNeedle = sensitive ? mustExclude : mustExclude.toLowerCase()
-  if (includeNeedle && !haystack.includes(includeNeedle)) return false
-  if (excludeNeedle && haystack.includes(excludeNeedle)) return false
-  if (currentPreset === 'error' && !/\berror\b|\[error\]/i.test(line)) return false
-  if (currentPreset === 'warn' && !/\bwarn(?:ing)?\b|\[warn\]/i.test(line)) return false
-  if (currentPreset === 'http4xx' && !logLineHasHttpStatus(line, '4')) return false
-  if (currentPreset === 'http5xx' && !logLineHasHttpStatus(line, '5')) return false
-  return true
-}
-
 function consume(event: MessageEvent) {
   let payload: Record<string, unknown>
   try {
@@ -144,9 +125,9 @@ function consume(event: MessageEvent) {
   }
   if (lines.value.length > 5000) lines.value.splice(0, lines.value.length - 5000)
   stats.value = {
-    read: Number(payload.read_lines || stats.value.read),
-    sent: Number(payload.sent_lines || stats.value.sent),
-    dropped: Number(payload.dropped_lines || stats.value.dropped),
+    read: Number(payload.read_lines ?? stats.value.read),
+    sent: Number(payload.sent_lines ?? stats.value.sent),
+    dropped: Number(payload.dropped_lines ?? stats.value.dropped),
   }
 }
 
@@ -165,7 +146,6 @@ function openStream(id: string, generation: number) {
     source.close()
     eventSource = null
     session.value = null
-    activeCapture.value = null
     connectionState.value = 'idle'
     if (retryTimer !== undefined) window.clearTimeout(retryTimer)
     retryTimer = undefined
@@ -207,20 +187,16 @@ async function start() {
   const generation = ++sessionGeneration
   const nodeId = selectedNodeId.value
   const path = selectedPath.value
-  const capture = {
-    preset: preset.value,
-    include: include.value,
-    exclude: exclude.value,
-    caseSensitive: caseSensitive.value,
-  }
   try {
     const created = await api.createLogSession({
       node_id: nodeId,
       path,
-      include: capture.include,
-      exclude: capture.exclude,
-      case_sensitive: capture.caseSensitive,
-      preset: capture.preset,
+      // Window filters stay in the browser so changing them never replaces the
+      // Agent connection or permanently discards lines needed by another filter.
+      include: '',
+      exclude: '',
+      case_sensitive: false,
+      preset: 'all',
       tail_lines: tailLines.value,
     })
     if (generation !== sessionGeneration) {
@@ -228,7 +204,6 @@ async function start() {
       return
     }
     session.value = created
-    activeCapture.value = capture
     openStream(String(created.id), generation)
   } catch (error) {
     if (generation !== sessionGeneration) return
@@ -246,7 +221,6 @@ async function stop() {
   eventSource?.close()
   eventSource = null
   session.value = null
-  activeCapture.value = null
   connecting.value = false
   connectionState.value = 'idle'
   paused.value = false
@@ -280,7 +254,13 @@ function togglePause() {
 function clearWindow() {
   lines.value = []
   pausedLines.value = []
-  stats.value = { read: 0, sent: 0, dropped: 0 }
+}
+
+function clearFilters() {
+  preset.value = 'all'
+  include.value = ''
+  exclude.value = ''
+  caseSensitive.value = false
 }
 
 onBeforeUnmount(() => {
@@ -384,8 +364,8 @@ onBeforeUnmount(() => {
         </header>
         <pre ref="output" class="log-output" :class="{ wrapped: wrapLines }" tabindex="0">{{ displayText }}</pre>
         <footer>
-          <span>读取 {{ stats.read }} · 显示 {{ visibleLines.length }} · 过滤 {{ hiddenCount }}</span>
-          <span>浏览器最多保留 5,000 行<span v-if="stats.dropped"> · Agent 丢弃 {{ stats.dropped }}</span></span>
+          <span>窗口 {{ sourceLines.length }} · 显示 {{ visibleLines.length }} · 隐藏 {{ hiddenCount }}</span>
+          <span>会话累计读取 {{ stats.read }} · 浏览器最多保留 5,000 行<span v-if="stats.dropped"> · Agent 丢弃 {{ stats.dropped }}</span></span>
         </footer>
       </section>
 
@@ -400,23 +380,29 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <div class="filter-result-summary" :data-active="activeFilterCount > 0">
+          <div>
+            <span>当前命中</span>
+            <strong>{{ visibleLines.length }} / {{ sourceLines.length }}</strong>
+          </div>
+          <button v-if="activeFilterCount" type="button" @click="clearFilters">清除过滤</button>
+          <small v-else>选择条件后立即过滤当前窗口</small>
+        </div>
+
         <fieldset>
           <legend>快捷条件</legend>
           <div class="preset-grid">
             <button
-              v-for="item in [
-                ['all', '全部'],
-                ['error', 'Error'],
-                ['warn', 'Warn'],
-                ['http4xx', 'HTTP 4xx'],
-                ['http5xx', 'HTTP 5xx'],
-              ]"
-              :key="item[0]"
+              v-for="item in presetItems"
+              :key="item.value"
               type="button"
-              :class="{ active: preset === item[0] }"
-              @click="preset = item[0] as LogPreset"
+              :data-preset="item.value"
+              :class="{ active: preset === item.value }"
+              :aria-pressed="preset === item.value"
+              @click="preset = item.value"
             >
-              {{ item[1] }}
+              <span>{{ item.label }}</span>
+              <strong>{{ item.count }}</strong>
             </button>
           </div>
         </fieldset>
@@ -429,11 +415,16 @@ onBeforeUnmount(() => {
           <span>排除内容</span>
           <NInput v-model:value="exclude" clearable placeholder="例如 healthcheck" />
         </label>
-        <NCheckbox v-model:checked="caseSensitive">区分大小写</NCheckbox>
-        <NCheckbox v-model:checked="wrapLines">自动换行</NCheckbox>
+        <div class="filter-toggle-row">
+          <NCheckbox
+            v-model:checked="caseSensitive"
+            :disabled="!include.trim() && !exclude.trim()"
+          >区分大小写</NCheckbox>
+          <NCheckbox v-model:checked="wrapLines">自动换行</NCheckbox>
+        </div>
 
-        <div v-if="filtersChangedSinceConnect" class="filter-change-note">
-          当前条件已在窗口生效；Agent 采集范围仍沿用连接时条件。重新连接后可按新条件采集。
+        <div v-if="session && activeFilterCount" class="filter-change-note">
+          过滤只改变当前浏览器窗口，不会重连 Agent，也不会丢掉其他日志。
         </div>
 
         <div class="filter-actions">
@@ -446,12 +437,12 @@ onBeforeUnmount(() => {
             清空当前窗口
           </NButton>
           <NButton
-            v-if="filtersChangedSinceConnect || connectionState === 'retrying'"
+            v-if="connectionState === 'retrying'"
             :loading="connecting || restarting"
             @click="restart"
           >
             <template #icon><Radio :size="17" /></template>
-            按当前条件重新连接
+            重新连接
           </NButton>
         </div>
 
