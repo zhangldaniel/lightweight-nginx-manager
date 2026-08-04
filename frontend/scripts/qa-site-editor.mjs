@@ -161,22 +161,19 @@ try {
   )
 
   const detailPresentation = await evaluate(`(() => {
-    const data = document.querySelector('.data-panel')
     const detail = document.querySelector('.detail-panel')
+    const scrollBody = detail?.querySelector('.sites-detail-scroll')
     const style = detail ? getComputedStyle(detail) : null
-    const dataRect = data?.getBoundingClientRect()
     const detailRect = detail?.getBoundingClientRect()
     return {
       found: Boolean(detail),
+      scrollBody: Boolean(scrollBody),
       subtitle: detail?.querySelector('.detail-head p')?.textContent.trim() || '',
       overflowX: style?.overflowX || '',
       overflowY: style?.overflowY || '',
       horizontallyScrollable: Boolean(detail && detail.scrollWidth > detail.clientWidth + 1),
-      independentlyScrollable: Boolean(detail && detail.scrollHeight > detail.clientHeight + 1),
-      bottomDelta:
-        dataRect && detailRect
-          ? Math.abs(dataRect.bottom - detailRect.bottom)
-          : Number.POSITIVE_INFINITY,
+      panelHeight: detailRect?.height ?? Number.POSITIVE_INFINITY,
+      viewportHeight: window.innerHeight,
     }
   })()`)
   assert(detailPresentation.found, 'The site detail panel was not found')
@@ -190,13 +187,13 @@ try {
     `The site detail still overflows horizontally (${detailPresentation.overflowX})`,
   )
   assert(
-    detailPresentation.overflowY === 'visible',
-    `The site detail still creates nested vertical scrolling (${detailPresentation.overflowY})`,
+    detailPresentation.overflowY === 'hidden',
+    `The site detail does not contain its scrolling body (${detailPresentation.overflowY})`,
   )
-  assert(!detailPresentation.independentlyScrollable, 'The site detail still renders its own scrollbar')
+  assert(detailPresentation.scrollBody, 'The site detail has no independent scrolling body')
   assert(
-    detailPresentation.bottomDelta <= 1,
-    `The data and detail panels are misaligned by ${detailPresentation.bottomDelta}px`,
+    detailPresentation.panelHeight <= detailPresentation.viewportHeight,
+    `The site detail is taller than the viewport: ${JSON.stringify(detailPresentation)}`,
   )
 
   assert(

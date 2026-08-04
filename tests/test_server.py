@@ -790,6 +790,7 @@ class ServerTestCase(unittest.TestCase):
 
     def test_atomic_operation_publishes_immutable_revision(self):
         enrolled = self.enroll("operation-node")
+        skipped = self.enroll("operation-skipped-node")
         agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
         request_id = "operation-test-0001"
         body = {
@@ -802,6 +803,7 @@ class ServerTestCase(unittest.TestCase):
                 "domain": "example.test",
                 "config": "server { listen 8080; }\n",
                 "changeNote": "initial publish",
+                "nodeIds": [enrolled["agent_id"], skipped["agent_id"]],
             },
             "jobs": [
                 {
@@ -822,6 +824,8 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(201, created.status_code, created.text)
         recovery = created.json()["operation"]["metadata"]
         self.assertEqual(1, recovery["reconcile_version"])
+        self.assertEqual(1, recovery["reconcile_already_completed"])
+        self.assertEqual(2, recovery["reconcile_total_targets"])
         self.assertEqual(created.json()["jobs"][0]["id"], recovery["reconcile_jobs"][0]["id"])
         self.assertEqual(
             "/etc/nginx/nginx-manager.d/example.test.conf",
@@ -1027,6 +1031,353 @@ class ServerTestCase(unittest.TestCase):
             "/api/v1/admin/operations", headers=self.admin_headers, json=blocked_body
         )
         self.assertEqual(201, released.status_code, released.text)
+
+    def test_operation_creation_rejects_a_stale_ui_candidate(self):
+        enrolled = self.enroll("stale-ui-operation-node")
+        site_id = "site-stale-ui-operation"
+        base_site = {
+            "id": site_id,
+            "domain": "stale.example.test",
+            "config": "server { listen 8080; }\n",
+            "nodeIds": [enrolled["agent_id"]],
+            "version": 0,
+            "status": "draft",
+        }
+        seeded = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={"revision": 0, "state": {"sites": [base_site], "certificates": []}},
+        )
+        self.assertEqual(200, seeded.status_code, seeded.text)
+
+        newer_site = dict(base_site, config="server { listen 9090; }\n")
+        newer = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={"revision": 1, "state": {"sites": [newer_site], "certificates": []}},
+        )
+        self.assertEqual(200, newer.status_code, newer.text)
+
+        stale = self.client.post(
+            "/api/v1/admin/operations",
+            headers=self.admin_headers,
+            json={
+                "request_id": "stale-ui-operation-request-0001",
+                "reconciliation_protocol": "ui-state-v1",
+                "site_id": site_id,
+                "kind": "publish",
+                "base_version": 0,
+                "ui_revision": 1,
+                "candidate": base_site,
+                "jobs": [{
+                    "node_id": enrolled["agent_id"],
+                    "action": "config_apply",
+                    "payload": {
+                        "path": "/etc/nginx/nginx-manager.d/stale.conf",
+                        "content": base_site["config"],
+                        "expected_sha256": "0" * 64,
+                    },
+                }],
+            },
+        )
+        self.assertEqual(409, stale.status_code, stale.text)
+        self.assertEqual(
+            "ui state changed before operation creation",
+            stale.json()["detail"]["message"],
+        )
+        self.assertEqual(2, stale.json()["detail"]["revision"])
+
+    def test_active_site_operation_allows_pending_marker_but_blocks_cross_session_edits(self):
+        enrolled = self.enroll("cross-session-lock-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        site_id = "site-cross-session-lock"
+        operation_id = "cross-session-lock-operation-0001"
+        base_site = {
+            "id": site_id,
+            "domain": "locked.example.test",
+            "config": "server { listen 8080; }\n",
+            "nodeIds": [enrolled["agent_id"]],
+            "nodeHashes": {enrolled["agent_id"]: "0" * 64},
+            "version": 0,
+            "status": "draft",
+            "updatedAt": "2026-08-04T00:00:00Z",
+        }
+        seeded = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={"revision": 0, "state": {"sites": [base_site], "certificates": []}},
+        )
+        self.assertEqual(200, seeded.status_code, seeded.text)
+
+        created = self.client.post(
+            "/api/v1/admin/operations",
+            headers=self.admin_headers,
+            json={
+                "request_id": operation_id,
+                "reconciliation_protocol": "ui-state-v1",
+                "site_id": site_id,
+                "kind": "publish",
+                "base_version": 0,
+                "candidate": base_site,
+                "jobs": [{
+                    "node_id": enrolled["agent_id"],
+                    "action": "config_apply",
+                    "payload": {
+                        "path": "/etc/nginx/nginx-manager.d/cross-session-lock.conf",
+                        "content": base_site["config"],
+                        "expected_sha256": "0" * 64,
+                    },
+                }],
+            },
+        )
+        self.assertEqual(201, created.status_code, created.text)
+
+        pending_site = dict(base_site)
+        pending_site.update({
+            "status": "publishing",
+            "updatedAt": "2026-08-04T00:00:01Z",
+            "pendingRemote": {
+                "operationId": operation_id,
+                "operation": "publish",
+                "publish": True,
+            },
+        })
+        marked_pending = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 1,
+                "state": {"sites": [pending_site], "certificates": []},
+            },
+        )
+        self.assertEqual(200, marked_pending.status_code, marked_pending.text)
+        self.assertEqual(2, marked_pending.json()["revision"])
+
+        other_client = TestClient(self.client.app, base_url="https://testserver")
+        try:
+            other_login = other_client.post(
+                "/api/v1/auth/login",
+                json={
+                    "username": "admin",
+                    "password": "correct-horse-battery-staple",
+                },
+            )
+            self.assertEqual(200, other_login.status_code, other_login.text)
+            other_headers = {"X-CSRF-Token": other_login.json()["csrf_token"]}
+
+            edited_site = dict(pending_site, config="server { listen 9090; }\n")
+            edited = other_client.put(
+                "/api/v1/admin/ui-state",
+                headers=other_headers,
+                json={
+                    "revision": 2,
+                    "state": {"sites": [edited_site], "certificates": []},
+                },
+            )
+            self.assertEqual(409, edited.status_code, edited.text)
+            self.assertEqual(
+                {
+                    "resource_kind": "site",
+                    "resource_id": site_id,
+                    "operation_id": operation_id,
+                    "operation_status": "queued",
+                    "reconciliation_status": "pending",
+                },
+                {
+                    key: edited.json()["detail"][key]
+                    for key in (
+                        "resource_kind",
+                        "resource_id",
+                        "operation_id",
+                        "operation_status",
+                        "reconciliation_status",
+                    )
+                },
+            )
+
+            deleted = other_client.put(
+                "/api/v1/admin/ui-state",
+                headers=other_headers,
+                json={
+                    "revision": 2,
+                    "state": {"sites": [], "certificates": []},
+                },
+            )
+            self.assertEqual(409, deleted.status_code, deleted.text)
+            self.assertEqual(site_id, deleted.json()["detail"]["resource_id"])
+            self.assertEqual(operation_id, deleted.json()["detail"]["operation_id"])
+        finally:
+            other_client.close()
+
+        unchanged = self.client.get(
+            "/api/v1/admin/ui-state", headers=self.admin_headers
+        ).json()
+        self.assertEqual(2, unchanged["revision"])
+        self.assertEqual(base_site["config"], unchanged["state"]["sites"][0]["config"])
+        self.assertEqual(operation_id, unchanged["state"]["sites"][0]["pendingRemote"]["operationId"])
+
+        job_id = created.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        completed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": job_id,
+                "action": "config_apply",
+                "details": {"config_hash": "a" * 64},
+            },
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+
+        terminal_edit = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 2,
+                "state": {
+                    "sites": [dict(pending_site, config="server { listen 9090; }\n")],
+                    "certificates": [],
+                },
+            },
+        )
+        self.assertEqual(409, terminal_edit.status_code, terminal_edit.text)
+        self.assertEqual("succeeded", terminal_edit.json()["detail"]["operation_status"])
+        self.assertEqual("pending", terminal_edit.json()["detail"]["reconciliation_status"])
+
+        reconciled_site = dict(pending_site)
+        reconciled_site.pop("pendingRemote")
+        reconciled_site.update({
+            "status": "published",
+            "updatedAt": "2026-08-04T00:00:02Z",
+            "version": 1,
+            "nodeHashes": {enrolled["agent_id"]: "a" * 64},
+        })
+        reconciled = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 2,
+                "state": {"sites": [reconciled_site], "certificates": []},
+                "reconciled_operation_ids": [operation_id],
+            },
+        )
+        self.assertEqual(200, reconciled.status_code, reconciled.text)
+        self.assertEqual(1, reconciled.json()["state"]["sites"][0]["version"])
+        self.assertNotIn("pendingRemote", reconciled.json()["state"]["sites"][0])
+
+    def test_active_certificate_operation_uses_the_same_cross_session_resource_lock(self):
+        enrolled = self.enroll("certificate-resource-lock-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        certificate_id = "cert-cross-session-lock"
+        operation_id = "certificate-lock-operation-0001"
+        certificate = {
+            "id": certificate_id,
+            "domain": "locked.example.test",
+            "nodeIds": [enrolled["agent_id"]],
+            "status": "normal",
+            "updatedAt": "2026-08-04T00:00:00Z",
+        }
+        seeded = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 0,
+                "state": {"sites": [], "certificates": [certificate]},
+            },
+        )
+        self.assertEqual(200, seeded.status_code, seeded.text)
+
+        created = self.client.post(
+            "/api/v1/admin/operations",
+            headers=self.admin_headers,
+            json={
+                "request_id": operation_id,
+                "reconciliation_protocol": "ui-state-v1",
+                "site_id": "certificate:" + certificate_id,
+                "kind": "certificate",
+                "base_version": 0,
+                "candidate": certificate,
+                "jobs": [{
+                    "node_id": enrolled["agent_id"],
+                    "action": "certificate_apply",
+                    "payload": {},
+                }],
+            },
+        )
+        self.assertEqual(201, created.status_code, created.text)
+
+        pending_certificate = dict(certificate)
+        pending_certificate.update({
+            "status": "replacing",
+            "updatedAt": "2026-08-04T00:00:01Z",
+            "pendingRemote": {"operationId": operation_id},
+        })
+        marked_pending = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 1,
+                "state": {"sites": [], "certificates": [pending_certificate]},
+            },
+        )
+        self.assertEqual(200, marked_pending.status_code, marked_pending.text)
+
+        edited_certificate = dict(pending_certificate, domain="other.example.test")
+        edited = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 2,
+                "state": {"sites": [], "certificates": [edited_certificate]},
+            },
+        )
+        self.assertEqual(409, edited.status_code, edited.text)
+        self.assertEqual("certificate", edited.json()["detail"]["resource_kind"])
+        self.assertEqual(certificate_id, edited.json()["detail"]["resource_id"])
+        self.assertEqual(operation_id, edited.json()["detail"]["operation_id"])
+
+        deleted = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={"revision": 2, "state": {"sites": [], "certificates": []}},
+        )
+        self.assertEqual(409, deleted.status_code, deleted.text)
+
+        job_id = created.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        completed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": job_id,
+                "action": "certificate_apply",
+                "details": {"certificate_sha256": "b" * 64},
+            },
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+
+        reconciled_certificate = dict(certificate)
+        reconciled_certificate.update({
+            "fingerprint": "AA:BB:CC",
+            "updatedAt": "2026-08-04T00:00:02Z",
+        })
+        reconciled = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 2,
+                "state": {"sites": [], "certificates": [reconciled_certificate]},
+                "reconciled_operation_ids": [operation_id],
+            },
+        )
+        self.assertEqual(200, reconciled.status_code, reconciled.text)
+        self.assertEqual(
+            "AA:BB:CC",
+            reconciled.json()["state"]["certificates"][0]["fingerprint"],
+        )
+        self.assertNotIn("pendingRemote", reconciled.json()["state"]["certificates"][0])
 
     def test_legacy_operation_remains_compatible_without_reconciliation_ack(self):
         enrolled = self.enroll("legacy-operation-node")
@@ -1639,6 +1990,36 @@ class ServerTestCase(unittest.TestCase):
         self.assertTrue(result["reloaded"])
         self.assertEqual("a" * 64, result["previous_config_hash"])
         self.assertNotIn("ignored", result)
+
+    def test_delete_operation_recovery_keeps_explicit_platform_cleanup_intent(self):
+        enrolled = self.enroll("delete-recovery-node")
+        created = self.client.post(
+            "/api/v1/admin/operations",
+            headers=self.admin_headers,
+            json={
+                "request_id": "delete-recovery-operation-0001",
+                "site_id": "site-delete-recovery",
+                "kind": "delete",
+                "base_version": 3,
+                "candidate": {
+                    "targetNodeIds": [enrolled["agent_id"]],
+                    "deleteRecordAfter": True,
+                },
+                "jobs": [{
+                    "node_id": enrolled["agent_id"],
+                    "action": "config_delete",
+                    "payload": {
+                        "path": "/etc/nginx/nginx-manager.d/delete-recovery.conf",
+                        "expected_sha256": "a" * 64,
+                        "reload": True,
+                    },
+                }],
+            },
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        metadata = created.json()["operation"]["metadata"]
+        self.assertTrue(metadata["delete_record_after"])
+        self.assertNotIn("deleteRecordAfter", metadata)
 
     def test_ui_state_optimistic_lock_and_secret_rejection(self):
         initial = self.client.get("/api/v1/admin/ui-state", headers=self.admin_headers)

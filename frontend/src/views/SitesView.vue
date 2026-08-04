@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   AlertTriangle,
   Check,
@@ -10,6 +10,7 @@ import {
   RotateCcw,
   Search,
   ShieldCheck,
+  X,
 } from '@lucide/vue'
 import {
   NButton,
@@ -24,14 +25,21 @@ import ReleaseChannel from '../components/ReleaseChannel.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useConsoleStore } from '../stores/console'
 import { api } from '../api'
-import type { SiteRecord, SiteRevision } from '../types'
+import type { NodeRecord, SiteRecord, SiteRevision } from '../types'
 import {
   certificateDirectiveCounts,
   certificatePathsForNode,
   rewriteConfigCertificatePaths,
 } from '../utils/certificateConfig'
 import { certificateCoversDomain } from '../utils/certificateDomain'
-import { defaultSiteConfig, nodeEntries, safeName, uid } from '../utils/config'
+import {
+  configPathForEntry,
+  defaultSiteConfig,
+  managedConfigPath,
+  nodeEntries,
+  safeName,
+  uid,
+} from '../utils/config'
 import { certificateDays, relativeTime, siteKind, siteStatus, siteTitle } from '../utils/format'
 import {
   renderSiteTemplate,
@@ -56,8 +64,11 @@ const scanning = ref(false)
 const transferOpen = ref(false)
 const transferring = ref(false)
 const transferMode = ref<'create' | 'replace'>('create')
+const deploymentAction = ref<'add' | 'migrate' | 'remove'>('add')
 const transferNodeIds = ref<string[]>([])
 const transferEntryIds = reactive<Record<string, string>>({})
+const deleteRecordAfterRemoval = ref(false)
+const removeConfirmation = ref('')
 const historyOpen = ref(false)
 const historyLoading = ref(false)
 const revisions = ref<SiteRevision[]>([])
@@ -65,6 +76,14 @@ const editorBaseline = ref('')
 const editorCloseConfirming = ref(false)
 const templateConfirming = ref(false)
 const certificatePreviewConfirmed = ref(false)
+const detailScroll = ref<HTMLElement | null>(null)
+const detailPanel = ref<HTMLElement | null>(null)
+const detailCloseButton = ref<HTMLButtonElement | null>(null)
+const detailDrawerOpen = ref(false)
+const detailDrawerSiteId = ref('')
+const narrowDetail = ref(false)
+let detailMediaQuery: MediaQueryList | undefined
+let detailReturnFocus: HTMLElement | null = null
 
 const form = reactive({
   id: '',
@@ -199,6 +218,93 @@ const siteSearchHints = computed(() => {
 })
 
 const selected = computed(() => store.selectedSite)
+const siteBusyTitle = '当前配置有任务执行中，请等待任务完成'
+function isSiteBusy(site: SiteRecord | null | undefined) {
+  return Boolean(site && store.isSiteOperationBusy(site.id))
+}
+const selectedSiteBusy = computed(() => isSiteBusy(selected.value))
+function siteOutstandingCandidateVersion(site: SiteRecord) {
+  const explicit = Number(site.candidateVersion || 0)
+  if (explicit === Number(site.version || 0) + 1) return explicit
+  const legacy = Number(site.lastFailure?.candidateVersion || 0)
+  if (site.lastFailure?.operation === 'publish' && legacy === Number(site.version || 0) + 1) {
+    return legacy
+  }
+  return site.status === 'draft' ? Number(site.version || 0) + 1 : 0
+}
+const selectedRunBlocker = computed(() => {
+  const site = selected.value
+  if (!store.canOperate) return '当前账号只有查看权限'
+  if (!site) return '配置不存在'
+  if (selectedSiteBusy.value) return siteBusyTitle
+  if (!site.nodeIds.length) return '请先通过“调整部署范围”添加节点'
+  const readOnly = site.nodeReadOnly as Record<string, boolean> | undefined
+  for (const nodeId of site.nodeIds) {
+    const node = store.nodes.find((item) => item.id === nodeId)
+    if (!node) return `节点 ${nodeId} 不存在`
+    if (node.status === 'offline') return `${node.node_name} 的 Agent 离线`
+    if (readOnly?.[nodeId]) return `${node.node_name} 的配置为只读`
+    if (!node.capabilities.includes('config_apply')) {
+      return `${node.node_name} 的 Agent 不支持配置写入`
+    }
+  }
+  return ''
+})
+const editingSiteBusy = computed(() => {
+  if (editorMode.value !== 'edit') return false
+  return isSiteBusy(store.sites.find((site) => site.id === form.id))
+})
+const jobsById = computed(() => new Map(store.jobs.map((job) => [job.id, job])))
+const deploymentActionOptions = [
+  { label: '添加节点', value: 'add' },
+  { label: '迁移配置目录', value: 'migrate' },
+  { label: '移除节点', value: 'remove' },
+]
+const deploymentCandidateNodes = computed(() => {
+  const site = selected.value
+  if (!site) return []
+  if (deploymentAction.value === 'add') {
+    return store.nodes.filter((node) => !site.nodeIds.includes(node.id))
+  }
+  return store.nodes.filter((node) => site.nodeIds.includes(node.id))
+})
+const removesLastDeployment = computed(() => {
+  const site = selected.value
+  if (!site?.nodeIds.length || deploymentAction.value !== 'remove') return false
+  const selectedNodes = new Set(transferNodeIds.value)
+  return site.nodeIds.every((nodeId) => selectedNodes.has(nodeId))
+})
+const removeConfirmationMatches = computed(
+  () => !selected.value || removeConfirmation.value.trim() === siteTitle(selected.value),
+)
+const finalCandidateRemovalBlocked = computed(
+  () =>
+    Boolean(
+      removesLastDeployment.value &&
+        selected.value &&
+        siteOutstandingCandidateVersion(selected.value) &&
+        !deleteRecordAfterRemoval.value,
+    ),
+)
+const deploymentActionLead = computed(() => {
+  if (deploymentAction.value === 'add') {
+    return '把当前配置发布到新的节点。每个节点需要选择 Agent 允许的配置入口。'
+  }
+  if (deploymentAction.value === 'migrate') {
+    return '在已部署节点内原子迁移配置文件；源文件只会在目标文件写入并校验成功后移除。'
+  }
+  return '从所选节点安全删除受托管配置，并逐节点执行 nginx -t 和 reload。'
+})
+const deploymentSubmitLabel = computed(() => {
+  if (deploymentAction.value === 'add') return '提交添加节点'
+  if (deploymentAction.value === 'migrate') return '提交目录迁移'
+  return deleteRecordAfterRemoval.value ? '移除并删除平台记录' : '提交移除节点'
+})
+const deploymentPreviews = computed(() =>
+  transferNodeIds.value
+    .map((nodeId) => deploymentPreview(nodeId))
+    .filter((preview): preview is NonNullable<typeof preview> => Boolean(preview)),
+)
 const draftCount = computed(
   () => store.sites.filter((site) => ['draft', 'failed', 'drift'].includes(site.status)).length,
 )
@@ -227,6 +333,101 @@ const activeConfigScan = computed(() =>
     (job) => job.action === 'config_inventory' && ['queued', 'claimed', 'running'].includes(job.status),
   ),
 )
+const visibleSiteTemplates = computed(() => {
+  if (editorMode.value === 'create') return siteTemplates
+  const existing = store.sites.find((site) => site.id === form.id)
+  if (!existing || existing.context === 'main') return []
+  return siteTemplates.filter((template) => template.context === existing.context)
+})
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+}
+
+function numericValue(source: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = Number(source[key])
+    if (Number.isFinite(value) && value >= 0) return value
+  }
+  return 0
+}
+
+function arrayLength(source: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = source[key]
+    if (Array.isArray(value)) return value.length
+  }
+  return 0
+}
+
+function operationName(source: Record<string, unknown>) {
+  if (typeof source.operation === 'string') return source.operation
+  return source.publish === true ? 'publish' : ''
+}
+
+function publishProgress(source: Record<string, unknown>, includeLiveJobs: boolean) {
+  const references = Array.isArray(source.jobs)
+    ? source.jobs.map(objectValue).filter((item) => Object.keys(item).length)
+    : []
+  const alreadyCompleted = numericValue(source, ['alreadyCompleted'])
+  const total =
+    numericValue(source, ['totalTargets', 'totalNodes', 'totalCount', 'totalNodeCount', 'targetCount']) ||
+    arrayLength(source, ['targetNodeIds', 'nodeIds']) ||
+    references.length + alreadyCompleted
+  let succeeded =
+    arrayLength(source, ['successfulNodeIds', 'succeededNodeIds']) ||
+    numericValue(source, [
+      'completedNodes',
+      'succeededCount',
+      'successCount',
+      'successfulCount',
+      'alreadyCompleted',
+    ])
+
+  if (references.length) {
+    const referencedSucceeded = references.filter((reference) => {
+      const id = typeof reference.id === 'string' ? reference.id : ''
+      const liveJob = includeLiveJobs && id ? jobsById.value.get(id) : undefined
+      return (liveJob?.status || reference.status) === 'succeeded'
+    }).length
+    if (includeLiveJobs || !succeeded) succeeded = alreadyCompleted + referencedSucceeded
+  }
+  return total > 0 ? `${Math.min(succeeded, total)}/${total}` : ''
+}
+
+function siteVersionPresentation(site: SiteRecord) {
+  const pending = objectValue(site.pendingRemote)
+  const failure = objectValue(site.lastFailure)
+  const pendingPublish = operationName(pending) === 'publish'
+  const failedPublish = operationName(failure) === 'publish'
+  const explicitCandidateVersion = Number(site.candidateVersion || 0)
+  const hasCandidate =
+    explicitCandidateVersion > Number(site.version || 0) ||
+    site.status === 'draft' ||
+    pendingPublish ||
+    failedPublish
+  const candidateSource = pendingPublish ? pending : failedPublish ? failure : {}
+  const candidateVersion =
+    explicitCandidateVersion ||
+    numericValue(candidateSource, ['candidateVersion']) ||
+    site.version + 1
+  return {
+    label: hasCandidate ? `v${site.version} → v${candidateVersion}` : `v${site.version}`,
+    progress: pendingPublish
+      ? publishProgress(pending, true)
+      : failedPublish
+        ? publishProgress(failure, false)
+        : '',
+  }
+}
+
+function siteVersionLabel(site: SiteRecord) {
+  return siteVersionPresentation(site).label
+}
+
+function siteVersionProgress(site: SiteRecord) {
+  return siteVersionPresentation(site).progress
+}
 const availableCertificates = computed(() => {
   const domain = form.domain.trim()
   return [
@@ -311,42 +512,146 @@ watch(
   },
 )
 
+function resetDetailScroll() {
+  void nextTick(() => {
+    if (detailScroll.value) detailScroll.value.scrollTop = 0
+  })
+}
+
+function selectSite(siteId: string) {
+  if (narrowDetail.value) {
+    if (!detailDrawerOpen.value) {
+      detailReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    }
+    detailDrawerSiteId.value = siteId
+    detailDrawerOpen.value = true
+    if (document.activeElement !== detailCloseButton.value) {
+      void nextTick(() => detailCloseButton.value?.focus())
+    }
+  }
+  store.selectedSiteId = siteId
+  resetDetailScroll()
+}
+
+function closeDetailDrawer() {
+  const shouldRestoreFocus = narrowDetail.value && detailDrawerOpen.value
+  const returnFocus = detailReturnFocus
+  detailDrawerOpen.value = false
+  detailDrawerSiteId.value = ''
+  detailReturnFocus = null
+  if (shouldRestoreFocus && returnFocus) void nextTick(() => returnFocus.focus())
+}
+
+function trapDetailFocus(event: KeyboardEvent) {
+  if (!narrowDetail.value || !detailDrawerOpen.value || event.key !== 'Tab') return
+  const focusable = Array.from(
+    detailPanel.value?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) || [],
+  ).filter((element) => element.offsetParent !== null)
+  if (!focusable.length) {
+    event.preventDefault()
+    detailPanel.value?.focus()
+    return
+  }
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+function syncDetailBreakpoint(matches: boolean) {
+  narrowDetail.value = matches
+  if (!matches) closeDetailDrawer()
+}
+
+function handleDetailBreakpoint(event: MediaQueryListEvent) {
+  syncDetailBreakpoint(event.matches)
+}
+
+function handleDetailEscape(event: KeyboardEvent) {
+  if (event.key === 'Escape' && detailDrawerOpen.value) closeDetailDrawer()
+}
+
+onMounted(() => {
+  detailMediaQuery = window.matchMedia('(max-width: 1220px)')
+  syncDetailBreakpoint(detailMediaQuery.matches)
+  detailMediaQuery.addEventListener('change', handleDetailBreakpoint)
+  window.addEventListener('keydown', handleDetailEscape)
+})
+
+onBeforeUnmount(() => {
+  detailMediaQuery?.removeEventListener('change', handleDetailBreakpoint)
+  window.removeEventListener('keydown', handleDetailEscape)
+})
+
+watch(
+  () => store.selectedSiteId,
+  () => resetDetailScroll(),
+)
+
+watch(selected, (site) => {
+  if (
+    !site ||
+    (narrowDetail.value &&
+      detailDrawerOpen.value &&
+      detailDrawerSiteId.value &&
+      detailDrawerSiteId.value !== site.id)
+  ) {
+    closeDetailDrawer()
+  }
+})
+
+watch(removesLastDeployment, (removesLast) => {
+  if (removesLast) return
+  deleteRecordAfterRemoval.value = false
+  removeConfirmation.value = ''
+})
+
 
 function operationalSnapshot(value: typeof form) {
   return JSON.stringify({
     domain: value.domain,
     name: value.name,
-    filename: value.filename,
     type: value.type,
     target: value.target,
-    context: value.context,
-    nodeIds: [...value.nodeIds].sort(),
     certificateId: value.certificateId,
     config: value.config,
-    nodeConfigEntryIds: value.nodeConfigEntryIds,
   })
 }
 
 function editorSnapshot() {
-  const nodeConfigEntryIds = Object.fromEntries(
-    Object.entries(form.nodeConfigEntryIds).sort(([left], [right]) => left.localeCompare(right)),
-  )
+  const createDeployment =
+    editorMode.value === 'create'
+      ? {
+          filename: form.filename,
+          context: form.context,
+          nodeIds: [...form.nodeIds].sort(),
+          nodeConfigEntryIds: Object.fromEntries(
+            Object.entries(form.nodeConfigEntryIds).sort(([left], [right]) =>
+              left.localeCompare(right),
+            ),
+          ),
+        }
+      : {}
   return JSON.stringify({
     id: form.id,
     domain: form.domain,
     name: form.name,
-    filename: form.filename,
     type: form.type,
     target: form.target,
-    context: form.context,
-    nodeIds: [...form.nodeIds].sort(),
     certificateId: form.certificateId,
     note: form.note,
     changeNote: form.changeNote,
     config: form.config,
-    nodeConfigEntryIds,
     editorTab: editorTab.value,
     activeTemplate: activeTemplate.value,
+    ...createDeployment,
   })
 }
 
@@ -386,6 +691,10 @@ function openCreate() {
 }
 
 function openEdit(site: SiteRecord) {
+  if (isSiteBusy(site)) {
+    store.notify('配置操作执行中', 'warning', '请等待当前发布或部署范围调整完成后再编辑。')
+    return
+  }
   editorMode.value = 'edit'
   editorTab.value =
     site.resourceType === 'generic' ? 'generic' : site.configMode === 'guided' ? 'guided' : 'conf'
@@ -529,7 +838,32 @@ function ensureEntrySelection(nodeId: string) {
   }
 }
 
+function editorDeploymentPath(nodeId: string) {
+  const site = store.sites.find((item) => item.id === form.id)
+  const node = store.nodes.find((item) => item.id === nodeId)
+  const savedPath = site?.nodeConfigPaths?.[nodeId]
+  if (savedPath) return savedPath
+  if (node && site?.context !== 'main') {
+    const context = site?.context === 'stream' ? 'stream' : 'http'
+    const entry = nodeEntries(node, context).find(
+      (item) => item.id === site?.nodeConfigEntryIds?.[nodeId],
+    )
+    if (entry) return `${entry.directory}/*${entry.suffix}`
+  }
+  return node?.facts.managed_config_root || '等待 Agent 上报路径'
+}
+
+function initialNodeBlocker(node: NodeRecord) {
+  if (form.context === 'main') return '主配置不通过新增站点入口部署'
+  if (node.status === 'offline') return 'Agent 离线'
+  if (!node.capabilities.includes('config_apply')) return 'Agent 不支持配置写入'
+  if (!nodeEntries(node, form.context).length) return 'Agent 没有上报可用配置目录'
+  return ''
+}
+
 function toggleNode(nodeId: string, checked: boolean) {
+  const node = store.nodes.find((item) => item.id === nodeId)
+  if (checked && (!node || initialNodeBlocker(node))) return
   if (checked && !form.nodeIds.includes(nodeId)) form.nodeIds.push(nodeId)
   if (!checked) form.nodeIds = form.nodeIds.filter((item) => item !== nodeId)
   ensureEntrySelection(nodeId)
@@ -538,7 +872,15 @@ function toggleNode(nodeId: string, checked: boolean) {
 
 
 function validateForm() {
-  if (!form.nodeIds.length) return '请选择至少一个部署节点'
+  if (editorMode.value === 'create' && !form.nodeIds.length) return '请选择至少一个首次部署节点'
+  if (editorMode.value === 'create') {
+    for (const nodeId of form.nodeIds) {
+      const node = store.nodes.find((item) => item.id === nodeId)
+      if (!node) return '首次部署节点已不存在，请重新选择'
+      const blocker = initialNodeBlocker(node)
+      if (blocker) return `${node.node_name}：${blocker}`
+    }
+  }
   if (editorTab.value !== 'generic' && !form.domain.trim()) return '请输入域名'
   if (editorTab.value === 'generic' && !form.name.trim()) return '请输入配置名称'
   if (!form.config.trim()) return 'Nginx Conf 不能为空'
@@ -600,6 +942,10 @@ function handleEditorVisibility(show: boolean) {
 }
 
 async function saveDraft() {
+  if (editingSiteBusy.value) {
+    store.notify('配置操作执行中', 'warning', siteBusyTitle)
+    return
+  }
   const validation = validateForm()
   if (validation) {
     store.notify(validation, 'warning')
@@ -610,22 +956,30 @@ async function saveDraft() {
     const previous = store.sites.find((item) => item.id === form.id)
     const operationalChanged = operationalSnapshot(form) !== originalOperational.value
     const resourceType = editorTab.value === 'generic' ? 'generic' : 'site'
+    const deploymentNodeIds = previous ? [...previous.nodeIds] : [...form.nodeIds]
+    const deploymentEntryIds = previous
+      ? { ...(previous.nodeConfigEntryIds || {}) }
+      : { ...form.nodeConfigEntryIds }
+    const deploymentContext = previous?.context || form.context
+    const deploymentFilename = previous
+      ? previous.filename
+      : resourceType === 'generic'
+        ? form.filename.trim() ||
+          `${safeName(form.name)}.${deploymentContext === 'stream' ? 'stream' : 'conf'}`
+        : undefined
     const site: SiteRecord = {
       ...(previous || {}),
       id: form.id,
       resourceType,
       name: resourceType === 'generic' ? form.name.trim() : undefined,
-      filename:
-        resourceType === 'generic'
-          ? form.filename.trim() || `${safeName(form.name)}.${form.context === 'stream' ? 'stream' : 'conf'}`
-          : previous?.filename,
+      filename: deploymentFilename,
       domain: resourceType === 'site' ? form.domain.trim() : undefined,
       type: resourceType === 'generic' ? 'custom' : form.type,
       target: form.target.trim(),
-      context: form.context,
+      context: deploymentContext,
       configMode: resourceType === 'generic' ? 'generic' : editorTab.value === 'guided' ? 'guided' : 'conf',
       config: form.config,
-      nodeIds: [...form.nodeIds],
+      nodeIds: deploymentNodeIds,
       certificateId: resourceType === 'generic' ? '' : form.certificateId,
       version: Number(previous?.version || 0),
       status:
@@ -640,7 +994,7 @@ async function saveDraft() {
       nodeHashes: { ...(previous?.nodeHashes || {}) },
       nodeConfigPaths: { ...(previous?.nodeConfigPaths || {}) },
       nodeConfigs: { ...(previous?.nodeConfigs || {}) },
-      nodeConfigEntryIds: { ...form.nodeConfigEntryIds },
+      nodeConfigEntryIds: deploymentEntryIds,
       history: previous?.history || [],
     }
     const saved = await store.upsertSite(site)
@@ -653,12 +1007,29 @@ async function saveDraft() {
   }
 }
 
-function openTransfer() {
-  if (!selected.value || selected.value.context === 'main') return
+function clearDeploymentSelection() {
   transferNodeIds.value = []
-  transferMode.value = 'create'
   for (const key of Object.keys(transferEntryIds)) delete transferEntryIds[key]
+  deleteRecordAfterRemoval.value = false
+  removeConfirmation.value = ''
+}
+
+function openDeploymentAdjustment() {
+  if (!selected.value || selected.value.context === 'main') return
+  if (isSiteBusy(selected.value)) {
+    store.notify('配置操作执行中', 'warning', '请等待当前任务完成后再调整部署范围。')
+    return
+  }
+  deploymentAction.value = 'add'
+  transferMode.value = 'create'
+  clearDeploymentSelection()
   transferOpen.value = true
+}
+
+function selectDeploymentAction(value: string | number | null) {
+  if (!['add', 'migrate', 'remove'].includes(String(value))) return
+  deploymentAction.value = String(value) as 'add' | 'migrate' | 'remove'
+  clearDeploymentSelection()
 }
 
 function transferEntries(nodeId: string) {
@@ -668,14 +1039,128 @@ function transferEntries(nodeId: string) {
   return nodeEntries(node, site.context === 'stream' ? 'stream' : 'http')
 }
 
+function deploymentEligibilityBlockers(nodeId: string) {
+  const site = selected.value
+  const node = store.nodes.find((item) => item.id === nodeId)
+  if (!site || !node) return ['节点不存在']
+  const blockers: string[] = []
+  if (node.status === 'offline') blockers.push('Agent 离线')
+  const nodeReadOnly = site.nodeReadOnly as Record<string, boolean> | undefined
+  if (nodeReadOnly?.[nodeId]) blockers.push('当前节点配置为只读')
+  if (
+    deploymentAction.value !== 'remove' &&
+    siteOutstandingCandidateVersion(site)
+  ) {
+    blockers.push('当前有未发布候选配置，请先完成发布')
+  }
+  if (deploymentAction.value !== 'add' && !site.nodeHashes?.[nodeId]) {
+    blockers.push('缺少当前 Hash')
+  }
+  const requiredCapabilities =
+    deploymentAction.value === 'add'
+      ? [['config_apply', 'Agent 不支持配置写入']]
+      : deploymentAction.value === 'remove'
+        ? [['config_delete', 'Agent 不支持配置删除']]
+        : [
+            ['config_apply', 'Agent 不支持配置写入'],
+            ['config_delete', 'Agent 不支持配置删除'],
+            ['config_move', 'Agent 不支持原子迁移'],
+          ]
+  for (const [capability, message] of requiredCapabilities) {
+    if (!node.capabilities.includes(capability)) blockers.push(message)
+  }
+  if (deploymentAction.value !== 'remove' && site.certificateId) {
+    const certificate = store.certificates.find((item) => item.id === site.certificateId)
+    if (!certificatePathsForNode(certificate, node)) blockers.push('目标节点缺少证书路径')
+  }
+  if (deploymentAction.value === 'remove') return blockers
+  const entries = transferEntries(nodeId)
+  if (!entries.length) blockers.push('没有可用配置目录')
+  if (deploymentAction.value === 'add') return blockers
+  const currentEntry = selected.value?.nodeConfigEntryIds?.[nodeId]
+  if (!entries.some((entry) => entry.id !== currentEntry)) blockers.push('没有其他可迁移目录')
+  return blockers
+}
+
+function deploymentNodeDisabled(nodeId: string) {
+  return deploymentEligibilityBlockers(nodeId).length > 0
+}
+
+function deploymentNodeHint(nodeId: string) {
+  const blockers = deploymentEligibilityBlockers(nodeId)
+  if (blockers.length) return blockers.join('；')
+  if (deploymentAction.value === 'add') return '未部署 · 添加到该节点'
+  if (deploymentAction.value === 'migrate') return '已部署 · 选择其他入口后迁移'
+  return '已部署 · 从该节点安全移除'
+}
+
+function transferEntryOptions(nodeId: string) {
+  const currentEntry = selected.value?.nodeConfigEntryIds?.[nodeId]
+  return transferEntries(nodeId).map((entry) => ({
+    label: `${entry.label || entry.id} · ${entry.directory}/*${entry.suffix}`,
+    value: entry.id,
+    disabled: deploymentAction.value === 'migrate' && currentEntry === entry.id,
+  }))
+}
+
+function deploymentPreview(nodeId: string) {
+  const site = selected.value
+  const node = store.nodes.find((item) => item.id === nodeId)
+  if (!site || !node) return null
+  const actionLabels = {
+    add: '添加节点',
+    migrate: '迁移目录',
+    remove: '移除节点',
+  }
+  const hash = site.nodeHashes?.[nodeId] || ''
+  const sourcePath = deploymentAction.value === 'add' ? '未部署' : managedConfigPath(site, node)
+  let targetPath = '删除当前文件'
+  if (deploymentAction.value !== 'remove') {
+    const entryId = transferEntryIds[nodeId]
+    try {
+      targetPath = entryId ? configPathForEntry(site, node, entryId) : '尚未选择目标目录'
+    } catch {
+      targetPath = '目标目录不可用'
+    }
+  }
+
+  const blockers = deploymentEligibilityBlockers(nodeId)
+  if (deploymentAction.value === 'migrate' && sourcePath === targetPath) {
+    blockers.push('目标路径与源路径相同')
+  }
+  if (deploymentAction.value !== 'remove' && !transferEntryIds[nodeId]) {
+    blockers.push('未选择目标目录')
+  }
+
+  return {
+    nodeId,
+    nodeName: node.node_name,
+    action: actionLabels[deploymentAction.value],
+    sourcePath,
+    targetPath,
+    hash: hash || (deploymentAction.value === 'add' ? '新节点，无当前 Hash' : '缺失'),
+    safe: blockers.length === 0,
+    safety:
+      blockers.join('；') ||
+      (deploymentAction.value === 'remove'
+        ? '按当前 Hash 安全删除'
+        : transferMode.value === 'replace'
+          ? '目标存在时允许替换'
+          : '目标存在时停止，不覆盖'),
+  }
+}
+
 function toggleTransferNode(nodeId: string, checked: boolean) {
   if (checked && !transferNodeIds.value.includes(nodeId)) {
+    if (deploymentNodeDisabled(nodeId)) return
     transferNodeIds.value.push(nodeId)
-    const site = selected.value
-    const entries = transferEntries(nodeId)
-    const current = site?.nodeConfigEntryIds?.[nodeId]
-    transferEntryIds[nodeId] =
-      entries.find((entry) => entry.id !== current)?.id || entries[0]?.id || ''
+    if (deploymentAction.value !== 'remove') {
+      const current = selected.value?.nodeConfigEntryIds?.[nodeId]
+      const entries = transferEntries(nodeId)
+      transferEntryIds[nodeId] =
+        entries.find((entry) => deploymentAction.value !== 'migrate' || entry.id !== current)?.id ||
+        ''
+    }
   }
   if (!checked) {
     transferNodeIds.value = transferNodeIds.value.filter((item) => item !== nodeId)
@@ -683,24 +1168,66 @@ function toggleTransferNode(nodeId: string, checked: boolean) {
   }
 }
 
-async function submitTransfer() {
+async function submitDeploymentAdjustment() {
   if (!selected.value || !transferNodeIds.value.length) {
-    store.notify('请选择至少一个目标节点', 'warning')
+    store.notify('请选择至少一个节点', 'warning')
+    return
+  }
+  if (isSiteBusy(selected.value)) {
+    store.notify('配置操作执行中', 'warning', siteBusyTitle)
+    return
+  }
+  if (deploymentAction.value !== 'remove' && transferNodeIds.value.some((id) => !transferEntryIds[id])) {
+    store.notify('请为每个目标节点选择配置目录', 'warning')
+    return
+  }
+  if (deploymentPreviews.value.some((preview) => !preview.safe)) {
+    store.notify('变更预检未通过', 'warning', '请先处理摘要中标记的节点问题。')
+    return
+  }
+  if (deleteRecordAfterRemoval.value && !removesLastDeployment.value) {
+    store.notify('只有移除最后部署节点时才能同时删除平台记录', 'warning')
+    return
+  }
+  if (deleteRecordAfterRemoval.value && !removeConfirmationMatches.value) {
+    store.notify('请输入完整配置名称以确认删除', 'warning')
+    return
+  }
+  if (finalCandidateRemovalBlocked.value) {
+    store.notify(
+      '当前还有未发布候选配置',
+      'warning',
+      '请先完成发布；如果确定不再保留该配置，也可以勾选同时删除平台记录。',
+    )
     return
   }
   transferring.value = true
   try {
-    await store.transferSite(
-      selected.value.id,
-      transferNodeIds.value.map((nodeId) => ({
-        nodeId,
-        entryId: transferEntryIds[nodeId],
-      })),
-      transferMode.value,
-    )
+    if (deploymentAction.value === 'remove') {
+      await store.removeSiteFromNodes(
+        selected.value.id,
+        [...transferNodeIds.value],
+        deleteRecordAfterRemoval.value,
+      )
+    } else {
+      await store.transferSite(
+        selected.value.id,
+        transferNodeIds.value.map((nodeId) => ({
+          nodeId,
+          entryId: transferEntryIds[nodeId],
+        })),
+        transferMode.value,
+      )
+    }
     transferOpen.value = false
   } catch (error) {
-    store.notify('复制 / 迁移任务未提交', 'danger', store.apiMessage(error))
+    const actionLabel =
+      deploymentAction.value === 'add'
+        ? '添加节点'
+        : deploymentAction.value === 'migrate'
+          ? '目录迁移'
+          : '移除节点'
+    store.notify(`${actionLabel}任务未提交`, 'danger', store.apiMessage(error))
   } finally {
     transferring.value = false
   }
@@ -754,6 +1281,10 @@ async function restoreRevision(version: number) {
 
 async function run(publish: boolean) {
   if (!selected.value) return
+  if (isSiteBusy(selected.value)) {
+    store.notify('配置操作执行中', 'warning', siteBusyTitle)
+    return
+  }
   running.value = true
   try {
     await store.runSite(selected.value.id, publish)
@@ -779,27 +1310,13 @@ async function scanSites() {
   }
 }
 
-function removeFromNodes() {
-  if (!selected.value) return
-  const site = selected.value
-  dialog.warning({
-    title: `从节点移除 ${siteTitle(site)}`,
-    content: `将从 ${site.nodeIds.length} 个节点删除受托管配置，并执行 nginx -t 和 reload。平台记录与证书不会删除。`,
-    positiveText: '确认移除',
-    negativeText: '取消',
-    async onPositiveClick() {
-      try {
-        await store.removeSiteFromNodes(site.id, [...site.nodeIds])
-      } catch (error) {
-        store.notify('移除任务未提交', 'danger', store.apiMessage(error))
-      }
-    },
-  })
-}
-
 function deleteRecord() {
   if (!selected.value) return
   const site = selected.value
+  if (isSiteBusy(site)) {
+    store.notify('配置操作执行中', 'warning', siteBusyTitle)
+    return
+  }
   dialog.error({
     title: `删除平台记录 ${siteTitle(site)}`,
     content: '此操作只允许用于已没有部署节点的记录，删除后无法从平台恢复。',
@@ -907,7 +1424,7 @@ function deleteRecord() {
             class="site-table site-row"
             :class="{ selected: store.selectedSiteId === site.id }"
             :aria-current="store.selectedSiteId === site.id ? 'true' : undefined"
-            @click="store.selectedSiteId = site.id"
+            @click="selectSite(site.id)"
           >
             <span class="site-primary">
               <strong :title="siteTitle(site)">{{ siteTitle(site) }}</strong>
@@ -934,7 +1451,10 @@ function deleteRecord() {
               }}</strong>
               <small>{{ site.certificateId ? '节点已有证书' : '仅 HTTP / Conf 自管' }}</small>
             </span>
-            <span><strong>v{{ site.version }}</strong><small>{{ relativeTime(site.updatedAt) }}</small></span>
+            <span>
+              <strong>{{ siteVersionLabel(site) }}</strong>
+              <small>{{ siteVersionProgress(site) || relativeTime(site.updatedAt) }}</small>
+            </span>
             <span><StatusTag v-bind="siteStatus(site)" :pulse="Boolean(site.pendingRemote)" /></span>
           </button>
         </div>
@@ -945,77 +1465,124 @@ function deleteRecord() {
         </div>
       </section>
 
-      <aside v-if="selected" class="detail-panel sites-detail-panel">
-        <div class="detail-head">
-          <div>
-            <span class="detail-eyebrow">Selected configuration</span>
-            <h2>{{ siteTitle(selected) }}</h2>
-            <p>{{ siteKind(selected) }} · 配置 v{{ selected.version }}</p>
+      <button
+        v-if="narrowDetail && detailDrawerOpen"
+        type="button"
+        class="sites-detail-backdrop"
+        aria-label="关闭详情"
+        @click="closeDetailDrawer"
+      ></button>
+
+      <aside
+        v-if="selected"
+        ref="detailPanel"
+        class="detail-panel sites-detail-panel"
+        :class="{ 'is-drawer-open': detailDrawerOpen }"
+        :role="narrowDetail && detailDrawerOpen ? 'dialog' : undefined"
+        :aria-modal="narrowDetail && detailDrawerOpen ? 'true' : undefined"
+        :inert="narrowDetail && !detailDrawerOpen"
+        :aria-label="`${siteTitle(selected)} 配置详情`"
+        :tabindex="narrowDetail ? -1 : undefined"
+        @keydown="trapDetailFocus"
+      >
+        <div class="sites-detail-fixed">
+          <button
+            ref="detailCloseButton"
+            type="button"
+            class="sites-detail-close"
+            aria-label="关闭详情"
+            @click="closeDetailDrawer"
+          >
+            <X :size="18" />
+          </button>
+          <div class="detail-head">
+            <div>
+              <span class="detail-eyebrow">Selected configuration</span>
+              <h2>{{ siteTitle(selected) }}</h2>
+              <p>
+                {{ siteKind(selected) }} · 配置 {{ siteVersionLabel(selected) }}
+                <template v-if="siteVersionProgress(selected)">
+                  · {{ siteVersionProgress(selected) }} 节点成功
+                </template>
+              </p>
+            </div>
+            <StatusTag v-bind="siteStatus(selected)" :pulse="Boolean(selected.pendingRemote)" />
           </div>
-          <StatusTag v-bind="siteStatus(selected)" :pulse="Boolean(selected.pendingRemote)" />
-        </div>
 
-        <div v-if="selected.lastFailure" class="failure-card">
-          <AlertTriangle :size="20" />
-          <div>
-            <strong>上次操作未完成</strong>
-            <p>{{ selected.lastFailure.summary || selected.lastFailure.message || 'Agent 返回失败' }}</p>
-            <small>
-              {{ selected.lastFailure.node || '目标节点' }} ·
-              {{ selected.lastFailure.stage || '执行阶段未知' }}
-            </small>
+          <div v-if="selected.lastFailure" class="failure-card">
+            <AlertTriangle :size="20" />
+            <div>
+              <strong>上次操作未完成</strong>
+              <p>{{ selected.lastFailure.summary || selected.lastFailure.message || 'Agent 返回失败' }}</p>
+              <small>
+                {{ selected.lastFailure.node || '目标节点' }} ·
+                {{ selected.lastFailure.stage || '执行阶段未知' }}
+              </small>
+            </div>
+          </div>
+
+          <div class="detail-actions">
+            <NButton
+              :disabled="!store.canOperate || selectedSiteBusy"
+              :title="selectedSiteBusy ? '当前操作完成后才能编辑' : '编辑配置内容与备注'"
+              @click="openEdit(selected)"
+            >编辑配置</NButton>
+            <NButton
+              :disabled="
+                !store.canOperate ||
+                selected.context === 'main' ||
+                selectedSiteBusy
+              "
+              :title="
+                selectedSiteBusy
+                  ? siteBusyTitle
+                  : selected.context === 'main'
+                  ? '主配置不支持增删节点或迁移目录'
+                  : '添加、迁移或移除部署节点'
+              "
+              @click="openDeploymentAdjustment"
+            >
+              <template #icon><Copy :size="16" /></template>
+              调整部署范围
+            </NButton>
+            <NButton @click="openHistory">
+              <template #icon><History :size="16" /></template>
+              版本记录
+            </NButton>
+            <NButton
+              :loading="running"
+              :disabled="Boolean(selectedRunBlocker)"
+              :title="selectedRunBlocker || '在全部部署节点执行 nginx -t'"
+              @click="run(false)"
+            >
+              逐节点校验
+            </NButton>
+            <NButton
+              type="primary"
+              class="detail-publish-action"
+              :loading="running"
+              :disabled="Boolean(selectedRunBlocker)"
+              :title="selectedRunBlocker || '校验并发布到全部部署节点'"
+              @click="run(true)"
+            >
+              校验并发布
+            </NButton>
+            <NButton
+              v-if="!selected.nodeIds.length"
+              type="error"
+              secondary
+              class="detail-danger-action"
+              :disabled="!store.canOperate || selectedSiteBusy"
+              :title="selectedSiteBusy ? siteBusyTitle : '删除未部署的平台记录'"
+              @click="deleteRecord"
+            >
+              删除平台记录
+            </NButton>
           </div>
         </div>
 
-        <div class="detail-actions">
-          <NButton :disabled="!store.canOperate" @click="openEdit(selected)">编辑配置</NButton>
-          <NButton
-            v-if="selected.context !== 'main'"
-            :disabled="!store.canOperate"
-            @click="openTransfer"
-          >
-            <template #icon><Copy :size="16" /></template>
-            复制 / 迁移
-          </NButton>
-          <NButton @click="openHistory">
-            <template #icon><History :size="16" /></template>
-            版本记录
-          </NButton>
-          <NButton :loading="running" :disabled="!store.canOperate" @click="run(false)">
-            逐节点校验
-          </NButton>
-          <NButton
-            type="primary"
-            class="detail-publish-action"
-            :loading="running"
-            :disabled="!store.canOperate || !selected.nodeIds.length"
-            @click="run(true)"
-          >
-            校验并发布
-          </NButton>
-          <NButton
-            v-if="selected.nodeIds.length"
-            type="error"
-            secondary
-            class="detail-danger-action"
-            :disabled="!store.canOperate"
-            @click="removeFromNodes"
-          >
-            从节点移除
-          </NButton>
-          <NButton
-            v-else
-            type="error"
-            secondary
-            class="detail-danger-action"
-            :disabled="!store.canOperate"
-            @click="deleteRecord"
-          >
-            删除平台记录
-          </NButton>
-        </div>
-
-        <div class="detail-context-grid">
+        <div ref="detailScroll" class="sites-detail-scroll">
+          <div class="detail-context-grid">
           <div>
             <h3>配置备注</h3>
             <p>{{ selected.note || '尚未填写配置用途和负责人。' }}</p>
@@ -1056,9 +1623,10 @@ function deleteRecord() {
           </div>
         </div>
 
-        <div class="detail-section code-preview-section">
-          <h3>配置预览</h3>
-          <pre class="code-panel"><code>{{ selected.config }}</code></pre>
+          <div class="detail-section code-preview-section">
+            <h3>配置预览</h3>
+            <pre class="code-panel"><code>{{ selected.config }}</code></pre>
+          </div>
         </div>
       </aside>
     </div>
@@ -1083,10 +1651,18 @@ function deleteRecord() {
         <aside class="template-rail" aria-label="配置模板">
           <div class="template-rail-head">
             <strong>配置模板</strong>
-            <small>选择后会替换右侧 Conf</small>
+            <small>
+              {{
+                editorMode === 'edit' && form.context === 'main'
+                  ? '主配置仅支持手写 Conf'
+                  : editorMode === 'edit'
+                    ? '仅显示当前上下文模板'
+                    : '选择后会替换右侧 Conf'
+              }}
+            </small>
           </div>
           <button
-            v-for="template in siteTemplates"
+            v-for="template in visibleSiteTemplates"
             :key="template.key"
             type="button"
             class="template-card"
@@ -1114,7 +1690,7 @@ function deleteRecord() {
               <NInput
                 v-model:value="form.filename"
                 placeholder="nginx-status.conf"
-                :disabled="form.context === 'main'"
+                :disabled="editorMode === 'edit' || form.context === 'main'"
               />
             </label>
           </div>
@@ -1136,16 +1712,20 @@ function deleteRecord() {
             <small v-else>当前 Conf 已手动编辑；域名和上游不会再自动覆盖正文。</small>
           </label>
 
-          <fieldset>
-            <legend>部署节点</legend>
+          <fieldset v-if="editorMode === 'create'">
+            <legend>首次部署节点</legend>
             <div class="choice-grid">
               <button
                 v-for="node in store.nodes"
                 :key="node.id"
                 type="button"
                 class="choice-card"
-                :class="{ selected: form.nodeIds.includes(node.id), offline: node.status === 'offline' }"
-                :disabled="node.status === 'offline' || form.context === 'main'"
+                :class="{
+                  selected: form.nodeIds.includes(node.id),
+                  offline: Boolean(initialNodeBlocker(node)),
+                }"
+                :disabled="Boolean(initialNodeBlocker(node))"
+                :title="initialNodeBlocker(node) || '点击选择首次部署节点'"
                 :aria-pressed="form.nodeIds.includes(node.id)"
                 @click="toggleNode(node.id, !form.nodeIds.includes(node.id))"
               >
@@ -1154,7 +1734,9 @@ function deleteRecord() {
                 </span>
                 <span>
                   <strong>{{ node.node_name }}</strong>
-                  <small>{{ node.hostname }} · {{ node.status === 'offline' ? '离线' : '在线' }}</small>
+                  <small>
+                    {{ node.hostname }} · {{ initialNodeBlocker(node) || '在线，可部署' }}
+                  </small>
                 </span>
               </button>
             </div>
@@ -1163,8 +1745,32 @@ function deleteRecord() {
             </p>
           </fieldset>
 
-          <div v-if="form.nodeIds.length && form.context !== 'main'" class="entry-targets">
-            <h3>配置目录</h3>
+          <fieldset v-else>
+            <legend>当前部署范围（只读）</legend>
+            <div v-if="form.nodeIds.length" class="deployment-list">
+              <article v-for="nodeId in form.nodeIds" :key="nodeId">
+                <span
+                  class="online-dot"
+                  :class="{
+                    offline: store.nodes.find((item) => item.id === nodeId)?.status === 'offline',
+                  }"
+                ></span>
+                <div>
+                  <strong>{{ store.nodes.find((item) => item.id === nodeId)?.node_name || nodeId }}</strong>
+                  <code :title="editorDeploymentPath(nodeId)">{{ editorDeploymentPath(nodeId) }}</code>
+                </div>
+                <StatusTag label="只读" tone="neutral" />
+              </article>
+            </div>
+            <p v-else class="field-empty-hint">当前配置未部署到任何节点。</p>
+            <p class="field-empty-hint">节点增删和目录迁移请在详情页使用“调整部署范围”。</p>
+          </fieldset>
+
+          <div
+            v-if="editorMode === 'create' && form.nodeIds.length && form.context !== 'main'"
+            class="entry-targets"
+          >
+            <h3>首次部署目录</h3>
             <label v-for="nodeId in form.nodeIds" :key="nodeId">
               <span>{{ store.nodes.find((item) => item.id === nodeId)?.node_name }}</span>
               <NSelect
@@ -1304,7 +1910,8 @@ function deleteRecord() {
           <NButton
             type="primary"
             :loading="saving"
-            :disabled="saving"
+            :disabled="saving || editingSiteBusy"
+            :title="editingSiteBusy ? siteBusyTitle : '保存草稿'"
             @click="saveDraft"
           >保存草稿</NButton>
         </div>
@@ -1315,14 +1922,24 @@ function deleteRecord() {
       v-model:show="transferOpen"
       preset="card"
       class="action-modal"
-      title="复制或迁移配置"
+      title="调整部署范围"
       :bordered="false"
       :mask-closable="false"
+      :closable="!transferring"
+      :close-on-esc="!transferring"
     >
       <p class="modal-lead">
-        新节点会复制配置；已部署节点会把文件原子迁移到另一个配置入口。版本号不会因此增加。
+        {{ deploymentActionLead }} 拓扑调整不会增加配置版本。
       </p>
       <label>
+        <span>调整动作</span>
+        <NSelect
+          :value="deploymentAction"
+          :options="deploymentActionOptions"
+          @update:value="selectDeploymentAction"
+        />
+      </label>
+      <label v-if="deploymentAction !== 'remove'">
         <span>目标已存在文件时</span>
         <NSelect
           v-model:value="transferMode"
@@ -1334,61 +1951,98 @@ function deleteRecord() {
       </label>
       <div class="transfer-target-list">
         <label
-          v-for="node in store.nodes"
+          v-for="node in deploymentCandidateNodes"
           :key="node.id"
           class="transfer-target"
           :class="{
             selected: transferNodeIds.includes(node.id),
-            disabled:
-              node.status === 'offline' ||
-              !transferEntries(node.id).length ||
-              (selected?.nodeIds.includes(node.id) && transferEntries(node.id).length < 2),
+            disabled: deploymentNodeDisabled(node.id),
           }"
         >
           <NCheckbox
             :checked="transferNodeIds.includes(node.id)"
-            :disabled="
-              node.status === 'offline' ||
-              !transferEntries(node.id).length ||
-              (selected?.nodeIds.includes(node.id) && transferEntries(node.id).length < 2)
-            "
+            :disabled="deploymentNodeDisabled(node.id)"
             @update:checked="(checked) => toggleTransferNode(node.id, checked)"
           />
           <span>
             <strong>{{ node.node_name }}</strong>
-            <small>
-              {{
-                selected?.nodeIds.includes(node.id)
-                  ? '已部署 · 选择其他入口后迁移'
-                  : '未部署 · 复制到该节点'
-              }}
-            </small>
+            <small>{{ deploymentNodeHint(node.id) }}</small>
           </span>
           <NSelect
-            v-if="transferNodeIds.includes(node.id)"
+            v-if="transferNodeIds.includes(node.id) && deploymentAction !== 'remove'"
             v-model:value="transferEntryIds[node.id]"
-            :options="
-              transferEntries(node.id).map((entry) => ({
-                label: `${entry.label || entry.id} · ${entry.directory}/*${entry.suffix}`,
-                value: entry.id,
-                disabled:
-                  selected?.nodeIds.includes(node.id) &&
-                  selected?.nodeConfigEntryIds?.[node.id] === entry.id,
-              }))
-            "
+            :options="transferEntryOptions(node.id)"
           />
         </label>
+        <div v-if="!deploymentCandidateNodes.length" class="empty-state">
+          {{
+            deploymentAction === 'add'
+              ? '没有可添加的节点。'
+              : deploymentAction === 'migrate'
+                ? '当前配置没有可迁移目录的部署节点。'
+                : '当前配置没有部署节点可移除。'
+          }}
+        </div>
+      </div>
+
+      <div v-if="deploymentPreviews.length" class="entry-targets">
+        <h3>变更预检摘要</h3>
+        <div class="deployment-list">
+          <article v-for="preview in deploymentPreviews" :key="preview.nodeId">
+            <ShieldCheck v-if="preview.safe" :size="15" aria-hidden="true" />
+            <AlertTriangle v-else :size="15" aria-hidden="true" />
+            <div>
+              <strong>{{ preview.nodeName }} · {{ preview.action }}</strong>
+              <code :title="`${preview.sourcePath} → ${preview.targetPath}`">
+                {{ preview.sourcePath }} → {{ preview.targetPath }}
+              </code>
+              <small>当前 Hash：{{ preview.hash }} · {{ preview.safety }}</small>
+            </div>
+            <StatusTag
+              :label="preview.safe ? '本地预检通过' : '需要处理'"
+              :tone="preview.safe ? 'success' : 'danger'"
+            />
+          </article>
+        </div>
+      </div>
+
+      <div v-if="removesLastDeployment" class="security-banner">
+        <AlertTriangle :size="20" />
+        <div>
+          <NCheckbox v-model:checked="deleteRecordAfterRemoval">
+            移除成功后同时删除平台记录
+          </NCheckbox>
+          <p>默认只将配置保留为“未部署”。勾选后，全部目标节点移除成功时平台记录也会删除。</p>
+          <p v-if="finalCandidateRemovalBlocked" class="danger-copy">
+            当前还有未发布候选配置。为避免留下无法发布的草稿，请先完成发布，或勾选同时删除平台记录。
+          </p>
+          <label v-if="deleteRecordAfterRemoval">
+            <span>输入“{{ selected ? siteTitle(selected) : '' }}”确认</span>
+            <NInput
+              v-model:value="removeConfirmation"
+              :placeholder="selected ? siteTitle(selected) : ''"
+              autocomplete="off"
+            />
+          </label>
+        </div>
       </div>
       <template #footer>
         <div class="modal-footer">
-          <NButton @click="transferOpen = false">取消</NButton>
+          <NButton :disabled="transferring" @click="transferOpen = false">取消</NButton>
           <NButton
             type="primary"
             :loading="transferring"
-            :disabled="!transferNodeIds.length"
-            @click="submitTransfer"
+            :disabled="
+              !transferNodeIds.length ||
+              selectedSiteBusy ||
+              deploymentPreviews.some((preview) => !preview.safe) ||
+              finalCandidateRemovalBlocked ||
+              (deleteRecordAfterRemoval && !removeConfirmationMatches)
+            "
+            :title="selectedSiteBusy ? siteBusyTitle : deploymentSubmitLabel"
+            @click="submitDeploymentAdjustment"
           >
-            提交原子复制 / 迁移
+            {{ deploymentSubmitLabel }}
           </NButton>
         </div>
       </template>
@@ -1412,7 +2066,10 @@ function deleteRecord() {
           </div>
           <NButton
             secondary
-            :disabled="!store.canOperate || revision.version === selected?.version"
+            :disabled="
+              !store.canOperate || selectedSiteBusy || revision.version === selected?.version
+            "
+            :title="selectedSiteBusy ? siteBusyTitle : '恢复此版本为草稿'"
             @click="restoreRevision(revision.version)"
           >
             <template #icon><RotateCcw :size="15" /></template>

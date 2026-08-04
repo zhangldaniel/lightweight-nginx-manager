@@ -1173,6 +1173,7 @@ class OperationCreateRequest(BaseModel):
     reconciliation_protocol: Optional[Literal["ui-state-v1"]] = None
     kind: Literal["validate", "publish", "delete", "transfer", "certificate", "inventory"]
     base_version: int = Field(0, ge=0, le=1000000000)
+    ui_revision: Optional[int] = Field(None, ge=0, le=1000000000)
     candidate: Dict[str, Any] = Field(default_factory=dict)
     jobs: List[OperationJobRequest] = Field(..., min_length=1, max_length=100)
     ttl_seconds: Optional[int] = Field(None, ge=5, le=86400)
@@ -3021,6 +3022,19 @@ def create_app(
                     "idempotent": True,
                 }
 
+            if request.ui_revision is not None:
+                current_ui_revision = int(connection.execute(
+                    "SELECT revision FROM ui_state WHERE singleton_id = 1"
+                ).fetchone()["revision"])
+                if current_ui_revision != request.ui_revision:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": "ui state changed before operation creation",
+                            "revision": current_ui_revision,
+                        },
+                    )
+
             active_operation = connection.execute(
                 "SELECT id FROM operations WHERE site_id = ? "
                 "AND (status IN ('queued', 'running') OR reconciliation_status = 'pending') "
@@ -3089,7 +3103,21 @@ def create_app(
                 "request_sha256": request_digest,
                 "job_count": len(prepared_jobs),
                 "node_ids": node_ids,
+                "reconcile_already_completed": 0,
+                "reconcile_total_targets": len(node_ids),
             }
+            candidate_node_ids = request.candidate.get("nodeIds")
+            if isinstance(candidate_node_ids, list):
+                normalized_candidate_node_ids = list(dict.fromkeys(
+                    item.strip()
+                    for item in candidate_node_ids
+                    if isinstance(item, str) and item.strip()
+                ))
+                if set(node_ids).issubset(set(normalized_candidate_node_ids)):
+                    metadata["reconcile_total_targets"] = len(normalized_candidate_node_ids)
+                    metadata["reconcile_already_completed"] = max(
+                        0, len(normalized_candidate_node_ids) - len(node_ids)
+                    )
             if reconciliation_protocol:
                 metadata["reconciliation_protocol"] = reconciliation_protocol
             if request.kind == "transfer" and isinstance(request.candidate.get("targets"), list):
@@ -3118,6 +3146,12 @@ def create_app(
                     })
                 if transfer_targets:
                     metadata["transfer_targets"] = transfer_targets
+            if request.kind == "delete" and request.candidate.get("deleteRecordAfter") is True:
+                # Keep the operator's explicit final-node cleanup intent available to
+                # UI-state reconciliation after a control-plane restart.  The flag is
+                # only acted on after every delete job succeeds and no deployment
+                # nodes remain.
+                metadata["delete_record_after"] = True
             connection.execute(
                 """INSERT INTO operations
                    (id, site_id, kind, status, reconciliation_status, base_version,
@@ -3578,6 +3612,73 @@ def create_app(
                         "state": authoritative["state"],
                     },
                 )
+            requested_resources = {
+                kind: {
+                    resource_id: json.loads(document_json)
+                    for resource_id, document_json, _document_digest in documents
+                }
+                for kind, documents in resources.items()
+            }
+            current_state = _load_ui_state_document(connection)["state"]
+            current_resources: Dict[str, Dict[str, Dict[str, Any]]] = {
+                "site": {},
+                "certificate": {},
+            }
+            for kind, state_key in (("site", "sites"), ("certificate", "certificates")):
+                documents = current_state.get(state_key, [])
+                if not isinstance(documents, list):
+                    continue
+                for document in documents:
+                    if not isinstance(document, dict):
+                        continue
+                    resource_id = str(document.get("id") or "")
+                    if not resource_id:
+                        resource_id = "legacy-" + _sha256_text(_canonical_json(document))[:24]
+                    current_resources[kind][resource_id] = document
+
+            mutable_operation_fields = {"pendingRemote", "status", "updatedAt"}
+            reconciled_operation_ids = set(request.reconciled_operation_ids)
+            operation_locks = connection.execute(
+                "SELECT id, site_id, kind, status, reconciliation_status FROM operations "
+                "WHERE status IN ('queued', 'running') OR reconciliation_status = 'pending' "
+                "ORDER BY created_at, id"
+            ).fetchall()
+            for operation in operation_locks:
+                operation_id = str(operation["id"])
+                operation_status = str(operation["status"])
+                if operation_status not in {"queued", "running"} and operation_id in reconciled_operation_ids:
+                    continue
+                site_id = str(operation["site_id"])
+                if operation["kind"] == "certificate" and site_id.startswith("certificate:"):
+                    resource_kind = "certificate"
+                    resource_id = site_id[len("certificate:"):]
+                else:
+                    resource_kind = "site"
+                    resource_id = site_id
+                current_document = current_resources[resource_kind].get(resource_id)
+                requested_document = requested_resources[resource_kind].get(resource_id)
+                current_business = (
+                    {key: value for key, value in current_document.items() if key not in mutable_operation_fields}
+                    if current_document is not None
+                    else None
+                )
+                requested_business = (
+                    {key: value for key, value in requested_document.items() if key not in mutable_operation_fields}
+                    if requested_document is not None
+                    else None
+                )
+                if _canonical_json(current_business) != _canonical_json(requested_business):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": "resource has an active or unreconciled operation",
+                            "resource_kind": resource_kind,
+                            "resource_id": resource_id,
+                            "operation_id": operation_id,
+                            "operation_status": operation_status,
+                            "reconciliation_status": str(operation["reconciliation_status"]),
+                        },
+                    )
             reconciled_operation_ids = request.reconciled_operation_ids
             if reconciled_operation_ids:
                 placeholders = ",".join("?" for _ in reconciled_operation_ids)

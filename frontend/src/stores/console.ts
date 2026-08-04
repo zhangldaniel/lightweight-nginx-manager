@@ -98,6 +98,7 @@ export const useConsoleStore = defineStore('console', () => {
   const selectedSiteId = ref('')
   const selectedCertificateId = ref('')
   const selectedNodeId = ref('')
+  const siteOperationLocks = reactive(new Set<string>())
   const toasts = reactive<ToastItem[]>([])
 
   const sites = computed(() => ui.value.sites)
@@ -128,6 +129,34 @@ export const useConsoleStore = defineStore('console', () => {
     () => monitoring.value.filter((item) => !['healthy', 'no_data'].includes(item.health.status)).length,
   )
 
+  function isSiteOperationBusy(siteId: string) {
+    const site = sites.value.find((item) => item.id === siteId)
+    return siteOperationLocks.has(siteId) || Boolean(site?.pendingRemote)
+  }
+
+  function assertSiteOperationAvailable(siteId: string) {
+    if (isSiteOperationBusy(siteId)) {
+      throw new Error('该配置已有任务执行中，请等待任务完成后再操作')
+    }
+  }
+
+  function candidateContentChanged(current: SiteRecord, edited: SiteRecord) {
+    return (['config', 'certificateId', 'domain', 'target', 'type', 'name'] as const).some(
+      (key) => String(current[key] ?? '') !== String(edited[key] ?? ''),
+    )
+  }
+
+  function outstandingCandidateVersion(site: SiteRecord) {
+    const explicit = Number(site.candidateVersion || 0)
+    if (explicit === Number(site.version || 0) + 1) return explicit
+    const legacy = Number(site.lastFailure?.candidateVersion || 0)
+    if (site.lastFailure?.operation === 'publish' && legacy === Number(site.version || 0) + 1) {
+      return legacy
+    }
+    if (site.status === 'draft') return Number(site.version || 0) + 1
+    return 0
+  }
+
   function notify(title: string, type: Tone = 'info', message = '') {
     const toast = { id: Date.now() + Math.random(), title, type, message }
     toasts.push(toast)
@@ -139,6 +168,32 @@ export const useConsoleStore = defineStore('console', () => {
 
   function apiMessage(error: unknown) {
     return error instanceof Error ? error.message : '发生未知错误'
+  }
+
+  async function createTrackedOperation(body: Record<string, unknown>) {
+    try {
+      return await api.createOperation(body)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        try {
+          await refresh(false, true)
+        } catch {
+          lastRefreshAt.value = null
+        }
+        const detail = error.body.detail
+        const message =
+          detail && typeof detail === 'object'
+            ? String((detail as Record<string, unknown>).message || '')
+            : ''
+        if (message === 'ui state changed before operation creation') {
+          throw new Error('配置已被其他页面更新，已刷新到最新状态；请核对后重试')
+        }
+        if (message === 'resource already has an active operation') {
+          throw new Error('该配置已有任务执行或等待对账，请稍后重试')
+        }
+      }
+      throw error
+    }
   }
 
   async function checkSession() {
@@ -332,18 +387,37 @@ export const useConsoleStore = defineStore('console', () => {
       const action = String(recoveryJobs[0]?.action || '')
       const operationKind =
         operation.kind === 'validate' && action === 'nginx_reload' ? 'reload' : operation.kind
+      const recoveredCandidateVersion = outstandingCandidateVersion(site)
       const baseStatus =
-        operationKind === 'reload'
+        ['delete', 'transfer'].includes(operationKind) && recoveredCandidateVersion
+          ? site.lastFailure?.operation === 'publish'
+            ? 'failed'
+            : 'draft'
+          : operationKind === 'reload'
           ? 'published'
           : site.status === 'publishing'
             ? 'published'
             : site.status
+      const recoveredAlreadyCompleted = Math.max(
+        0,
+        Number(metadata.reconcile_already_completed || 0) || 0,
+      )
+      const recoveredTotalTargets = Math.max(
+        recoveryJobs.length + recoveredAlreadyCompleted,
+        Number(metadata.reconcile_total_targets || 0) || 0,
+      )
       site.pendingRemote = {
         operationId: operation.id,
         operation: operationKind,
         publish: operation.kind === 'publish',
         baseStatus,
         recovered: true,
+        alreadyCompleted: recoveredAlreadyCompleted,
+        totalTargets: recoveredTotalTargets,
+        candidateVersion:
+          Number(operation.base_version ?? site.version ?? 0) +
+          (operation.kind === 'publish' ? 1 : 0),
+        deleteRecordAfter: metadata.delete_record_after === true,
         targetNodeIds: recoveryJobs.map((job) => String(job.node_id || '')).filter(Boolean),
         jobs: recoveryJobs.map((job) => {
           const nodeId = String(job.node_id || '')
@@ -357,6 +431,9 @@ export const useConsoleStore = defineStore('console', () => {
             migration: Boolean(target?.migration),
           }
         }),
+      }
+      if (operation.kind === 'publish') {
+        site.candidateVersion = Number(operation.base_version ?? site.version ?? 0) + 1
       }
       if (!terminal) site.status = 'publishing'
       recovered += 1
@@ -379,6 +456,10 @@ export const useConsoleStore = defineStore('console', () => {
             publish?: boolean
             baseStatus?: string
             recovered?: boolean
+            alreadyCompleted?: number
+            totalTargets?: number
+            candidateVersion?: number
+            deleteRecordAfter?: boolean
             targetNodeIds?: string[]
             jobs?: Array<{
               id: string
@@ -402,11 +483,22 @@ export const useConsoleStore = defineStore('console', () => {
             pending.operation === 'validate'
               ? pending.baseStatus || site.status || 'published'
               : 'failed'
+          if (pending.publish) {
+            site.candidateVersion =
+              pending.candidateVersion ?? Number(site.version || 0) + 1
+          }
           site.lastFailure = {
             summary: '操作记录已不存在，已释放待处理状态；请核对节点上的实际配置。',
             stage: 'operation_missing',
             node: '',
             operationId: pending.operationId,
+            operation: pending.operation || 'operation',
+            completedNodes: Number(pending.alreadyCompleted || 0),
+            totalNodes: Number(pending.totalTargets || pending.jobs?.length || 0),
+            failedNodeIds: (pending.jobs || []).map((item) => item.nodeId).filter(Boolean),
+            candidateVersion:
+              pending.candidateVersion ??
+              Number(site.version || 0) + (pending.publish ? 1 : 0),
           }
           missingOperationIds.push(pending.operationId)
           delete site.pendingRemote
@@ -435,6 +527,19 @@ export const useConsoleStore = defineStore('console', () => {
       )
       const allSucceeded =
         operation.status === 'succeeded' && successfulItems.length === pendingJobs.length
+      const alreadyCompleted = Math.max(0, Number(pending.alreadyCompleted || 0))
+      const completedNodes = alreadyCompleted + successfulItems.length
+      const totalNodes = Math.max(
+        completedNodes,
+        Number(pending.totalTargets || pendingJobs.length + alreadyCompleted),
+      )
+      const candidateVersion =
+        pending.candidateVersion ??
+        Number(site.version || 0) + (pending.publish ? 1 : 0)
+      const failedNodeIds = pendingJobs
+        .filter((item) => jobById.get(item.id)?.status !== 'succeeded')
+        .map((item) => item.nodeId)
+        .filter(Boolean)
       site.nodeHashes ||= {}
       site.nodeConfigPaths ||= {}
       site.nodeConfigEntryIds ||= {}
@@ -470,22 +575,65 @@ export const useConsoleStore = defineStore('console', () => {
           if (item.candidateHash) site.nodeHashes[item.nodeId] = item.candidateHash
           delete site.nodeConfigs[item.nodeId]
         }
-        if (allSucceeded) site.version = Number(site.version || 0) + 1
+        if (allSucceeded) {
+          site.version = candidateVersion
+          delete site.candidateVersion
+        } else {
+          site.candidateVersion = candidateVersion
+        }
+      }
+
+      const deletePlatformRecord =
+        allSucceeded &&
+        pending.operation === 'delete' &&
+        pending.deleteRecordAfter === true &&
+        site.nodeIds.length === 0
+      if (deletePlatformRecord) {
+        ui.value.sites = sites.value.filter((item) => item.id !== site.id)
+        if (
+          selectedSiteId.value === site.id ||
+          !ui.value.sites.some((item) => item.id === selectedSiteId.value)
+        ) {
+          selectedSiteId.value = ui.value.sites[0]?.id || ''
+        }
+        reconciledOperationIds.push(operation.id)
+        processedResourceCount += 1
+        changed = true
+        continue
       }
 
       site.updatedAt = new Date().toISOString()
       if (allSucceeded) {
-        site.status =
-          pending.operation === 'delete' && !site.nodeIds.length
-            ? 'unassigned'
-            : pending.publish || ['delete', 'transfer'].includes(pending.operation || '')
-              ? 'published'
-              : pending.baseStatus || site.status || 'published'
-        if (pending.operation === 'transfer' && pending.recovered) {
+        const outstandingVersion = outstandingCandidateVersion(site)
+        const preserveCandidate =
+          ['delete', 'transfer'].includes(pending.operation || '') &&
+          site.nodeIds.length > 0 &&
+          outstandingVersion > Number(site.version || 0)
+        const preservePublishFailure =
+          preserveCandidate && site.lastFailure?.operation === 'publish'
+        if (pending.operation === 'validate' && outstandingVersion > Number(site.version || 0)) {
+          site.candidateVersion = outstandingVersion
+        }
+        if (preserveCandidate) {
+          site.candidateVersion = outstandingVersion
+          site.status = preservePublishFailure ? 'failed' : 'draft'
+        } else if (pending.operation === 'delete' && !site.nodeIds.length) {
+          site.status = 'unassigned'
+        } else if (pending.publish || ['delete', 'transfer'].includes(pending.operation || '')) {
+          site.status = 'published'
+        } else {
+          const baseStatus = pending.baseStatus || site.status || 'published'
+          site.status = pending.operation === 'validate' && baseStatus === 'failed' ? 'draft' : baseStatus
+        }
+        if (
+          pending.operation === 'transfer' &&
+          pending.recovered &&
+          !preserveCandidate
+        ) {
           site.status = 'drift'
           site.changeNote = '已恢复配置迁移任务；请扫描节点配置确认实际正文'
         }
-        delete site.lastFailure
+        if (!preservePublishFailure) delete site.lastFailure
       } else {
         const failed = operationJobs.find((item) => item.status !== 'succeeded')
         const result = failed?.result || {}
@@ -498,7 +646,13 @@ export const useConsoleStore = defineStore('console', () => {
           stage: String(result.failure_stage || operation.kind || 'operation'),
           node: failed?.node_name || failed?.node_id || '',
           operationId: operation.id,
+          operation: pending.operation || operation.kind || 'operation',
+          completedNodes,
+          totalNodes,
+          failedNodeIds,
+          candidateVersion,
         }
+        if (pending.publish) site.candidateVersion = candidateVersion
       }
       reconciledOperationIds.push(operation.id)
       delete site.pendingRemote
@@ -745,8 +899,45 @@ export const useConsoleStore = defineStore('console', () => {
   }
   async function upsertSite(site: SiteRecord) {
     const index = sites.value.findIndex((item) => item.id === site.id)
-    if (index >= 0) sites.value[index] = site
-    else sites.value.unshift(site)
+    if (index >= 0) {
+      const current = sites.value[index]
+      assertSiteOperationAvailable(site.id)
+      const contentChanged = candidateContentChanged(current, site)
+      const edited = clonePlain(site)
+      edited.nodeIds = clonePlain(current.nodeIds)
+      edited.version = current.version
+      if (current.context !== undefined) edited.context = current.context
+      else delete edited.context
+      if (current.filename !== undefined) edited.filename = current.filename
+      else delete edited.filename
+      for (const key of [
+        'nodeHashes',
+        'nodeConfigPaths',
+        'nodeConfigs',
+        'nodeConfigEntryIds',
+      ] as const) {
+        if (current[key] !== undefined) edited[key] = clonePlain(current[key])
+        else delete edited[key]
+      }
+      delete edited.pendingRemote
+      if (contentChanged) {
+        edited.candidateVersion = Number(current.version || 0) + 1
+        delete edited.lastFailure
+        edited.status = 'draft'
+      } else if (current.lastFailure !== undefined) {
+        edited.lastFailure = clonePlain(current.lastFailure)
+      }
+      if (!contentChanged && current.candidateVersion !== undefined) {
+        edited.candidateVersion = current.candidateVersion
+      }
+      sites.value[index] = edited
+    } else {
+      const created = clonePlain(site)
+      if (created.status === 'draft' && created.candidateVersion === undefined) {
+        created.candidateVersion = Number(created.version || 0) + 1
+      }
+      sites.value.unshift(created)
+    }
     selectedSiteId.value = site.id
     return saveUiState(index >= 0 ? '站点草稿已保存' : '站点草稿已创建')
   }
@@ -754,6 +945,7 @@ export const useConsoleStore = defineStore('console', () => {
   async function removeSiteRecord(siteId: string) {
     const site = sites.value.find((item) => item.id === siteId)
     if (!site) return false
+    assertSiteOperationAvailable(siteId)
     if (site.nodeIds.length) throw new Error('请先从全部节点移除配置，再删除平台记录')
     ui.value.sites = sites.value.filter((item) => item.id !== siteId)
     selectedSiteId.value = ui.value.sites[0]?.id || ''
@@ -842,11 +1034,12 @@ export const useConsoleStore = defineStore('console', () => {
         },
       })
     }
-    const response = await api.createOperation({
+    const response = await createTrackedOperation({
       request_id: uid('operation'),
       site_id: `certificate:${certificate.id}`,
       kind: 'certificate',
       base_version: 0,
+      ui_revision: stateRevision.value,
       candidate: {
         id: certificate.id,
         domain: certificate.domain,
@@ -883,11 +1076,26 @@ export const useConsoleStore = defineStore('console', () => {
     if (!canOperate.value) throw new Error('当前账号只有查看权限')
     let site = sites.value.find((item) => item.id === siteId)
     if (!site) throw new Error('站点不存在')
-    if (site.pendingRemote) throw new Error('该站点已有任务执行中')
+    assertSiteOperationAvailable(siteId)
     const targets = site.nodeIds.map((id) => nodes.value.find((item) => item.id === id)).filter(Boolean) as NodeRecord[]
     if (!targets.length) throw new Error('请先选择至少一个部署节点')
     if (targets.some((node) => node.status === 'offline')) throw new Error('目标节点中存在离线 Agent')
+    const nodeReadOnly = site.nodeReadOnly as Record<string, boolean> | undefined
+    const readOnlyNode = targets.find((node) => nodeReadOnly?.[node.id])
+    if (readOnlyNode) {
+      throw new Error(`${readOnlyNode.node_name} 的配置为只读，不能由平台校验或发布`)
+    }
+    const unsupportedNode = targets.find((node) => !node.capabilities.includes('config_apply'))
+    if (unsupportedNode) {
+      throw new Error(`${unsupportedNode.node_name} 的 Agent 不支持配置写入`)
+    }
 
+    siteOperationLocks.add(siteId)
+    try {
+    const outstandingVersion = outstandingCandidateVersion(site)
+    if (outstandingVersion && site.candidateVersion !== outstandingVersion) {
+      site.candidateVersion = outstandingVersion
+    }
     const saved = await saveUiState('')
     if (!saved) return
     site = sites.value.find((item) => item.id === siteId)
@@ -926,23 +1134,29 @@ export const useConsoleStore = defineStore('console', () => {
     }
 
     if (publish && unchanged === targets.length) {
+      const candidateVersion = outstandingCandidateVersion(site)
+      const commitsCandidate = candidateVersion === Number(site.version || 0) + 1
       const candidate = clonePlain(site)
       delete candidate.pendingRemote
       delete candidate.lastFailure
-      const response = await api.createOperation({
+      const response = await createTrackedOperation({
         request_id: uid('operation'),
         site_id: site.id,
-        kind: 'validate',
+        kind: commitsCandidate ? 'publish' : 'validate',
         base_version: Number(site.version || 0),
+        ui_revision: stateRevision.value,
         candidate,
         jobs: targets.map((node) => ({ node_id: node.id, action: 'nginx_reload', payload: {} })),
         ttl_seconds: 300,
       })
       const pendingRemote = {
         operationId: response.operation.id,
-        operation: 'reload',
-        publish: false,
-        baseStatus: 'published',
+        operation: commitsCandidate ? 'publish' : 'reload',
+        publish: commitsCandidate,
+        baseStatus: commitsCandidate ? site.status : 'published',
+        alreadyCompleted: 0,
+        totalTargets: targets.length,
+        candidateVersion: commitsCandidate ? candidateVersion : Number(site.version || 0),
         jobs: response.jobs.map((job) => ({
           id: job.id,
           nodeId: job.node_id,
@@ -954,7 +1168,10 @@ export const useConsoleStore = defineStore('console', () => {
         if (!current) throw new Error('站点不存在')
         current.pendingRemote = pendingRemote
         current.status = 'publishing'
-      }, `配置未变化，已提交 nginx -t 和 reload；版本保持 v${site.version}`)
+        if (commitsCandidate) current.candidateVersion = candidateVersion
+      }, commitsCandidate
+        ? `节点已是候选内容，已提交版本 v${candidateVersion} 确认与 reload`
+        : `配置未变化，已提交 nginx -t 和 reload；版本保持 v${site.version}`)
       return
     }
     if (!jobsToCreate.length) throw new Error('没有需要提交的目标任务')
@@ -962,11 +1179,12 @@ export const useConsoleStore = defineStore('console', () => {
     const candidate = clonePlain(site)
     delete candidate.pendingRemote
     delete candidate.lastFailure
-    const response = await api.createOperation({
+    const response = await createTrackedOperation({
       request_id: uid('operation'),
       site_id: site.id,
       kind: publish ? 'publish' : 'validate',
       base_version: Number(site.version || 0),
+      ui_revision: stateRevision.value,
       candidate,
       jobs: jobsToCreate,
       ttl_seconds: 300,
@@ -985,25 +1203,53 @@ export const useConsoleStore = defineStore('console', () => {
       operation: publish ? 'publish' : 'validate',
       publish,
       baseStatus: site.status,
+      alreadyCompleted: unchanged,
+      totalTargets: targets.length,
+      candidateVersion: Number(site.version || 0) + (publish ? 1 : 0),
       jobs: pendingJobs,
     }
     await persistRemoteState(() => {
       const current = sites.value.find((item) => item.id === siteId)
       if (!current) throw new Error('站点不存在')
       current.pendingRemote = pendingRemote
-      if (publish) current.status = 'publishing'
+      if (publish) {
+        current.status = 'publishing'
+        current.candidateVersion = pendingRemote.candidateVersion
+      }
     }, publish ? '发布任务已提交' : '逐节点校验已提交')
+    } finally {
+      siteOperationLocks.delete(siteId)
+    }
   }
 
-  async function removeSiteFromNodes(siteId: string, nodeIds: string[]) {
+  async function removeSiteFromNodes(
+    siteId: string,
+    nodeIds: string[],
+    deleteRecordAfter = false,
+  ) {
     if (!canOperate.value) throw new Error('当前账号只有查看权限')
     let site = sites.value.find((item) => item.id === siteId)
     if (!site) throw new Error('站点不存在')
-    if (site.pendingRemote) throw new Error('该站点已有任务执行中')
+    assertSiteOperationAvailable(siteId)
     const targets = nodeIds
       .map((id) => nodes.value.find((item) => item.id === id))
       .filter(Boolean) as NodeRecord[]
     if (!targets.length) throw new Error('没有可移除的节点')
+    const removesLastDeployment =
+      site.nodeIds.length > 0 && site.nodeIds.every((nodeId) => nodeIds.includes(nodeId))
+    if (
+      removesLastDeployment &&
+      outstandingCandidateVersion(site) &&
+      !deleteRecordAfter
+    ) {
+      throw new Error('当前有未发布候选配置；请先完成发布，或选择同时删除平台记录')
+    }
+    siteOperationLocks.add(siteId)
+    try {
+    const outstandingVersion = outstandingCandidateVersion(site)
+    if (outstandingVersion && site.candidateVersion !== outstandingVersion) {
+      site.candidateVersion = outstandingVersion
+    }
     const saved = await saveUiState('')
     if (!saved) return
     site = sites.value.find((item) => item.id === siteId)
@@ -1021,12 +1267,13 @@ export const useConsoleStore = defineStore('console', () => {
         },
       }
     })
-    const response = await api.createOperation({
+    const response = await createTrackedOperation({
       request_id: uid('operation'),
       site_id: site.id,
       kind: 'delete',
       base_version: Number(site.version || 0),
-      candidate: { targetNodeIds: nodeIds },
+      ui_revision: stateRevision.value,
+      candidate: { targetNodeIds: nodeIds, deleteRecordAfter },
       jobs: jobSpecs,
       ttl_seconds: 300,
     })
@@ -1035,6 +1282,10 @@ export const useConsoleStore = defineStore('console', () => {
       operation: 'delete',
       publish: false,
       baseStatus: site.status,
+      alreadyCompleted: 0,
+      totalTargets: targets.length,
+      candidateVersion: Number(site.version || 0),
+      deleteRecordAfter,
       targetNodeIds: nodeIds,
       jobs: response.jobs.map((job) => ({ id: job.id, nodeId: job.node_id })),
     }
@@ -1044,6 +1295,9 @@ export const useConsoleStore = defineStore('console', () => {
       current.pendingRemote = pendingRemote
       current.status = 'publishing'
     }, '安全移除任务已提交')
+    } finally {
+      siteOperationLocks.delete(siteId)
+    }
   }
 
   async function transferSite(
@@ -1055,12 +1309,20 @@ export const useConsoleStore = defineStore('console', () => {
     let site = sites.value.find((item) => item.id === siteId)
     if (!site) throw new Error('配置不存在')
     if (site.context === 'main') throw new Error('nginx.conf 不支持复制或迁移')
-    if (site.pendingRemote) throw new Error('该配置已有任务执行中')
+    assertSiteOperationAvailable(siteId)
+    if (outstandingCandidateVersion(site)) {
+      throw new Error('当前有未发布候选配置，请先完成发布，再添加或迁移节点')
+    }
     if (!targets.length) throw new Error('请选择至少一个目标节点')
+    siteOperationLocks.add(siteId)
+    try {
     const saved = await saveUiState('')
     if (!saved) return
     site = sites.value.find((item) => item.id === siteId)
     if (!site) return
+    if (outstandingCandidateVersion(site)) {
+      throw new Error('当前有未发布候选配置，请先完成发布，再添加或迁移节点')
+    }
 
     const certificate = site.certificateId
       ? certificates.value.find((item) => item.id === site?.certificateId)
@@ -1127,11 +1389,12 @@ export const useConsoleStore = defineStore('console', () => {
         migration,
       })
     }
-    const response = await api.createOperation({
+    const response = await createTrackedOperation({
       request_id: uid('operation'),
       site_id: site.id,
       kind: 'transfer',
       base_version: Number(site.version || 0),
+      ui_revision: stateRevision.value,
       candidate: { mode, targets: targetMetadata },
       jobs,
       ttl_seconds: 300,
@@ -1141,6 +1404,9 @@ export const useConsoleStore = defineStore('console', () => {
       operation: 'transfer',
       publish: false,
       baseStatus: site.status,
+      alreadyCompleted: 0,
+      totalTargets: targets.length,
+      candidateVersion: Number(site.version || 0),
       targetNodeIds: targets.map((item) => item.nodeId),
       jobs: response.jobs.map((job) => {
         const target = targetMetadata.find((item) => item.node_id === job.node_id)!
@@ -1161,6 +1427,9 @@ export const useConsoleStore = defineStore('console', () => {
       current.pendingRemote = pendingRemote
       current.status = 'publishing'
     }, '配置复制 / 迁移任务已提交')
+    } finally {
+      siteOperationLocks.delete(siteId)
+    }
   }
 
   async function revokeNode(nodeId: string) {
@@ -1197,6 +1466,7 @@ export const useConsoleStore = defineStore('console', () => {
     onlineCount,
     riskyCertificateCount,
     unhealthyCount,
+    isSiteOperationBusy,
     notify,
     apiMessage,
     checkSession,

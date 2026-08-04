@@ -33,7 +33,7 @@ const nodes = ['node-a', 'node-b'].map((id) => ({
   agent_version: 'qa',
   nginx_version: '1.26.3',
   config_hash: null,
-  capabilities: [],
+  capabilities: ['config_apply'],
   facts: {},
   enrolled_at: now,
   last_seen_at: now,
@@ -52,6 +52,8 @@ const partialPublish = {
   completed_at: now,
   metadata: {
     reconcile_version: 1,
+    reconcile_already_completed: 1,
+    reconcile_total_targets: 3,
     reconcile_jobs: [
       { id: 'publish-a', node_id: 'node-a', action: 'config_apply', new_sha256: 'new-a' },
       { id: 'publish-b', node_id: 'node-b', action: 'config_apply', new_sha256: 'new-b' },
@@ -203,6 +205,8 @@ try {
   assert.equal(site.nodeHashes['node-a'], 'new-a')
   assert.equal(site.nodeHashes['node-b'], 'old-b')
   assert.equal(site.pendingRemote, undefined)
+  assert.equal(site.lastFailure?.completedNodes, 2)
+  assert.equal(site.lastFailure?.totalNodes, 3)
 
   const certificate = store.certificates.find((item) => item.id === 'cert-a')
   assert.equal(certificate.status, 'failed')

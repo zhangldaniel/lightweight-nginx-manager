@@ -18,7 +18,14 @@ const nodes = [
     agent_version: '0.4.0',
     nginx_version: '1.26.3',
     config_hash: 'aa'.repeat(32),
-    capabilities: ['config_move', 'metrics_v1', 'stub_status_v1', 'log_stream_v1'],
+    capabilities: [
+      'config_apply',
+      'config_move',
+      'config_delete',
+      'metrics_v1',
+      'stub_status_v1',
+      'log_stream_v1',
+    ],
     facts: {
       nginx_config: '/apps/nginx/conf/nginx.conf',
       managed_config_root: '/apps/nginx/conf/conf.d',
@@ -66,7 +73,13 @@ const nodes = [
     agent_version: '0.4.0',
     nginx_version: '1.26.3',
     config_hash: 'bb'.repeat(32),
-    capabilities: ['config_move', 'metrics_v1', 'stub_status_v1'],
+    capabilities: [
+      'config_apply',
+      'config_move',
+      'config_delete',
+      'metrics_v1',
+      'stub_status_v1',
+    ],
     facts: {
       nginx_config: '/apps/nginx/conf/nginx.conf',
       managed_config_root: '/apps/nginx/conf/conf.d',

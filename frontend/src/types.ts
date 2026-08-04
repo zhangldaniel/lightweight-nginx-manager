@@ -68,6 +68,7 @@ export interface SiteRecord {
   nodeIds: string[]
   certificateId?: string
   version: number
+  candidateVersion?: number
   status: string
   note?: string
   changeNote?: string
@@ -83,6 +84,12 @@ export interface SiteRecord {
     stage?: string
     node?: string
     message?: string
+    operation?: string
+    operationId?: string
+    completedNodes?: number
+    totalNodes?: number
+    failedNodeIds?: string[]
+    candidateVersion?: number
     [key: string]: unknown
   }
   [key: string]: unknown
