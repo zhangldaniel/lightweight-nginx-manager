@@ -14,7 +14,9 @@ import type {
   AuditRecord,
   CertificateRecord,
   EnrollmentRecord,
+  HighAvailabilityGroup,
   JobRecord,
+  KeepalivedJobAction,
   MonitoringItem,
   NodeRecord,
   OperationRecord,
@@ -27,9 +29,23 @@ import type {
 
 const MAX_RECONCILE_BATCH = 500
 
+const defaultHighAvailabilityGroups = (): HighAvailabilityGroup[] => [
+  {
+    id: 'nginx-keepalived',
+    name: 'NGINX 高可用',
+    type: 'keepalived',
+    vip: '10.165.0.110',
+    nodes: [
+      { address: '10.165.0.108', label: 'NGINX 108' },
+      { address: '10.165.0.111', label: 'NGINX 111' },
+    ],
+  },
+]
+
 const emptyState = (): UiState => ({
   sites: [],
   certificates: [],
+  highAvailabilityGroups: defaultHighAvailabilityGroups(),
   importedInventoryJobs: [],
   importedCertificateInventoryJobs: [],
   processedOperationIds: [],
@@ -41,6 +57,9 @@ function normalizedState(value?: Partial<UiState>): UiState {
     ...(value || {}),
     sites: Array.isArray(value?.sites) ? value.sites : [],
     certificates: Array.isArray(value?.certificates) ? value.certificates : [],
+    highAvailabilityGroups: Array.isArray(value?.highAvailabilityGroups)
+      ? value.highAvailabilityGroups
+      : defaultHighAvailabilityGroups(),
     importedInventoryJobs: Array.isArray(value?.importedInventoryJobs)
       ? value.importedInventoryJobs
       : [],
@@ -987,6 +1006,22 @@ export const useConsoleStore = defineStore('console', () => {
     await refresh()
   }
 
+  async function runHighAvailabilityCheck(nodeIds: string[], action: KeepalivedJobAction) {
+    if (!canOperate.value) throw new Error('当前账号只有查看权限')
+    const targets = [...new Set(nodeIds)]
+      .map((id) => nodes.value.find((node) => node.id === id))
+      .filter(Boolean) as NodeRecord[]
+    if (!targets.length) throw new Error('没有匹配到可检查的 Keepalived 节点')
+    const offline = targets.find((node) => node.status === 'offline')
+    if (offline) throw new Error(`${offline.node_name} 的 Agent 当前离线`)
+    const unsupported = targets.find((node) => !node.capabilities.includes(action))
+    if (unsupported) throw new Error(`${unsupported.node_name} 的 Agent 尚不支持 Keepalived 检查`)
+    const response = await api.highAvailabilityCheck(targets.map((node) => node.id), action)
+    notify(action === 'keepalived_inspect' ? '高可用状态检查已提交' : 'Keepalived 配置校验已提交', 'success')
+    await refresh()
+    return response
+  }
+
   async function applyCertificate(
     certificate: CertificateRecord,
     nodeIds: string[],
@@ -1480,6 +1515,7 @@ export const useConsoleStore = defineStore('console', () => {
     decideEnrollment,
     quickNodeAction,
     scanInventory,
+    runHighAvailabilityCheck,
     applyCertificate,
     runSite,
     removeSiteFromNodes,

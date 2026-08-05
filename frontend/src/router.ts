@@ -5,6 +5,7 @@ import NodesView from './views/NodesView.vue'
 import LogsView from './views/LogsView.vue'
 import MonitoringView from './views/MonitoringView.vue'
 import RecordsView from './views/RecordsView.vue'
+import HighAvailabilityView from './views/HighAvailabilityView.vue'
 
 export default createRouter({
   history: createWebHashHistory(),
@@ -15,6 +16,7 @@ export default createRouter({
     { path: '/nodes', name: 'nodes', component: NodesView },
     { path: '/logs', name: 'logs', component: LogsView },
     { path: '/monitoring', name: 'monitoring', component: MonitoringView },
+    { path: '/high-availability', name: 'high-availability', component: HighAvailabilityView },
     { path: '/records', name: 'records', component: RecordsView },
   ],
 })

@@ -62,6 +62,206 @@ class AgentTestCase(unittest.TestCase):
     def job(self, job_id, action, payload):
         return {"id": job_id, "action": action, "payload": payload, "expires_at": "2099-01-01T00:00:00Z"}
 
+    def keepalived_settings(self, config_path):
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="keepalived-node",
+            nginx_binary=str(Path(sys.executable).resolve()),
+            nginx_config=str(self.main_config),
+            nginx_root=str(self.root),
+            allowed_config_roots=[str(self.config_root)],
+            allowed_certificate_roots=[str(self.certificate_root)],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "keepalived-helper.sock"),
+            keepalived_config=str(config_path),
+            keepalived_service="keepalived.service",
+            keepalived_vip="10.165.0.110",
+        )
+        settings.validate()
+        return settings
+
+    def test_keepalived_capabilities_are_disabled_until_fully_configured(self):
+        self.assertNotIn("keepalived_inspect", self.settings.reported_capabilities())
+        response = self.executor.execute(self.job("job-keepalived-disabled", "keepalived_inspect", {}))
+        self.assertEqual("failed", response["status"])
+        self.assertEqual("action is not allowed", response["error"])
+
+        partial = agent.Settings(
+            "https://manager.example.test",
+            "partial-keepalived",
+            nginx_binary=str(Path(sys.executable).resolve()),
+            nginx_config=str(self.main_config),
+            nginx_root=str(self.root),
+            allowed_config_roots=[str(self.config_root)],
+            allowed_certificate_roots=[str(self.certificate_root)],
+            keepalived_config=str(Path(self.temporary.name) / "keepalived.conf"),
+        )
+        with self.assertRaisesRegex(agent.AgentError, "must be configured together"):
+            partial.validate()
+
+        config_path = Path(self.temporary.name) / "capability-keepalived.conf"
+        config_path.write_text("vrrp_instance VI_1 { state BACKUP }\n", encoding="utf-8")
+        legacy = self.keepalived_settings(config_path)
+        with mock.patch.object(agent, "_detect_keepalived_validation_support", return_value=False):
+            self.assertIn("keepalived_inspect", legacy.reported_capabilities())
+            self.assertNotIn("keepalived_validate", legacy.reported_capabilities())
+        modern = self.keepalived_settings(config_path)
+        with mock.patch.object(agent, "_detect_keepalived_validation_support", return_value=True):
+            self.assertIn("keepalived_validate", modern.reported_capabilities())
+
+    def test_keepalived_inspect_and_heartbeat_are_structured_and_redacted(self):
+        config_path = Path(self.temporary.name) / "keepalived.conf"
+        config_data = b"""vrrp_instance VI_NGINX {
+    state MASTER
+    interface eth0
+    virtual_router_id 51
+    priority 110
+    advert_int 1
+    unicast_src_ip 10.165.0.108
+    unicast_peer {
+        10.165.0.111 min_ttl 100 max_ttl 255
+    }
+    authentication {
+        auth_type PASS
+        auth_pass do-not-return-this
+    }
+    virtual_ipaddress {
+        10.165.0.110/24 dev eth0
+    }
+}
+"""
+        config_path.write_bytes(config_data)
+        settings = self.keepalived_settings(config_path)
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "keepalived-jobs.json"))
+        service_status = {
+            "name": "keepalived.service",
+            "load_state": "loaded",
+            "active_state": "active",
+            "sub_state": "running",
+            "active": True,
+        }
+        with (
+            mock.patch.object(executor, "_keepalived_executable", return_value="/usr/sbin/keepalived"),
+            mock.patch.object(executor, "_keepalived_version", return_value="2.2.8"),
+            mock.patch.object(executor, "_keepalived_service_status", return_value=service_status),
+            mock.patch.object(executor, "_local_ip_addresses", return_value={"10.165.0.108", "10.165.0.110"}),
+        ):
+            response = executor.execute(self.job("job-keepalived-inspect", "keepalived_inspect", {}))
+            service = agent.AgentService(settings, threading.Event())
+            service.metrics_collector.collect = mock.Mock(return_value={})
+            observation = service._local_observation(executor)
+
+        self.assertEqual("succeeded", response["status"])
+        inspected = response["result"]
+        self.assertEqual("MASTER", inspected["role"])
+        self.assertTrue(inspected["vip_owned"])
+        self.assertEqual(["10.165.0.108", "10.165.0.110"], inspected["local_addresses"])
+        self.assertEqual(self.sha(config_data), inspected["keepalived_config_hash"])
+        instance = inspected["config_summary"]["instances"][0]
+        self.assertEqual("MASTER", instance["configured_state"])
+        self.assertEqual(["10.165.0.110/24"], instance["virtual_ips"])
+        self.assertEqual("PASS", instance["auth_type"])
+        self.assertEqual("10.165.0.108", instance["unicast_src_ip"])
+        self.assertEqual(["10.165.0.111"], instance["unicast_peers"])
+        self.assertTrue(inspected["config_summary"]["summary_complete"])
+        serialized = json.dumps(response)
+        self.assertNotIn("auth_pass", serialized)
+        self.assertNotIn("do-not-return-this", serialized)
+        mapped = agent._to_server_result(response)
+        self.assertEqual(self.sha(config_data), mapped["details"]["keepalived_config_hash"])
+        self.assertNotIn("config_hash", mapped["details"])
+        self.assertEqual("MASTER", observation["facts"]["keepalived"]["role"])
+
+        stopped_service = dict(service_status, active=False, active_state="inactive", sub_state="dead")
+        with (
+            mock.patch.object(executor, "_keepalived_executable", return_value="/usr/sbin/keepalived"),
+            mock.patch.object(executor, "_keepalived_version", return_value="2.2.8"),
+            mock.patch.object(executor, "_keepalived_service_status", return_value=stopped_service),
+            mock.patch.object(executor, "_local_ip_addresses", return_value={"10.165.0.108"}),
+        ):
+            stopped = executor.execute(self.job("job-keepalived-stopped", "keepalived_inspect", {}))
+        self.assertEqual("FAULT", stopped["result"]["role"])
+
+    def test_keepalived_validate_never_persists_command_output_or_candidate_content(self):
+        config_path = Path(self.temporary.name) / "keepalived.conf"
+        config_path.write_text("vrrp_instance VI_NGINX { state BACKUP }\n", encoding="utf-8")
+        settings = self.keepalived_settings(config_path)
+        jobs_path = self.state / "keepalived-validation-jobs.json"
+        executor = agent.JobExecutor(settings, agent.JobStore(jobs_path))
+        secret = "auth_pass must-not-leak"
+        failed_command = subprocess.CompletedProcess(
+            ["keepalived"], 1, stdout=b"", stderr=("bad config " + secret).encode("utf-8")
+        )
+        with (
+            mock.patch.object(executor, "_keepalived_executable", return_value="/usr/sbin/keepalived"),
+            mock.patch.object(executor, "_keepalived_validation_flag", return_value="--config-test"),
+            mock.patch.object(agent.subprocess, "run", return_value=failed_command),
+        ):
+            failed = executor.execute(self.job("job-keepalived-invalid", "keepalived_validate", {}))
+
+        self.assertEqual("failed", failed["status"])
+        self.assertEqual("Keepalived configuration validation failed", failed["error"])
+        self.assertNotIn(secret, json.dumps(failed))
+        self.assertNotIn(secret, jobs_path.read_text(encoding="utf-8"))
+
+        rejected = executor.execute(
+            self.job("job-keepalived-candidate", "keepalived_validate", {"candidate": secret})
+        )
+        self.assertEqual("failed", rejected["status"])
+        self.assertNotIn(secret, json.dumps(rejected))
+        self.assertNotIn(secret, jobs_path.read_text(encoding="utf-8"))
+
+        successful_executor = agent.JobExecutor(
+            settings, agent.JobStore(self.state / "keepalived-validation-success.json")
+        )
+        with (
+            mock.patch.object(successful_executor, "_keepalived_executable", return_value="/usr/sbin/keepalived"),
+            mock.patch.object(successful_executor, "_keepalived_validation_flag", return_value="--config-test"),
+            mock.patch.object(successful_executor, "_keepalived_version", return_value="2.2.8"),
+            mock.patch.object(
+                agent.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(["keepalived"], 0, stdout=b"", stderr=b""),
+            ),
+        ):
+            succeeded = successful_executor.execute(
+                self.job("job-keepalived-valid", "keepalived_validate", {})
+            )
+        mapped = agent._to_server_result(succeeded)
+        self.assertEqual("succeeded", mapped["status"])
+        self.assertEqual(
+            {
+                "valid": True,
+                "source": "existing",
+                "config_path": str(config_path.resolve()),
+                "keepalived_config_hash": self.sha(config_path.read_bytes()),
+                "keepalived_version": "2.2.8",
+            },
+            mapped["details"],
+        )
+
+        with mock.patch.object(successful_executor, "_keepalived_version", return_value="2.0.4"):
+            with self.assertRaisesRegex(agent.ActionError, "cannot reliably validate"):
+                successful_executor._keepalived_validation_flag("/usr/sbin/keepalived")
+
+    def test_keepalived_summary_ignores_both_comment_styles_and_marks_includes_partial(self):
+        summary = agent._keepalived_config_summary(
+            b"""! vrrp_instance FAKE { state MASTER }
+# vrrp_instance ALSO_FAKE { state MASTER }
+includer /etc/keepalived/conf.d/*.conf
+vrrp_instance VI_REAL {
+    state BACKUP
+    interface eth0
+    virtual_router_id 51
+    virtual_ipaddress { 10.165.0.110/24 }
+}
+"""
+        )
+        self.assertEqual(1, summary["instance_count"])
+        self.assertEqual("VI_REAL", summary["instances"][0]["name"])
+        self.assertFalse(summary["summary_complete"])
+
     def test_atomic_replace_retries_transient_windows_file_lock(self):
         with (
             mock.patch.object(agent.os, "name", "nt"),
@@ -1603,6 +1803,9 @@ class AgentTestCase(unittest.TestCase):
             "--nginx-log-dir",
             "--stub-status-url",
             "--allow-plaintext-log-stream",
+            "--keepalived-config",
+            "--keepalived-service",
+            "--keepalived-vip",
         ):
             self.assertIn(option, installer)
         self.assertIn('"tls_skip_verify": tls_skip_verify == "1"', installer)
@@ -1620,6 +1823,9 @@ class AgentTestCase(unittest.TestCase):
         self.assertIn('"allowed_log_roots"', installer)
         self.assertIn('"stub_status_url"', installer)
         self.assertIn('"allow_plaintext_log_stream"', installer)
+        self.assertIn('"keepalived_config": keepalived_config or None', installer)
+        self.assertIn('"keepalived_service": keepalived_service or None', installer)
+        self.assertIn('"keepalived_vip": keepalived_vip or None', installer)
         bootstrap = (AGENT_DIR.parent / "install-agent.sh").read_text(encoding="utf-8")
         self.assertIn("NGINX_MANAGER_REQUIRE_PINNED_REF", bootstrap)
         self.assertIn("NGINX_MANAGER_ARCHIVE_SHA256", bootstrap)

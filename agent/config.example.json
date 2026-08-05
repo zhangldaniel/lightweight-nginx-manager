@@ -17,6 +17,9 @@
   "openssl_binary": "/usr/bin/openssl",
   "nginx_config": "/etc/nginx/nginx.conf",
   "nginx_root": "/etc/nginx",
+  "keepalived_config": null,
+  "keepalived_service": null,
+  "keepalived_vip": null,
   "allowed_config_roots": [
     "/etc/nginx/conf.d",
     "/etc/nginx/stream.d"

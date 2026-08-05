@@ -2,6 +2,7 @@ import type {
   AuditRecord,
   EnrollmentRecord,
   JobRecord,
+  KeepalivedJobAction,
   MonitoringItem,
   NodeRecord,
   OperationRecord,
@@ -112,6 +113,18 @@ export const api = {
       method: 'POST',
       body: jsonBody({ node_ids: nodeIds, action, payload, ttl_seconds: 120 }),
     }),
+  highAvailabilityCheck: (nodeIds: string[], action: KeepalivedJobAction) =>
+    request<{ batch_id: string; jobs: JobRecord[] }>('/api/v1/admin/jobs', {
+      method: 'POST',
+      body: jsonBody({ node_ids: nodeIds, action, payload: {}, ttl_seconds: 120 }),
+    }),
+  highAvailabilityJobs: async (limit = 100) => {
+    const [inspections, validations] = await Promise.all([
+      request<{ items: JobRecord[] }>(`/api/v1/admin/jobs?action=keepalived_inspect&limit=${limit}`),
+      request<{ items: JobRecord[] }>(`/api/v1/admin/jobs?action=keepalived_validate&limit=${limit}`),
+    ])
+    return { items: [...inspections.items, ...validations.items] }
+  },
   createOperation: (body: Record<string, unknown>) =>
     request<{
       operation: OperationRecord

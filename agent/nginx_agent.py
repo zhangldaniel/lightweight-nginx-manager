@@ -25,6 +25,7 @@ import datetime as dt
 import hashlib
 import hmac
 import http.client
+import ipaddress
 import json
 import logging
 import os
@@ -61,7 +62,11 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
+KEEPALIVED_CAPABILITIES = (
+    "keepalived_inspect",
+    "keepalived_validate",
+)
 CAPABILITIES = (
     "inspect",
     "nginx_test",
@@ -74,7 +79,7 @@ CAPABILITIES = (
     "config_move",
     "config_delete",
     "certificate_apply",
-)
+) + KEEPALIVED_CAPABILITIES
 INVENTORY_MAX_FILES = 200
 INVENTORY_MAX_FILE_BYTES = 256 * 1024
 INVENTORY_MAX_TOTAL_BYTES = 1024 * 1024
@@ -88,8 +93,44 @@ TRANSACTION_PHASES = {
 RECOVERY_RELOAD_PHASES = {"reloading", "reloaded", "health_checking", "health_checked"}
 DIRECTIVE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 NGINX_TOKEN_RE = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{};]|[^\s{};]+''')
+KEEPALIVED_TOKEN_RE = re.compile(
+    r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{}\n]|[^\s{}\n]+'''
+)
 LOG = logging.getLogger("nginx-manager-agent")
 _THREAD_LOCK = threading.RLock()
+
+
+def _keepalived_version_tuple(value: str) -> Optional[Tuple[int, int, int]]:
+    matched = re.search(r"(?:^|\D)(\d+)\.(\d+)\.(\d+)(?:\D|$)", value)
+    if not matched:
+        return None
+    return tuple(int(item) for item in matched.groups())
+
+
+def _detect_keepalived_validation_support() -> bool:
+    binary = shutil.which("keepalived")
+    if not binary:
+        for candidate in ("/usr/sbin/keepalived", "/sbin/keepalived"):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                binary = candidate
+                break
+    if not binary:
+        return False
+    try:
+        completed = subprocess.run(
+            [binary, "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5.0,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    output = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")[-8192:]
+    version = _keepalived_version_tuple(output)
+    return completed.returncode == 0 and version is not None and version >= (2, 0, 5)
 
 FAILURE_CODES = {
     "job_expired",
@@ -394,6 +435,9 @@ class Settings:
         allowed_log_roots: Optional[List[str]] = None,
         stub_status_url: Optional[str] = None,
         allow_plaintext_log_stream: bool = False,
+        keepalived_config: Optional[str] = None,
+        keepalived_service: Optional[str] = None,
+        keepalived_vip: Optional[str] = None,
     ):
         self.server_url = server_url
         self.node_name = node_name
@@ -460,6 +504,10 @@ class Settings:
         self.allowed_log_roots = [] if allowed_log_roots is None else list(allowed_log_roots)
         self.stub_status_url = stub_status_url
         self.allow_plaintext_log_stream = allow_plaintext_log_stream
+        self.keepalived_config = keepalived_config
+        self.keepalived_service = keepalived_service
+        self.keepalived_vip = keepalived_vip
+        self._keepalived_validate_capability: Optional[bool] = None
 
     @classmethod
     def load(cls, path: str) -> "Settings":
@@ -518,6 +566,9 @@ class Settings:
             allowed_log_roots=[str(item) for item in raw.get("allowed_log_roots", [])],
             stub_status_url=_optional_string(raw.get("stub_status_url")),
             allow_plaintext_log_stream=bool(raw.get("allow_plaintext_log_stream", False)),
+            keepalived_config=_optional_string(raw.get("keepalived_config")),
+            keepalived_service=_optional_string(raw.get("keepalived_service")),
+            keepalived_vip=_optional_string(raw.get("keepalived_vip")),
         )
         settings.validate()
         return settings
@@ -626,9 +677,37 @@ class Settings:
                 raise AgentError("stub_status_url must not contain credentials or a fragment")
             if parsed_stub.hostname.lower() not in {"127.0.0.1", "::1", "localhost"}:
                 raise AgentError("stub_status_url must use a loopback host")
+        keepalived_values = (
+            self.keepalived_config,
+            self.keepalived_service,
+            self.keepalived_vip,
+        )
+        if any(keepalived_values) and not all(keepalived_values):
+            raise AgentError(
+                "keepalived_config, keepalived_service, and keepalived_vip must be configured together"
+            )
+        if self.keepalived_enabled():
+            if not os.path.isabs(str(self.keepalived_config)):
+                raise AgentError("keepalived_config must be an absolute path")
+            if not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", str(self.keepalived_service)):
+                raise AgentError("keepalived_service must be a valid .service unit name")
+            try:
+                self.keepalived_vip = str(ipaddress.ip_address(str(self.keepalived_vip)))
+            except ValueError:
+                raise AgentError("keepalived_vip must be an IP address")
+
+    def keepalived_enabled(self) -> bool:
+        return bool(self.keepalived_config and self.keepalived_service and self.keepalived_vip)
 
     def reported_capabilities(self) -> List[str]:
-        result = list(CAPABILITIES) + ["metrics_v1"]
+        result = [item for item in CAPABILITIES if item not in KEEPALIVED_CAPABILITIES]
+        if self.keepalived_enabled():
+            result.append("keepalived_inspect")
+            if self._keepalived_validate_capability is None:
+                self._keepalived_validate_capability = _detect_keepalived_validation_support()
+            if self._keepalived_validate_capability:
+                result.append("keepalived_validate")
+        result.append("metrics_v1")
         if self.stub_status_url:
             result.append("stub_status_v1")
         server_scheme = urllib.parse.urlparse(self.server_url).scheme
@@ -681,6 +760,221 @@ def _strip_nginx_comments(text: str) -> str:
     if quote:
         raise ActionError("managed configuration contains an unterminated quoted string")
     return "".join(output)
+
+
+def _strip_keepalived_comments(text: str) -> str:
+    """Keepalived accepts both # and ! comments; keep quoted markers intact."""
+    output: List[str] = []
+    quote: Optional[str] = None
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            output.append(char)
+            escaped = False
+        elif char == "\\" and quote:
+            output.append(char)
+            escaped = True
+        elif quote:
+            output.append(char)
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            output.append(char)
+            quote = char
+        elif char in ("#", "!"):
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            if index < len(text):
+                output.append(text[index])
+        else:
+            output.append(char)
+        index += 1
+    if quote:
+        raise ActionError("Keepalived configuration contains an unterminated quoted string")
+    return "".join(output)
+
+
+def _keepalived_block(tokens: List[str], opening: int) -> Tuple[List[str], int]:
+    depth = 1
+    block: List[str] = []
+    index = opening + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "{":
+            depth += 1
+        elif token == "}":
+            depth -= 1
+            if depth == 0:
+                return block, index + 1
+        block.append(token)
+        index += 1
+    return block, len(tokens)
+
+
+def _next_keepalived_token(tokens: List[str], index: int) -> int:
+    while index < len(tokens) and tokens[index] == "\n":
+        index += 1
+    return index
+
+
+def _keepalived_virtual_ips(tokens: List[str]) -> List[str]:
+    rows: List[List[str]] = [[]]
+    for token in tokens:
+        if token == "\n":
+            rows.append([])
+        elif token not in ("{", "}"):
+            rows[-1].append(token)
+    result: List[str] = []
+    for row in rows:
+        if not row:
+            continue
+        try:
+            address = str(ipaddress.ip_interface(row[0].strip("'\"")))
+        except ValueError:
+            continue
+        if address not in result:
+            result.append(address)
+        if len(result) >= 64:
+            break
+    return result
+
+
+def _keepalived_peer_ips(tokens: List[str]) -> List[str]:
+    rows: List[List[str]] = [[]]
+    for token in tokens:
+        if token == "\n":
+            rows.append([])
+        elif token not in ("{", "}"):
+            rows[-1].append(token)
+    result: List[str] = []
+    for row in rows:
+        peer: Optional[str] = None
+        for token in row:
+            try:
+                peer = str(ipaddress.ip_address(token.strip("'\"").split("/", 1)[0]))
+                break
+            except ValueError:
+                continue
+        if peer and peer not in result:
+            result.append(peer)
+        if len(result) >= 64:
+            break
+    return result
+
+
+def _keepalived_instance_summary(name: str, tokens: List[str]) -> Dict[str, Any]:
+    values: Dict[str, Any] = {
+        "name": name[:128],
+        "configured_state": None,
+        "interface": None,
+        "virtual_router_id": None,
+        "priority": None,
+        "advert_int": None,
+        "virtual_ips": [],
+        "auth_type": None,
+        "unicast_src_ip": None,
+        "unicast_peers": [],
+    }
+    scalar_names = {
+        "state": "configured_state",
+        "interface": "interface",
+        "virtual_router_id": "virtual_router_id",
+        "priority": "priority",
+        "advert_int": "advert_int",
+        "unicast_src_ip": "unicast_src_ip",
+    }
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("\n", "{", "}"):
+            index += 1
+            continue
+        lowered = token.lower()
+        value_index = _next_keepalived_token(tokens, index + 1)
+        if lowered == "virtual_ipaddress" and value_index < len(tokens) and tokens[value_index] == "{":
+            vip_tokens, index = _keepalived_block(tokens, value_index)
+            values["virtual_ips"] = _keepalived_virtual_ips(vip_tokens)
+            continue
+        if lowered in ("authentication", "unicast_peer") and value_index < len(tokens) and tokens[value_index] == "{":
+            nested_tokens, index = _keepalived_block(tokens, value_index)
+            if lowered == "authentication":
+                for nested_index, nested_token in enumerate(nested_tokens):
+                    if nested_token.lower() != "auth_type":
+                        continue
+                    auth_index = _next_keepalived_token(nested_tokens, nested_index + 1)
+                    if auth_index < len(nested_tokens):
+                        auth_type = nested_tokens[auth_index].strip("'\"").upper()
+                        if auth_type in ("PASS", "AH"):
+                            values["auth_type"] = auth_type
+                    break
+            else:
+                values["unicast_peers"] = _keepalived_peer_ips(nested_tokens)
+            continue
+        if value_index < len(tokens) and tokens[value_index] == "{":
+            _ignored, index = _keepalived_block(tokens, value_index)
+            continue
+        field = scalar_names.get(lowered)
+        if field and value_index < len(tokens):
+            raw = tokens[value_index].strip("'\"")[:128]
+            if field == "configured_state" and raw.upper() in ("MASTER", "BACKUP", "FAULT"):
+                values[field] = raw.upper()
+            elif field == "interface" and re.fullmatch(r"[A-Za-z0-9_.:@-]{1,64}", raw):
+                values[field] = raw
+            elif field in ("virtual_router_id", "priority"):
+                try:
+                    number = int(raw)
+                    if 0 <= number <= 255:
+                        values[field] = number
+                except ValueError:
+                    pass
+            elif field == "advert_int":
+                try:
+                    number_float = float(raw)
+                    if 0 < number_float <= 3600:
+                        values[field] = number_float
+                except ValueError:
+                    pass
+            elif field == "unicast_src_ip":
+                try:
+                    values[field] = str(ipaddress.ip_address(raw.split("/", 1)[0]))
+                except ValueError:
+                    pass
+        while index < len(tokens) and tokens[index] != "\n":
+            index += 1
+    return values
+
+
+def _keepalived_config_summary(data: bytes) -> Dict[str, Any]:
+    text = _strip_keepalived_comments(data.decode("utf-8", errors="replace"))
+    tokens = KEEPALIVED_TOKEN_RE.findall(text.replace("\r\n", "\n").replace("\r", "\n"))
+    include_directives = {"include", "includer", "includem", "includew", "includeb", "includea"}
+    summary_complete = not any(token.lower() in include_directives for token in tokens)
+    instances: List[Dict[str, Any]] = []
+    index = 0
+    while index < len(tokens) and len(instances) < 32:
+        if tokens[index].lower() != "vrrp_instance":
+            index += 1
+            continue
+        name_index = _next_keepalived_token(tokens, index + 1)
+        opening = _next_keepalived_token(tokens, name_index + 1)
+        if name_index >= len(tokens) or opening >= len(tokens) or tokens[opening] != "{":
+            index += 1
+            continue
+        raw_name = tokens[name_index].strip("'\"")
+        block, index = _keepalived_block(tokens, opening)
+        name = raw_name if re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", raw_name) else "unknown"
+        instances.append(_keepalived_instance_summary(name, block))
+    return {
+        "instance_count": len(instances),
+        "instances": instances,
+        "summary_complete": summary_complete and len(instances) < 32 and all(
+            len(instance.get("virtual_ips", [])) < 64 and len(instance.get("unicast_peers", [])) < 64
+            for instance in instances
+        ),
+        "truncated": len(instances) >= 32,
+    }
 
 
 def utc_now() -> str:
@@ -1138,7 +1432,9 @@ class JobExecutor:
         payload = job.get("payload", {})
         if not job_id or len(job_id) > 200:
             return self._response(job_id or "unknown", action, "failed", error="invalid job id")
-        if action not in CAPABILITIES:
+        if action not in CAPABILITIES or (
+            action in KEEPALIVED_CAPABILITIES and not self.settings.keepalived_enabled()
+        ):
             return self._response(job_id, action, "failed", error="action is not allowed")
         if not isinstance(payload, dict):
             return self._response(job_id, action, "failed", error="payload must be an object")
@@ -1568,6 +1864,211 @@ class JobExecutor:
                 except OSError:
                     continue
         return False
+
+    def _keepalived_executable(self) -> str:
+        found = shutil.which("keepalived")
+        for candidate in (found, "/usr/sbin/keepalived", "/sbin/keepalived"):
+            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return str(Path(candidate).resolve())
+        raise ActionError("configured Keepalived binary is unavailable")
+
+    def _keepalived_config_data(self) -> Tuple[Path, bytes]:
+        if not self.settings.keepalived_enabled():
+            raise ActionError("Keepalived integration is disabled")
+        configured = Path(str(self.settings.keepalived_config))
+        try:
+            if configured.is_symlink():
+                raise ActionError("configured Keepalived file must not be a symbolic link")
+            path = configured.resolve(strict=True)
+            status = path.stat()
+            if not stat.S_ISREG(status.st_mode):
+                raise ActionError("configured Keepalived path must be a regular file")
+            if status.st_size > self.settings.max_file_bytes:
+                raise ActionError("configured Keepalived file exceeds size limit")
+            data = path.read_bytes()
+        except ActionError:
+            raise
+        except OSError:
+            raise ActionError("configured Keepalived file is unavailable")
+        if len(data) > self.settings.max_file_bytes:
+            raise ActionError("configured Keepalived file exceeds size limit")
+        return path, data
+
+    def _keepalived_service_status(self) -> Dict[str, Any]:
+        systemctl = shutil.which("systemctl") or "/bin/systemctl"
+        try:
+            completed = subprocess.run(
+                [
+                    systemctl,
+                    "show",
+                    "--no-pager",
+                    "--property=LoadState",
+                    "--property=ActiveState",
+                    "--property=SubState",
+                    str(self.settings.keepalived_service),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=min(self.settings.command_timeout, 10.0),
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise ActionError("cannot inspect configured Keepalived service")
+        if completed.returncode != 0:
+            raise ActionError("cannot inspect configured Keepalived service")
+        fields: Dict[str, str] = {}
+        output = completed.stdout.decode("utf-8", errors="replace")[-4096:]
+        for line in output.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in ("LoadState", "ActiveState", "SubState"):
+                fields[key] = value if re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", value) else "unknown"
+        active_state = fields.get("ActiveState", "unknown")
+        return {
+            "name": str(self.settings.keepalived_service),
+            "load_state": fields.get("LoadState", "unknown"),
+            "active_state": active_state,
+            "sub_state": fields.get("SubState", "unknown"),
+            "active": active_state == "active",
+        }
+
+    def _keepalived_version(self, binary: str) -> str:
+        try:
+            completed = subprocess.run(
+                [binary, "--version"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=min(self.settings.command_timeout, 5.0),
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise ActionError("cannot inspect configured Keepalived version")
+        output = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")[-8192:]
+        matched = re.search(r"\bKeepalived\s+v?([A-Za-z0-9._+-]{1,64})", output, re.IGNORECASE)
+        if completed.returncode != 0 or not matched:
+            raise ActionError("cannot inspect configured Keepalived version")
+        return matched.group(1)
+
+    def _local_ip_addresses(self) -> set:
+        ip_binary = shutil.which("ip")
+        if not ip_binary:
+            for candidate in ("/usr/sbin/ip", "/sbin/ip"):
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    ip_binary = candidate
+                    break
+        if not ip_binary:
+            raise ActionError("cannot inspect local IP addresses")
+        try:
+            completed = subprocess.run(
+                [ip_binary, "-o", "address", "show"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=min(self.settings.command_timeout, 5.0),
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise ActionError("cannot inspect local IP addresses")
+        if completed.returncode != 0:
+            raise ActionError("cannot inspect local IP addresses")
+        addresses = set()
+        output = completed.stdout.decode("utf-8", errors="replace")[-1024 * 1024:]
+        for matched in re.finditer(r"\sinet6?\s+([^\s/]+)(?:/\d+)?", output):
+            try:
+                addresses.add(str(ipaddress.ip_address(matched.group(1).split("%", 1)[0])))
+            except ValueError:
+                continue
+        return addresses
+
+    def _keepalived_inspection(self) -> Dict[str, Any]:
+        config_path, config_data = self._keepalived_config_data()
+        binary = self._keepalived_executable()
+        vip = str(self.settings.keepalived_vip)
+        local_addresses = self._local_ip_addresses()
+        vip_owned = vip in local_addresses
+        service = self._keepalived_service_status()
+        return {
+            "service": service,
+            "vip": vip,
+            "vip_owned": vip_owned,
+            "role": "FAULT" if not service["active"] else ("MASTER" if vip_owned else "BACKUP"),
+            "local_addresses": sorted(local_addresses)[:64],
+            "config_path": str(config_path),
+            "keepalived_config_hash": hashlib.sha256(config_data).hexdigest(),
+            "keepalived_binary": binary,
+            "keepalived_version": self._keepalived_version(binary),
+            "config_summary": _keepalived_config_summary(config_data),
+        }
+
+    def keepalived_observation(self) -> Dict[str, Any]:
+        return self._keepalived_inspection()
+
+    def _keepalived_validation_flag(self, binary: str) -> str:
+        version = _keepalived_version_tuple(self._keepalived_version(binary))
+        if version is None or version < (2, 0, 5):
+            raise ActionError("configured Keepalived version cannot reliably validate configuration")
+        try:
+            completed = subprocess.run(
+                [binary, "--help"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=min(self.settings.command_timeout, 5.0),
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise ActionError("cannot inspect Keepalived validation support")
+        output = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")[-32768:]
+        if "--config-test" in output:
+            return "--config-test"
+        if re.search(r"(?:^|[\s,])-t(?:[\s,]|$).*config", output, re.IGNORECASE | re.MULTILINE):
+            return "-t"
+        raise ActionError("configured Keepalived does not expose configuration validation support")
+
+    def _action_keepalived_inspect(self, payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
+        if payload:
+            raise ActionError("keepalived_inspect payload must be empty")
+        return self._keepalived_inspection()
+
+    def _action_keepalived_validate(self, payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
+        if payload:
+            raise ActionError("keepalived_validate payload must be empty")
+        config_path, config_data = self._keepalived_config_data()
+        binary = self._keepalived_executable()
+        flag = self._keepalived_validation_flag(binary)
+        try:
+            completed = subprocess.run(
+                [binary, "-f", str(config_path), flag],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=self.settings.command_timeout,
+                check=False,
+                shell=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise ActionError("Keepalived configuration validation timed out")
+        except OSError:
+            raise ActionError("cannot execute configured Keepalived binary")
+        if completed.returncode != 0:
+            # Keepalived may echo arbitrary configuration tokens on failure.
+            # Never persist or return its stdout/stderr.
+            raise ActionError("Keepalived configuration validation failed")
+        verified_path, verified_data = self._keepalived_config_data()
+        if verified_path != config_path or hashlib.sha256(verified_data).digest() != hashlib.sha256(config_data).digest():
+            raise ActionError("Keepalived configuration changed during validation")
+        return {
+            "valid": True,
+            "source": "existing",
+            "config_path": str(config_path),
+            "keepalived_config_hash": hashlib.sha256(verified_data).hexdigest(),
+            "keepalived_version": self._keepalived_version(binary),
+        }
 
     def _action_inspect(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
         nginx: Dict[str, Any]
@@ -2852,6 +3353,22 @@ class HelperClient:
             raise AgentError("privileged helper returned an invalid log inventory")
         return inventory[:200]
 
+    def keepalived_observation(self) -> Dict[str, Any]:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(self.settings.helper_timeout)
+        try:
+            connection.connect(self.settings.helper_socket)
+            _send_frame(connection, {"keepalived_observation": True}, self.settings.helper_max_request_bytes)
+            response = _recv_frame(connection, self.settings.helper_max_request_bytes)
+        except (OSError, AgentError) as exc:
+            raise AgentError("privileged helper unavailable: {}".format(exc))
+        finally:
+            connection.close()
+        observation = response.get("keepalived_observation")
+        if not isinstance(observation, dict):
+            raise AgentError("privileged helper returned an invalid Keepalived observation")
+        return observation
+
 
 class HelperServer:
     def __init__(self, settings: Settings, executor: JobExecutor, socket_path: str, allowed_uid: int,
@@ -2911,6 +3428,13 @@ class HelperServer:
                 _send_frame(
                     connection,
                     {"log_inventory": self.executor.log_inventory()},
+                    self.settings.helper_max_request_bytes,
+                )
+                return
+            if request.get("keepalived_observation") is True:
+                _send_frame(
+                    connection,
+                    {"keepalived_observation": self.executor.keepalived_observation()},
                     self.settings.helper_max_request_bytes,
                 )
                 return
@@ -3536,6 +4060,13 @@ class AgentService:
                 ),
             }
         }
+        if self.settings.keepalived_enabled() and executor is not None and hasattr(
+            executor, "keepalived_observation"
+        ):
+            try:
+                observation["facts"]["keepalived"] = executor.keepalived_observation()
+            except AgentError:
+                LOG.warning("cannot refresh privileged Keepalived observation")
         observation["metrics"] = self.metrics_collector.collect()
         try:
             completed = subprocess.run(
@@ -3586,6 +4117,27 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
         if match:
             details["nginx_version"] = match.group(1)
         output = nginx_text
+    elif action == "keepalived_inspect":
+        details = {
+            key: raw.get(key)
+            for key in (
+                "service",
+                "vip",
+                "vip_owned",
+                "role",
+                "local_addresses",
+                "config_path",
+                "keepalived_config_hash",
+                "keepalived_binary",
+                "keepalived_version",
+                "config_summary",
+            )
+        }
+    elif action == "keepalived_validate":
+        details = {
+            key: raw.get(key)
+            for key in ("valid", "source", "config_path", "keepalived_config_hash", "keepalived_version")
+        }
     elif action == "nginx_test":
         details = {"syntax_ok": succeeded}
         output = str(raw.get("stderr") or raw.get("stdout") or "")

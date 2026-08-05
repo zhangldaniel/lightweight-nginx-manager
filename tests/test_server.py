@@ -1991,6 +1991,184 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual("a" * 64, result["previous_config_hash"])
         self.assertNotIn("ignored", result)
 
+    def test_keepalived_observation_is_capability_gated_and_redacted(self):
+        enrolled = self.enroll("keepalived-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        status_details = {
+            "service": {
+                "name": "keepalived.service",
+                "load_state": "loaded",
+                "active_state": "active",
+                "sub_state": "running",
+                "active": True,
+                "ignored": "drop-me",
+            },
+            "vip": "10.165.0.110",
+            "vip_owned": True,
+            "role": "master",
+            "local_addresses": ["10.165.0.108", "10.165.0.110", "not-an-ip"],
+            "config_path": "/etc/keepalived/keepalived.conf",
+            "keepalived_config_hash": "a" * 64,
+            "keepalived_binary": "/usr/sbin/keepalived",
+            "keepalived_version": "Keepalived v2.2.8",
+            "config_summary": {
+                "instance_count": 99,
+                "summary_complete": True,
+                "instances": [
+                    {
+                        "name": "VI_1",
+                        "configured_state": "MASTER",
+                        "interface": "eth0",
+                        "virtual_router_id": 51,
+                        "priority": 150,
+                        "advert_int": 1,
+                        "virtual_ips": ["10.165.0.110/24", "not-an-ip"],
+                        "auth_type": "PASS",
+                        "unicast_src_ip": "10.165.0.108",
+                        "unicast_peers": ["10.165.0.111"],
+                        "auth_pass": "MUST-NOT-BE-STORED",
+                    }
+                ],
+            },
+            "auth_pass": "MUST-NOT-BE-STORED",
+            "raw_config": "MUST-NOT-BE-STORED",
+        }
+        heartbeat = self.client.post(
+            "/api/v1/agent/heartbeat",
+            headers=agent_headers,
+            json={
+                "status": "online",
+                "config_hash": "nginx-config-hash",
+                "capabilities": ["keepalived_inspect", "keepalived_validate"],
+                "facts": {"keepalived": status_details},
+            },
+        )
+        self.assertEqual(200, heartbeat.status_code, heartbeat.text)
+        node = self.client.get("/api/v1/admin/nodes", headers=self.admin_headers).json()["items"][0]
+        self.assertEqual("MASTER", node["facts"]["keepalived"]["role"])
+        self.assertEqual(
+            ["10.165.0.108", "10.165.0.110"],
+            node["facts"]["keepalived"]["local_addresses"],
+        )
+        self.assertEqual("10.165.0.110/24", node["facts"]["keepalived"]["config_summary"]["instances"][0]["virtual_ips"][0])
+        self.assertFalse(node["facts"]["keepalived"]["config_summary"]["summary_complete"])
+        instance = node["facts"]["keepalived"]["config_summary"]["instances"][0]
+        self.assertEqual("PASS", instance["auth_type"])
+        self.assertEqual(["10.165.0.111"], instance["unicast_peers"])
+        self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(node, ensure_ascii=False))
+
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "action": "keepalived_inspect", "payload": {}},
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        job_id = created.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        completed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "job_id": job_id,
+                "action": "keepalived_inspect",
+                "details": status_details,
+            },
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+        stored = self.client.get(
+            "/api/v1/admin/jobs?ids=" + job_id, headers=self.admin_headers
+        ).json()["items"][0]["result"]
+        self.assertEqual("MASTER", stored["keepalived"]["role"])
+        self.assertEqual("a" * 64, stored["keepalived"]["keepalived_config_hash"])
+        self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(stored, ensure_ascii=False))
+        refreshed_node = self.client.get("/api/v1/admin/nodes", headers=self.admin_headers).json()["items"][0]
+        self.assertEqual("nginx-config-hash", refreshed_node["config_hash"])
+
+    def test_keepalived_validate_accepts_only_existing_config_without_payload(self):
+        enrolled = self.enroll("keepalived-validate-node")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        self.client.post(
+            "/api/v1/agent/heartbeat",
+            headers=agent_headers,
+            json={"status": "online", "capabilities": ["keepalived_validate"]},
+        )
+        rejected = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [enrolled["agent_id"]],
+                "action": "keepalived_validate",
+                "payload": {"candidate": "vrrp_instance SECRET { auth_pass hidden }"},
+            },
+        )
+        self.assertEqual(400, rejected.status_code, rejected.text)
+
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "action": "keepalived_validate", "payload": {}},
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        job_id = created.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        completed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=agent_headers,
+            json={
+                "status": "succeeded",
+                "action": "keepalived_validate",
+                "details": {
+                    "valid": True,
+                    "source": "existing",
+                    "config_path": "/etc/keepalived/keepalived.conf",
+                    "keepalived_config_hash": "c" * 64,
+                    "keepalived_version": "Keepalived v2.2.8",
+                    "stdout": "MUST-NOT-BE-STORED",
+                },
+            },
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+        stored = self.client.get(
+            "/api/v1/admin/jobs?ids=" + job_id, headers=self.admin_headers
+        ).json()["items"][0]["result"]
+        self.assertEqual(
+            {
+                "valid": True,
+                "source": "existing",
+                "config_path": "/etc/keepalived/keepalived.conf",
+                "keepalived_config_hash": "c" * 64,
+                "keepalived_version": "Keepalived v2.2.8",
+            },
+            stored,
+        )
+
+        bypass = self.client.post(
+            "/api/v1/admin/operations",
+            headers=self.admin_headers,
+            json={
+                "request_id": "keepalived-operation-bypass-0001",
+                "site_id": "not-a-keepalived-resource",
+                "kind": "validate",
+                "base_version": 0,
+                "candidate": {},
+                "jobs": [
+                    {
+                        "node_id": enrolled["agent_id"],
+                        "action": "keepalived_validate",
+                        "payload": {"candidate": "auth_pass MUST-NOT-BE-STORED"},
+                    }
+                ],
+            },
+        )
+        self.assertEqual(400, bypass.status_code, bypass.text)
+        with self.client.app.state.database.connection() as connection:
+            serialized = json.dumps(
+                [dict(row) for row in connection.execute("SELECT payload_json FROM jobs").fetchall()],
+                ensure_ascii=False,
+            )
+        self.assertNotIn("MUST-NOT-BE-STORED", serialized)
+
     def test_delete_operation_recovery_keeps_explicit_platform_cleanup_intent(self):
         enrolled = self.enroll("delete-recovery-node")
         created = self.client.post(

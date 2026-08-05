@@ -3,6 +3,7 @@ import {
   FileTerminal,
   Gauge,
   History,
+  Network,
   PanelsTopLeft,
   ServerCog,
   ShieldCheck,
@@ -26,6 +27,7 @@ const items = computed(() => [
   { to: '/nodes', label: '节点 Agent', icon: ServerCog, count: store.nodes.length },
   { to: '/logs', label: '实时日志', icon: FileTerminal },
   { to: '/monitoring', label: '运行监控', icon: Gauge, alert: store.unhealthyCount > 0 },
+  { to: '/high-availability', label: '高可用', icon: Network },
   { to: '/records', label: '执行记录', icon: History, count: store.jobs.length },
 ])
 </script>

@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import argparse
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -47,6 +48,8 @@ ActionName = Literal[
     "config_move",
     "config_delete",
     "certificate_apply",
+    "keepalived_inspect",
+    "keepalived_validate",
 ]
 
 JOB_ACTIONS = {
@@ -61,6 +64,8 @@ JOB_ACTIONS = {
     "config_move",
     "config_delete",
     "certificate_apply",
+    "keepalived_inspect",
+    "keepalived_validate",
 }
 TERMINAL_JOB_STATES = {"succeeded", "failed", "expired"}
 ACTIVE_JOB_STATES = {"queued", "running"}
@@ -117,6 +122,7 @@ SENSITIVE_KEY_FRAGMENTS = {
     "key_pem",
     "password",
     "passphrase",
+    "auth_pass",
     "secret",
     "token",
 }
@@ -465,6 +471,138 @@ def _safe_certificate_inventory(value: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+def _safe_keepalived_address(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    candidate = value.strip()
+    try:
+        if "/" in candidate:
+            return str(ipaddress.ip_interface(candidate))
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
+
+def _safe_keepalived_status(value: Any) -> Optional[Dict[str, Any]]:
+    """Bound Keepalived observations without retaining config text or auth material."""
+    if not isinstance(value, dict):
+        return None
+
+    result: Dict[str, Any] = {}
+    service = value.get("service")
+    if isinstance(service, dict):
+        safe_service: Dict[str, Any] = {}
+        service_name = service.get("name")
+        if isinstance(service_name, str) and re.fullmatch(r"[A-Za-z0-9@_.-]{1,128}", service_name):
+            safe_service["name"] = service_name
+        for key in ("load_state", "active_state", "sub_state"):
+            item = service.get(key)
+            if isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", item):
+                safe_service[key] = item
+        if isinstance(service.get("active"), bool):
+            safe_service["active"] = service["active"]
+        if safe_service:
+            result["service"] = safe_service
+
+    vip = _safe_keepalived_address(value.get("vip"))
+    if vip is not None:
+        result["vip"] = vip
+    if isinstance(value.get("vip_owned"), bool):
+        result["vip_owned"] = value["vip_owned"]
+    local_addresses = value.get("local_addresses")
+    if isinstance(local_addresses, list):
+        result["local_addresses"] = [
+            address for address in (_safe_keepalived_address(item) for item in local_addresses[:64])
+            if address is not None
+        ]
+    role = value.get("role")
+    if isinstance(role, str) and role.upper() in {"MASTER", "BACKUP", "FAULT", "UNKNOWN"}:
+        result["role"] = role.upper()
+    config_path = value.get("config_path")
+    if isinstance(config_path, str) and os.path.isabs(config_path):
+        result["config_path"] = config_path[:4096]
+    config_hash = value.get("keepalived_config_hash")
+    if isinstance(config_hash, str) and re.fullmatch(r"[a-fA-F0-9]{64}", config_hash):
+        result["keepalived_config_hash"] = config_hash.lower()
+    binary = value.get("keepalived_binary")
+    if isinstance(binary, str) and len(binary) <= 4096:
+        result["keepalived_binary"] = binary
+    version = value.get("keepalived_version")
+    if isinstance(version, str):
+        result["keepalived_version"] = version[:160]
+
+    summary = value.get("config_summary")
+    if isinstance(summary, dict) and isinstance(summary.get("instances"), list):
+        safe_instances: List[Dict[str, Any]] = []
+        nested_truncated = False
+        for instance in summary["instances"][:16]:
+            if not isinstance(instance, dict):
+                continue
+            name = instance.get("name")
+            if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_.:@-]{1,128}", name) is None:
+                continue
+            safe_instance: Dict[str, Any] = {"name": name}
+            configured_state = instance.get("configured_state")
+            if isinstance(configured_state, str) and configured_state.upper() in {"MASTER", "BACKUP", "FAULT"}:
+                safe_instance["configured_state"] = configured_state.upper()
+            interface = instance.get("interface")
+            if isinstance(interface, str) and re.fullmatch(r"[A-Za-z0-9_.:@-]{1,64}", interface):
+                safe_instance["interface"] = interface
+            for key, minimum, maximum in (
+                ("virtual_router_id", 0, 255),
+                ("priority", 0, 255),
+            ):
+                item = instance.get(key)
+                if isinstance(item, int) and not isinstance(item, bool) and minimum <= item <= maximum:
+                    safe_instance[key] = item
+            advert_int = instance.get("advert_int")
+            if isinstance(advert_int, (int, float)) and not isinstance(advert_int, bool) and 0 < advert_int <= 3600:
+                safe_instance["advert_int"] = round(float(advert_int), 3)
+            auth_type = instance.get("auth_type")
+            if isinstance(auth_type, str) and auth_type.upper() in {"PASS", "AH"}:
+                safe_instance["auth_type"] = auth_type.upper()
+            unicast_src_ip = _safe_keepalived_address(instance.get("unicast_src_ip"))
+            if unicast_src_ip is not None:
+                safe_instance["unicast_src_ip"] = unicast_src_ip
+            unicast_peers = instance.get("unicast_peers")
+            if isinstance(unicast_peers, list):
+                nested_truncated = nested_truncated or len(unicast_peers) > 32
+                safe_unicast_peers = [
+                    address for address in (_safe_keepalived_address(item) for item in unicast_peers[:32])
+                    if address is not None
+                ]
+                nested_truncated = nested_truncated or len(safe_unicast_peers) != len(unicast_peers)
+                safe_instance["unicast_peers"] = safe_unicast_peers
+            virtual_ips = instance.get("virtual_ips")
+            if isinstance(virtual_ips, list):
+                nested_truncated = nested_truncated or len(virtual_ips) > 32
+                safe_virtual_ips = [
+                    address for address in (_safe_keepalived_address(item) for item in virtual_ips[:32])
+                    if address is not None
+                ]
+                nested_truncated = nested_truncated or len(safe_virtual_ips) != len(virtual_ips)
+                safe_instance["virtual_ips"] = safe_virtual_ips
+            safe_instances.append(safe_instance)
+        truncated = (
+            len(summary["instances"]) > 16
+            or bool(summary.get("truncated", False))
+            or nested_truncated
+        )
+        summary_complete = (
+            bool(summary.get("summary_complete", False))
+            and not truncated
+            and len(safe_instances) == len(summary["instances"])
+        )
+        result["config_summary"] = {
+            "instance_count": len(safe_instances),
+            "instances": safe_instances,
+            "summary_complete": summary_complete,
+            "truncated": truncated,
+        }
+
+    return result or None
+
+
 def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
     """Keep operational facts, never command output or arbitrary error strings."""
     result: Dict[str, Any] = {}
@@ -546,6 +684,26 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
         inventory = _safe_certificate_inventory(request.details)
         if inventory is not None:
             result["certificate_inventory"] = inventory
+    elif request.action == "keepalived_inspect":
+        keepalived = _safe_keepalived_status(request.details)
+        if keepalived is not None:
+            result["keepalived"] = keepalived
+    elif request.action == "keepalived_validate":
+        valid = (request.details or {}).get("valid")
+        source = (request.details or {}).get("source")
+        config_path = (request.details or {}).get("config_path")
+        config_hash = (request.details or {}).get("keepalived_config_hash")
+        version = (request.details or {}).get("keepalived_version")
+        if isinstance(valid, bool):
+            result["valid"] = valid
+        if source == "existing":
+            result["source"] = source
+        if isinstance(config_path, str) and os.path.isabs(config_path):
+            result["config_path"] = config_path[:4096]
+        if isinstance(config_hash, str) and re.fullmatch(r"[a-fA-F0-9]{64}", config_hash):
+            result["keepalived_config_hash"] = config_hash.lower()
+        if isinstance(version, str):
+            result["keepalived_version"] = version[:160]
 
     nested_scalar_keys = {
         "sha256",
@@ -1042,6 +1200,7 @@ class HeartbeatRequest(BaseModel):
             "nginx_root", "managed_config_root", "managed_certificate_root", "nginx_config",
             "config_entries", "main_config_editable",
             "log_roots", "log_files", "stub_status_url", "log_stream_transport",
+            "keepalived",
         }
         result: Dict[str, Any] = {}
         for key, item in value.items():
@@ -1075,6 +1234,10 @@ class HeartbeatRequest(BaseModel):
                             "label": str(entry.get("label", ""))[:160],
                         })
                 result[key] = safe_entries
+            elif key == "keepalived":
+                keepalived = _safe_keepalived_status(item)
+                if keepalived is not None:
+                    result[key] = keepalived
             elif key in {"log_roots", "log_files"}:
                 if not isinstance(item, list):
                     continue
@@ -2906,6 +3069,8 @@ def create_app(
 
     @api.post("/api/v1/admin/jobs", status_code=201)
     def create_jobs(request: AdminJobRequest, admin: Dict[str, Any] = Depends(require_operator)) -> Dict[str, Any]:
+        if request.action in {"keepalived_inspect", "keepalived_validate"} and request.payload:
+            raise HTTPException(status_code=400, detail="Keepalived observation jobs do not accept payload data")
         payload_json = _canonical_json(request.payload)
         payload_bytes = len(payload_json.encode("utf-8"))
         if payload_bytes > settings.max_payload_bytes:
@@ -2924,12 +3089,24 @@ def create_app(
         with database.transaction() as connection:
             placeholders = ",".join("?" for _ in request.node_ids)
             existing_rows = connection.execute(
-                "SELECT id FROM nodes WHERE id IN (" + placeholders + ")", request.node_ids
+                "SELECT id, revoked_at, capabilities_json FROM nodes WHERE id IN (" + placeholders + ")",
+                request.node_ids,
             ).fetchall()
-            existing_ids = {row["id"] for row in existing_rows}
+            existing_ids = {row["id"] for row in existing_rows if row["revoked_at"] is None}
             missing = [node_id for node_id in request.node_ids if node_id not in existing_ids]
             if missing:
                 raise HTTPException(status_code=404, detail={"message": "unknown node ids", "node_ids": missing})
+            if request.action in {"keepalived_inspect", "keepalived_validate"}:
+                unsupported = [
+                    row["id"]
+                    for row in existing_rows
+                    if request.action not in set(json.loads(row["capabilities_json"] or "[]"))
+                ]
+                if unsupported:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"message": "agent does not support Keepalived observation", "node_ids": unsupported},
+                    )
             for node_id in request.node_ids:
                 job_id = str(uuid.uuid4())
                 connection.execute(
@@ -2977,6 +3154,11 @@ def create_app(
         request: OperationCreateRequest,
         admin: Dict[str, Any] = Depends(require_operator),
     ) -> Dict[str, Any]:
+        if any(spec.action in {"keepalived_inspect", "keepalived_validate"} for spec in request.jobs):
+            raise HTTPException(
+                status_code=400,
+                detail="Keepalived observation must use the read-only job endpoint",
+            )
         raw_request = request.model_dump() if hasattr(request, "model_dump") else request.dict()
         reconciliation_protocol = raw_request.pop("reconciliation_protocol", None)
         request_digest = _sha256_text(_canonical_json(raw_request))

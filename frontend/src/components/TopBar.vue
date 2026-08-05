@@ -13,6 +13,7 @@ const labels: Record<string, string> = {
   nodes: '节点 Agent',
   logs: '实时日志',
   monitoring: '运行监控',
+  'high-availability': '高可用',
   records: '执行记录',
 }
 
@@ -38,7 +39,9 @@ async function handleAccount(key: string) {
 
 async function refresh() {
   try {
-    await store.refresh(route.name === 'monitoring' || route.name === 'records')
+    await store.refresh(
+      route.name === 'monitoring' || route.name === 'records' || route.name === 'high-availability',
+    )
     store.notify('数据已刷新', 'success')
   } catch (error) {
     store.notify('刷新失败', 'danger', store.apiMessage(error))

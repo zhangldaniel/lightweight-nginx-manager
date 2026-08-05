@@ -15,6 +15,9 @@ HELPER_SERVICE="/etc/systemd/system/${APP_NAME}-helper.service"
 RECOVERY_SERVICE="/etc/systemd/system/${APP_NAME}-recover.service"
 NGINX_SERVICE="nginx.service"
 NGINX_DROPIN=""
+KEEPALIVED_CONFIG=""
+KEEPALIVED_SERVICE=""
+KEEPALIVED_VIP=""
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PACKAGE_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -94,6 +97,9 @@ usage() {
   --managed-config-already-included 托管目录已由现有 nginx.conf 加载；不创建额外 include 文件
   --allow-main-config-edit 允许平台编辑 nginx.conf；默认仅查看且始终禁止删除/迁移
   --nginx-service <单元> Nginx systemd 单元，默认 nginx.service
+  --keepalived-config <路径> Keepalived 主配置文件；与 service、vip 一起指定后启用只读纳管
+  --keepalived-service <单元> Keepalived systemd 单元，例如 keepalived.service
+  --keepalived-vip <地址> 本节点组的 Keepalived VIP，例如 10.165.0.110
   --health-url <URL>   发布后的节点本地健康检查 URL
   --nginx-log-dir <路径> 允许实时查看的 Nginx 日志目录；可重复指定
   --stub-status-url <URL> 本机 Nginx stub_status 地址，例如 http://127.0.0.1:18080/nginx_status
@@ -617,6 +623,31 @@ PY
   fi
 }
 
+prepare_keepalived_options() {
+  if [[ -z "${KEEPALIVED_CONFIG}${KEEPALIVED_SERVICE}${KEEPALIVED_VIP}" ]]; then
+    return
+  fi
+  [[ -n "${KEEPALIVED_CONFIG}" && -n "${KEEPALIVED_SERVICE}" && -n "${KEEPALIVED_VIP}" ]] || \
+    die "--keepalived-config、--keepalived-service 和 --keepalived-vip 必须一起指定"
+  [[ "${KEEPALIVED_CONFIG}" = /* && ! "${KEEPALIVED_CONFIG}" =~ [[:space:]] ]] || \
+    die "--keepalived-config 必须是不含空白的绝对路径"
+  [[ -f "${KEEPALIVED_CONFIG}" && ! -L "${KEEPALIVED_CONFIG}" ]] || \
+    die "--keepalived-config 必须是现有普通文件"
+  [[ "${KEEPALIVED_SERVICE}" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || \
+    die "--keepalived-service 必须是合法的 .service 单元名"
+  "${PYTHON_BIN}" - "${KEEPALIVED_VIP}" <<'PY'
+import ipaddress
+import sys
+try:
+    ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit("--keepalived-vip 必须是 IP 地址")
+PY
+  command -v keepalived >/dev/null 2>&1 || die "启用 Keepalived 纳管前必须已安装 keepalived"
+  systemctl cat "${KEEPALIVED_SERVICE}" >/dev/null 2>&1 || \
+    die "找不到 Keepalived 单元 ${KEEPALIVED_SERVICE}"
+}
+
 ensure_identity_user() {
   getent group "${APP_GROUP}" >/dev/null 2>&1 || groupadd --system "${APP_GROUP}"
   if ! id "${APP_USER}" >/dev/null 2>&1; then
@@ -644,7 +675,8 @@ write_config() {
   printf -v stream_dirs_text '%s\n' "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}"
   "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${LABELS}" \
     "${ca_target}" "${TLS_SKIP_VERIFY}" "${ALLOW_INSECURE_HTTP}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
-    "${config_dirs_text}" "${stream_dirs_text}" "${ALLOW_MAIN_CONFIG_EDIT}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" <<'PY'
+    "${config_dirs_text}" "${stream_dirs_text}" "${ALLOW_MAIN_CONFIG_EDIT}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" \
+    "${KEEPALIVED_CONFIG}" "${KEEPALIVED_SERVICE}" "${KEEPALIVED_VIP}" <<'PY'
 import hashlib
 import json
 import os
@@ -657,6 +689,7 @@ from urllib.parse import urlparse
     tls_skip_verify, allow_insecure_http, poll_seconds, nginx_binary, openssl_binary, nginx_config, nginx_root,
     raw_config_dirs, raw_stream_dirs, allow_main_config_edit, managed_cert_dir, state_dir, helper_state_dir, health_url,
     raw_log_dirs, stub_status_url, allow_plaintext_log_stream,
+    keepalived_config, keepalived_service, keepalived_vip,
 ) = sys.argv[1:]
 
 labels = {}
@@ -740,6 +773,9 @@ value = {
     "allowed_log_roots": [item for item in raw_log_dirs.splitlines() if item],
     "stub_status_url": stub_status_url or None,
     "allow_plaintext_log_stream": allow_plaintext_log_stream == "1",
+    "keepalived_config": keepalived_config or None,
+    "keepalived_service": keepalived_service or None,
+    "keepalived_vip": keepalived_vip or None,
 }
 
 temporary = config_path + ".tmp"
@@ -827,7 +863,7 @@ PrivateDevices=true
 ProtectSystem=${protect_system}
 ProtectHome=true
 ${modern_hardening}
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL CAP_NET_BIND_SERVICE
 ${write_access_key}=${managed_write_paths} ${MANAGED_CERT_DIR} ${HELPER_STATE_DIR} /run/${APP_NAME}${nginx_write_paths}
 RuntimeDirectory=${APP_NAME}
@@ -916,6 +952,9 @@ while [[ $# -gt 0 ]]; do
     --managed-config-already-included) MANAGED_CONFIG_ALREADY_INCLUDED="1"; shift ;;
     --allow-main-config-edit) ALLOW_MAIN_CONFIG_EDIT="1"; shift ;;
     --nginx-service) [[ $# -ge 2 ]] || die "--nginx-service 缺少值"; NGINX_SERVICE="$2"; shift 2 ;;
+    --keepalived-config) [[ $# -ge 2 ]] || die "--keepalived-config 缺少值"; KEEPALIVED_CONFIG="$2"; shift 2 ;;
+    --keepalived-service) [[ $# -ge 2 ]] || die "--keepalived-service 缺少值"; KEEPALIVED_SERVICE="$2"; shift 2 ;;
+    --keepalived-vip) [[ $# -ge 2 ]] || die "--keepalived-vip 缺少值"; KEEPALIVED_VIP="$2"; shift 2 ;;
     --health-url) [[ $# -ge 2 ]] || die "--health-url 缺少值"; HEALTH_URL="$2"; shift 2 ;;
     --nginx-log-dir) [[ $# -ge 2 ]] || die "--nginx-log-dir 缺少值"; NGINX_LOG_DIRS+=("$2"); shift 2 ;;
     --stub-status-url) [[ $# -ge 2 ]] || die "--stub-status-url 缺少值"; STUB_STATUS_URL="$2"; shift 2 ;;
@@ -963,6 +1002,7 @@ refuse_unresolved_transactions
 install_base_dependencies
 validate_server_url
 install_nginx_if_requested
+prepare_keepalived_options
 prepare_monitoring_options
 systemctl cat "${NGINX_SERVICE}" >/dev/null 2>&1 || die "找不到 ${NGINX_SERVICE}；无法建立 Nginx 启动前恢复屏障"
 [[ -x "${NGINX_BINARY}" ]] || die "Nginx 二进制不可执行"

@@ -52,6 +52,23 @@ export interface NodeRecord {
   revoked_at: string | null
 }
 
+export type KeepalivedRole = 'MASTER' | 'BACKUP' | 'FAULT' | 'UNKNOWN'
+export type KeepalivedJobAction = 'keepalived_inspect' | 'keepalived_validate'
+
+export interface HighAvailabilityNodeRef {
+  address: string
+  nodeId?: string
+  label?: string
+}
+
+export interface HighAvailabilityGroup {
+  id: string
+  name: string
+  type: 'keepalived'
+  vip: string
+  nodes: HighAvailabilityNodeRef[]
+}
+
 export interface SiteRecord {
   id: string
   resourceType?: 'site' | 'generic'
@@ -198,6 +215,7 @@ export interface AuditRecord {
 export interface UiState {
   sites: SiteRecord[]
   certificates: CertificateRecord[]
+  highAvailabilityGroups: HighAvailabilityGroup[]
   importedInventoryJobs: string[]
   importedCertificateInventoryJobs: string[]
   processedOperationIds: string[]

@@ -19,6 +19,7 @@
 - 管理多节点 HTTP、Stream 配置和多个配置目录
 - 导入现有配置，替换节点原路径中的证书
 - 查看实时日志、宿主机状态和 Nginx Stub Status
+- 查看 Keepalived 主备角色、VIP 归属和双机架构
 - 发布前执行真实 `nginx -t`，失败时恢复原文件
 - 支持本地账号、LDAP/AD、操作记录和版本回滚
 
@@ -76,6 +77,16 @@ sudo bash -s -- \
   --allow-plaintext-log-stream \
   --nginx-service nginx.service
 ```
+
+两台 Nginx 使用 Keepalived 提供同一 VIP 时，两端安装命令都追加：
+
+```bash
+  --keepalived-config /etc/keepalived/keepalived.conf \
+  --keepalived-service keepalived.service \
+  --keepalived-vip 10.165.0.110
+```
+
+升级 Agent 时也要保留这三个参数。Web 的“高可用”页只查看真实 VIP 归属和校验现有配置，不会主动漂移 VIP 或修改 Keepalived。
 
 安装后登录 Web 页面：
 
