@@ -107,8 +107,8 @@ def _keepalived_version_tuple(value: str) -> Optional[Tuple[int, int, int]]:
     return tuple(int(item) for item in matched.groups())
 
 
-def _detect_keepalived_validation_support() -> bool:
-    binary = shutil.which("keepalived")
+def _detect_keepalived_validation_support(configured_binary: Optional[str] = None) -> bool:
+    binary = configured_binary or shutil.which("keepalived")
     if not binary:
         for candidate in ("/usr/sbin/keepalived", "/sbin/keepalived"):
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -435,6 +435,7 @@ class Settings:
         allowed_log_roots: Optional[List[str]] = None,
         stub_status_url: Optional[str] = None,
         allow_plaintext_log_stream: bool = False,
+        keepalived_binary: Optional[str] = None,
         keepalived_config: Optional[str] = None,
         keepalived_service: Optional[str] = None,
         keepalived_vip: Optional[str] = None,
@@ -504,6 +505,7 @@ class Settings:
         self.allowed_log_roots = [] if allowed_log_roots is None else list(allowed_log_roots)
         self.stub_status_url = stub_status_url
         self.allow_plaintext_log_stream = allow_plaintext_log_stream
+        self.keepalived_binary = keepalived_binary
         self.keepalived_config = keepalived_config
         self.keepalived_service = keepalived_service
         self.keepalived_vip = keepalived_vip
@@ -566,6 +568,7 @@ class Settings:
             allowed_log_roots=[str(item) for item in raw.get("allowed_log_roots", [])],
             stub_status_url=_optional_string(raw.get("stub_status_url")),
             allow_plaintext_log_stream=bool(raw.get("allow_plaintext_log_stream", False)),
+            keepalived_binary=_optional_string(raw.get("keepalived_binary")),
             keepalived_config=_optional_string(raw.get("keepalived_config")),
             keepalived_service=_optional_string(raw.get("keepalived_service")),
             keepalived_vip=_optional_string(raw.get("keepalived_vip")),
@@ -686,7 +689,11 @@ class Settings:
             raise AgentError(
                 "keepalived_config, keepalived_service, and keepalived_vip must be configured together"
             )
+        if self.keepalived_binary and not self.keepalived_enabled():
+            raise AgentError("keepalived_binary requires Keepalived integration to be configured")
         if self.keepalived_enabled():
+            if self.keepalived_binary and not os.path.isabs(self.keepalived_binary):
+                raise AgentError("keepalived_binary must be an absolute path")
             if not os.path.isabs(str(self.keepalived_config)):
                 raise AgentError("keepalived_config must be an absolute path")
             if not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", str(self.keepalived_service)):
@@ -704,7 +711,9 @@ class Settings:
         if self.keepalived_enabled():
             result.append("keepalived_inspect")
             if self._keepalived_validate_capability is None:
-                self._keepalived_validate_capability = _detect_keepalived_validation_support()
+                self._keepalived_validate_capability = _detect_keepalived_validation_support(
+                    self.keepalived_binary
+                )
             if self._keepalived_validate_capability:
                 result.append("keepalived_validate")
         result.append("metrics_v1")
@@ -1866,6 +1875,11 @@ class JobExecutor:
         return False
 
     def _keepalived_executable(self) -> str:
+        if self.settings.keepalived_binary:
+            candidate = self.settings.keepalived_binary
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return str(Path(candidate).resolve())
+            raise ActionError("configured Keepalived binary is unavailable")
         found = shutil.which("keepalived")
         for candidate in (found, "/usr/sbin/keepalived", "/sbin/keepalived"):
             if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -4060,13 +4074,15 @@ class AgentService:
                 ),
             }
         }
-        if self.settings.keepalived_enabled() and executor is not None and hasattr(
-            executor, "keepalived_observation"
-        ):
-            try:
-                observation["facts"]["keepalived"] = executor.keepalived_observation()
-            except AgentError:
-                LOG.warning("cannot refresh privileged Keepalived observation")
+        if self.settings.keepalived_enabled():
+            # The configured VIP is safe to report even when the privileged helper is unavailable.
+            # This lets the control plane discover the HA group without inventing node addresses.
+            observation["facts"]["keepalived"] = {"vip": self.settings.keepalived_vip}
+            if executor is not None and hasattr(executor, "keepalived_observation"):
+                try:
+                    observation["facts"]["keepalived"] = executor.keepalived_observation()
+                except AgentError:
+                    LOG.warning("cannot refresh privileged Keepalived observation")
         observation["metrics"] = self.metrics_collector.collect()
         try:
             completed = subprocess.run(

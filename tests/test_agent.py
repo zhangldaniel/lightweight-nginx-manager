@@ -2,6 +2,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -110,6 +111,45 @@ class AgentTestCase(unittest.TestCase):
         with mock.patch.object(agent, "_detect_keepalived_validation_support", return_value=True):
             self.assertIn("keepalived_validate", modern.reported_capabilities())
 
+    def test_keepalived_explicit_binary_supports_custom_install_path(self):
+        config_path = Path(self.temporary.name) / "custom-binary-keepalived.conf"
+        config_path.write_text("vrrp_instance VI_1 { state BACKUP }\n", encoding="utf-8")
+        binary = Path(self.temporary.name) / "apps" / "keepalived" / "sbin" / "keepalived"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o755)
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="custom-keepalived-node",
+            nginx_binary=str(Path(sys.executable).resolve()),
+            nginx_config=str(self.main_config),
+            nginx_root=str(self.root),
+            allowed_config_roots=[str(self.config_root)],
+            allowed_certificate_roots=[str(self.certificate_root)],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "custom-keepalived-helper.sock"),
+            keepalived_binary=str(binary),
+            keepalived_config=str(config_path),
+            keepalived_service="keepalived.service",
+            keepalived_vip="10.165.0.110",
+        )
+        settings.validate()
+
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "custom-keepalived-jobs.json"))
+        with mock.patch.object(agent.shutil, "which", return_value=None):
+            self.assertEqual(str(binary.resolve()), executor._keepalived_executable())
+        with mock.patch.object(
+            agent, "_detect_keepalived_validation_support", return_value=True
+        ) as detect_support:
+            self.assertIn("keepalived_validate", settings.reported_capabilities())
+        detect_support.assert_called_once_with(str(binary))
+
+        settings.keepalived_binary = str(binary.parent / "missing-keepalived")
+        with mock.patch.object(agent.shutil, "which", return_value=str(Path(sys.executable).resolve())):
+            with self.assertRaisesRegex(agent.ActionError, "binary is unavailable"):
+                executor._keepalived_executable()
+
     def test_keepalived_inspect_and_heartbeat_are_structured_and_redacted(self):
         config_path = Path(self.temporary.name) / "keepalived.conf"
         config_data = b"""vrrp_instance VI_NGINX {
@@ -172,6 +212,14 @@ class AgentTestCase(unittest.TestCase):
         self.assertEqual(self.sha(config_data), mapped["details"]["keepalived_config_hash"])
         self.assertNotIn("config_hash", mapped["details"])
         self.assertEqual("MASTER", observation["facts"]["keepalived"]["role"])
+
+        with mock.patch.object(
+            executor,
+            "keepalived_observation",
+            side_effect=agent.AgentError("helper unavailable"),
+        ):
+            fallback = service._local_observation(executor)
+        self.assertEqual({"vip": "10.165.0.110"}, fallback["facts"]["keepalived"])
 
         stopped_service = dict(service_status, active=False, active_state="inactive", sub_state="dead")
         with (
@@ -1803,6 +1851,7 @@ vrrp_instance VI_REAL {
             "--nginx-log-dir",
             "--stub-status-url",
             "--allow-plaintext-log-stream",
+            "--keepalived-binary",
             "--keepalived-config",
             "--keepalived-service",
             "--keepalived-vip",
@@ -1823,12 +1872,53 @@ vrrp_instance VI_REAL {
         self.assertIn('"allowed_log_roots"', installer)
         self.assertIn('"stub_status_url"', installer)
         self.assertIn('"allow_plaintext_log_stream"', installer)
+        self.assertIn('"keepalived_binary": keepalived_binary or None', installer)
         self.assertIn('"keepalived_config": keepalived_config or None', installer)
         self.assertIn('"keepalived_service": keepalived_service or None', installer)
         self.assertIn('"keepalived_vip": keepalived_vip or None', installer)
         bootstrap = (AGENT_DIR.parent / "install-agent.sh").read_text(encoding="utf-8")
         self.assertIn("NGINX_MANAGER_REQUIRE_PINNED_REF", bootstrap)
         self.assertIn("NGINX_MANAGER_ARCHIVE_SHA256", bootstrap)
+
+    def test_installer_accepts_explicit_keepalived_binary(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^prepare_keepalived_options\(\) \{.*?^\}", installer)
+        self.assertIsNotNone(match)
+        bash = shutil.which("bash")
+        if bash is None and os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+            if candidate.exists():
+                bash = str(candidate)
+        if bash is None:
+            self.skipTest("bash is unavailable")
+
+        probe = match.group(0) + r'''
+set -Eeuo pipefail
+die() { printf '%s\n' "$*" >&2; exit 99; }
+systemctl() { return 0; }
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+mkdir -p "$temporary/apps/keepalived/sbin"
+printf '#!/bin/sh\nexit 0\n' > "$temporary/apps/keepalived/sbin/keepalived"
+chmod +x "$temporary/apps/keepalived/sbin/keepalived"
+printf 'vrrp_instance VI_1 { state BACKUP }\n' > "$temporary/keepalived.conf"
+KEEPALIVED_BINARY="$temporary/apps/keepalived/sbin/keepalived"
+KEEPALIVED_CONFIG="$temporary/keepalived.conf"
+KEEPALIVED_SERVICE="keepalived.service"
+KEEPALIVED_VIP="10.165.0.110"
+PYTHON_BIN=true
+prepare_keepalived_options
+[[ "$KEEPALIVED_BINARY" == "$temporary/apps/keepalived/sbin/keepalived" ]]
+'''
+        result = subprocess.run(
+            [bash, "-c", probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            check=False,
+            env=dict(os.environ, BASH_COMPAT="4.2"),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_installer_empty_optional_arrays_are_safe_with_nounset(self):
         installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")

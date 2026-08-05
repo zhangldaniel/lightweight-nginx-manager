@@ -15,6 +15,7 @@ HELPER_SERVICE="/etc/systemd/system/${APP_NAME}-helper.service"
 RECOVERY_SERVICE="/etc/systemd/system/${APP_NAME}-recover.service"
 NGINX_SERVICE="nginx.service"
 NGINX_DROPIN=""
+KEEPALIVED_BINARY=""
 KEEPALIVED_CONFIG=""
 KEEPALIVED_SERVICE=""
 KEEPALIVED_VIP=""
@@ -84,7 +85,7 @@ usage() {
 选项：
   --server <URL>       控制端地址，例如 http://192.0.2.20:8443（必填）
   --node-name <名称>   节点名称，默认当前短主机名
-  --labels <键值>      逗号分隔标签，例如 env=prod,region=shanghai
+  --labels <键值>      逗号分隔标签；多网卡高可用节点可填写 ha_ip=192.0.2.11
   --ca-file <路径>     自签控制端 CA；公共 CA 证书不需要
   --insecure-skip-tls-verify 不复制 CA，仍使用 HTTPS 但不校验控制端身份（仅可信内网）
   --nginx-binary <路径> Nginx 可执行文件，默认从 PATH 查找
@@ -97,6 +98,7 @@ usage() {
   --managed-config-already-included 托管目录已由现有 nginx.conf 加载；不创建额外 include 文件
   --allow-main-config-edit 允许平台编辑 nginx.conf；默认仅查看且始终禁止删除/迁移
   --nginx-service <单元> Nginx systemd 单元，默认 nginx.service
+  --keepalived-binary <路径> Keepalived 可执行文件；默认从 PATH、/usr/sbin、/sbin 查找
   --keepalived-config <路径> Keepalived 主配置文件；与 service、vip 一起指定后启用只读纳管
   --keepalived-service <单元> Keepalived systemd 单元，例如 keepalived.service
   --keepalived-vip <地址> 本节点组的 Keepalived VIP，例如 10.165.0.110
@@ -624,7 +626,7 @@ PY
 }
 
 prepare_keepalived_options() {
-  if [[ -z "${KEEPALIVED_CONFIG}${KEEPALIVED_SERVICE}${KEEPALIVED_VIP}" ]]; then
+  if [[ -z "${KEEPALIVED_BINARY}${KEEPALIVED_CONFIG}${KEEPALIVED_SERVICE}${KEEPALIVED_VIP}" ]]; then
     return
   fi
   [[ -n "${KEEPALIVED_CONFIG}" && -n "${KEEPALIVED_SERVICE}" && -n "${KEEPALIVED_VIP}" ]] || \
@@ -643,7 +645,21 @@ try:
 except ValueError:
     raise SystemExit("--keepalived-vip 必须是 IP 地址")
 PY
-  command -v keepalived >/dev/null 2>&1 || die "启用 Keepalived 纳管前必须已安装 keepalived"
+  if [[ -z "${KEEPALIVED_BINARY}" ]]; then
+    KEEPALIVED_BINARY="$(command -v keepalived || true)"
+    if [[ -z "${KEEPALIVED_BINARY}" ]]; then
+      for candidate in /usr/sbin/keepalived /sbin/keepalived; do
+        if [[ -x "${candidate}" && -f "${candidate}" ]]; then
+          KEEPALIVED_BINARY="${candidate}"
+          break
+        fi
+      done
+    fi
+  fi
+  [[ "${KEEPALIVED_BINARY}" = /* && ! "${KEEPALIVED_BINARY}" =~ [[:space:]] ]] || \
+    die "--keepalived-binary 必须是不含空白的绝对路径"
+  [[ -x "${KEEPALIVED_BINARY}" && -f "${KEEPALIVED_BINARY}" ]] || \
+    die "Keepalived 可执行文件不可用；自定义安装请使用 --keepalived-binary"
   systemctl cat "${KEEPALIVED_SERVICE}" >/dev/null 2>&1 || \
     die "找不到 Keepalived 单元 ${KEEPALIVED_SERVICE}"
 }
@@ -676,7 +692,7 @@ write_config() {
   "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${LABELS}" \
     "${ca_target}" "${TLS_SKIP_VERIFY}" "${ALLOW_INSECURE_HTTP}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
     "${config_dirs_text}" "${stream_dirs_text}" "${ALLOW_MAIN_CONFIG_EDIT}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" \
-    "${KEEPALIVED_CONFIG}" "${KEEPALIVED_SERVICE}" "${KEEPALIVED_VIP}" <<'PY'
+    "${KEEPALIVED_BINARY}" "${KEEPALIVED_CONFIG}" "${KEEPALIVED_SERVICE}" "${KEEPALIVED_VIP}" <<'PY'
 import hashlib
 import json
 import os
@@ -689,7 +705,7 @@ from urllib.parse import urlparse
     tls_skip_verify, allow_insecure_http, poll_seconds, nginx_binary, openssl_binary, nginx_config, nginx_root,
     raw_config_dirs, raw_stream_dirs, allow_main_config_edit, managed_cert_dir, state_dir, helper_state_dir, health_url,
     raw_log_dirs, stub_status_url, allow_plaintext_log_stream,
-    keepalived_config, keepalived_service, keepalived_vip,
+    keepalived_binary, keepalived_config, keepalived_service, keepalived_vip,
 ) = sys.argv[1:]
 
 labels = {}
@@ -773,6 +789,7 @@ value = {
     "allowed_log_roots": [item for item in raw_log_dirs.splitlines() if item],
     "stub_status_url": stub_status_url or None,
     "allow_plaintext_log_stream": allow_plaintext_log_stream == "1",
+    "keepalived_binary": keepalived_binary or None,
     "keepalived_config": keepalived_config or None,
     "keepalived_service": keepalived_service or None,
     "keepalived_vip": keepalived_vip or None,
@@ -952,6 +969,7 @@ while [[ $# -gt 0 ]]; do
     --managed-config-already-included) MANAGED_CONFIG_ALREADY_INCLUDED="1"; shift ;;
     --allow-main-config-edit) ALLOW_MAIN_CONFIG_EDIT="1"; shift ;;
     --nginx-service) [[ $# -ge 2 ]] || die "--nginx-service 缺少值"; NGINX_SERVICE="$2"; shift 2 ;;
+    --keepalived-binary) [[ $# -ge 2 ]] || die "--keepalived-binary 缺少值"; KEEPALIVED_BINARY="$2"; shift 2 ;;
     --keepalived-config) [[ $# -ge 2 ]] || die "--keepalived-config 缺少值"; KEEPALIVED_CONFIG="$2"; shift 2 ;;
     --keepalived-service) [[ $# -ge 2 ]] || die "--keepalived-service 缺少值"; KEEPALIVED_SERVICE="$2"; shift 2 ;;
     --keepalived-vip) [[ $# -ge 2 ]] || die "--keepalived-vip 缺少值"; KEEPALIVED_VIP="$2"; shift 2 ;;

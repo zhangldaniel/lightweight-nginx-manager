@@ -55,25 +55,29 @@ function renderedHtml() {
 const { qaServer } = await import('./qa-server.mjs')
 try {
   const html = await renderedHtml()
+  const visibleHtml = html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
   const required = [
     '高可用',
-    '10.165.0.110',
-    '10.165.0.108',
-    '10.165.0.111',
+    '192.0.2.110',
+    '192.0.2.108',
+    '192.0.2.111',
     'MASTER',
     'BACKUP',
     'FAULT',
     'UNKNOWN',
     '刷新状态',
     '校验配置',
-    '当前为部分数据',
     '配置一致性',
     '观测边界',
   ]
   for (const text of required) {
-    if (!html.includes(text)) throw new Error(`HA page is missing: ${text}`)
+    if (!visibleHtml.includes(text)) throw new Error(`HA page is missing: ${text}`)
   }
-  if (html.includes('强制切换')) throw new Error('HA page must not expose forced failover')
+  if (visibleHtml.includes('尚未匹配')) throw new Error('HA page must bind nodes from Agent facts')
+  if (visibleHtml.includes('10.165.0.110')) throw new Error('HA page must not use a hard-coded VIP')
+  if (visibleHtml.includes('强制切换')) throw new Error('HA page must not expose forced failover')
   console.log('high-availability page contract: ok')
 } finally {
   await new Promise((resolve) => qaServer.close(resolve))

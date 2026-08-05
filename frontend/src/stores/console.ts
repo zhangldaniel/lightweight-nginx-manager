@@ -29,18 +29,7 @@ import type {
 
 const MAX_RECONCILE_BATCH = 500
 
-const defaultHighAvailabilityGroups = (): HighAvailabilityGroup[] => [
-  {
-    id: 'nginx-keepalived',
-    name: 'NGINX 高可用',
-    type: 'keepalived',
-    vip: '10.165.0.110',
-    nodes: [
-      { address: '10.165.0.108', label: 'NGINX 108' },
-      { address: '10.165.0.111', label: 'NGINX 111' },
-    ],
-  },
-]
+const defaultHighAvailabilityGroups = (): HighAvailabilityGroup[] => []
 
 const emptyState = (): UiState => ({
   sites: [],

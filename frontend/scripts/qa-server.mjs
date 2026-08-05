@@ -25,6 +25,8 @@ const nodes = [
       'metrics_v1',
       'stub_status_v1',
       'log_stream_v1',
+      'keepalived_inspect',
+      'keepalived_validate',
     ],
     facts: {
       nginx_config: '/apps/nginx/conf/nginx.conf',
@@ -33,6 +35,29 @@ const nodes = [
       main_config_editable: true,
       log_files: ['/apps/nginx/logs/access.log', '/apps/nginx/logs/error.log'],
       stub_status_url: 'http://127.0.0.1:18080/nginx_status',
+      keepalived: {
+        vip: '192.0.2.110',
+        vip_owned: true,
+        role: 'MASTER',
+        local_addresses: ['192.0.2.108', '192.0.2.110'],
+        service: { active: true, active_state: 'active', sub_state: 'running' },
+        config_path: '/etc/keepalived/keepalived.conf',
+        keepalived_config_hash: '11'.repeat(32),
+        keepalived_version: '2.2.8',
+        config_summary: {
+          summary_complete: true,
+          truncated: false,
+          instances: [{
+            name: 'VI_NGINX',
+            virtual_router_id: 54,
+            priority: 120,
+            advert_int: 1,
+            unicast_src_ip: '192.0.2.108',
+            unicast_peers: ['192.0.2.111'],
+            virtual_ips: ['192.0.2.110'],
+          }],
+        },
+      },
       config_entries: [
         {
           id: 'http-primary',
@@ -79,11 +104,36 @@ const nodes = [
       'config_delete',
       'metrics_v1',
       'stub_status_v1',
+      'keepalived_inspect',
+      'keepalived_validate',
     ],
     facts: {
       nginx_config: '/apps/nginx/conf/nginx.conf',
       managed_config_root: '/apps/nginx/conf/conf.d',
       managed_certificate_root: '/apps/nginx/cert',
+      keepalived: {
+        vip: '192.0.2.110',
+        vip_owned: false,
+        role: 'BACKUP',
+        local_addresses: ['192.0.2.111'],
+        service: { active: true, active_state: 'active', sub_state: 'running' },
+        config_path: '/etc/keepalived/keepalived.conf',
+        keepalived_config_hash: '22'.repeat(32),
+        keepalived_version: '2.2.8',
+        config_summary: {
+          summary_complete: true,
+          truncated: false,
+          instances: [{
+            name: 'VI_NGINX',
+            virtual_router_id: 54,
+            priority: 100,
+            advert_int: 1,
+            unicast_src_ip: '192.0.2.111',
+            unicast_peers: ['192.0.2.108'],
+            virtual_ips: ['192.0.2.110'],
+          }],
+        },
+      },
       config_entries: [
         {
           id: 'http-primary',

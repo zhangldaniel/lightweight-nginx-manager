@@ -78,15 +78,46 @@ sudo bash -s -- \
   --nginx-service nginx.service
 ```
 
-两台 Nginx 使用 Keepalived 提供同一 VIP 时，两端安装命令都追加：
+### 接入 Keepalived 高可用
+
+先确认两台机器都已安装 Keepalived：
 
 ```bash
-  --keepalived-config /etc/keepalived/keepalived.conf \
-  --keepalived-service keepalived.service \
-  --keepalived-vip 10.165.0.110
+command -v keepalived
+systemctl cat keepalived.service
 ```
 
-升级 Agent 时也要保留这三个参数。Web 的“高可用”页只查看真实 VIP 归属和校验现有配置，不会主动漂移 VIP 或修改 Keepalived。
+如果 `command -v keepalived` 没有输出，但 systemd 服务实际使用自定义目录，请额外指定二进制路径，例如：
+
+```bash
+--keepalived-binary /apps/keepalived/sbin/keepalived
+```
+
+`--keepalived-vip` 填两台机器共享的 VIP，不是节点自己的 IP。节点 IP 会由 Agent 自动识别；多网卡机器建议同时用 `ha_ip` 明确指定。
+
+`192.0.2.108` 节点在原安装命令后追加：
+
+```bash
+  --labels ha_ip=192.0.2.108 \
+  --keepalived-binary /apps/keepalived/sbin/keepalived \
+  --keepalived-config /etc/keepalived/keepalived.conf \
+  --keepalived-service keepalived.service \
+  --keepalived-vip 192.0.2.110
+```
+
+`192.0.2.111` 节点追加：
+
+```bash
+  --labels ha_ip=192.0.2.111 \
+  --keepalived-binary /apps/keepalived/sbin/keepalived \
+  --keepalived-config /etc/keepalived/keepalived.conf \
+  --keepalived-service keepalived.service \
+  --keepalived-vip 192.0.2.110
+```
+
+两端的 VIP 必须相同，`ha_ip` 分别填写本机 IP。Web 会按 Agent 上报自动生成拓扑，不需要再单独配置 IP。升级 Agent 时也要保留这些参数和标签。
+
+“高可用”页面只查看真实 VIP 归属和校验现有配置，不会启动、停止或修改 Keepalived，也不会主动漂移 VIP。
 
 安装后登录 Web 页面：
 

@@ -41,7 +41,7 @@ Agent 每 15 秒上报宿主机、磁盘、网络、Nginx 进程和可选 `stub_
 
 HTTP 管理网只有在安装时显式添加 `--allow-plaintext-log-stream` 才会上报日志能力；该开关只是授权，在 HTTPS Server 下不会降级 TLS。
 
-Keepalived 纳管需要同时设置 `--keepalived-config`、`--keepalived-service` 和 `--keepalived-vip`。Agent 只上报服务状态、VIP 归属和脱敏的 VRRP 摘要，不回传配置原文或 `auth_pass`，也不提供强制主备切换。
+Keepalived 纳管需要同时设置 `--keepalived-config`、`--keepalived-service` 和 `--keepalived-vip`。自定义安装目录再加 `--keepalived-binary /绝对路径/keepalived`。VIP 相同的 Agent 会自动组成高可用组；多网卡节点可用 `--labels ha_ip=本机IP` 明确展示地址。Agent 只上报服务状态、VIP 归属和脱敏的 VRRP 摘要，不回传配置原文或 `auth_pass`，也不提供强制主备切换。
 
 `config_apply.expected_sha256` 支持真实 SHA-256、`missing` 和 `present`。`missing` 只允许新建，文件已存在即拒绝；`present` 只允许替换，文件不存在即拒绝，并在结果中返回替换前 Hash。这样控制端可以把同一份配置安全复制到不同节点各自的托管配置目录。
 

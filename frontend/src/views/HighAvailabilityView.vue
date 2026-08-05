@@ -18,7 +18,7 @@ import StatusTag from '../components/StatusTag.vue'
 import { api } from '../api'
 import { useConsoleStore } from '../stores/console'
 import type {
-  HighAvailabilityNodeRef,
+  HighAvailabilityGroup,
   JobRecord,
   KeepalivedJobAction,
   KeepalivedRole,
@@ -35,7 +35,6 @@ const loadingHistory = ref(false)
 const historicalJobs = ref<JobRecord[]>([])
 let pollTimer: number | undefined
 
-const group = computed(() => store.ui.highAvailabilityGroups[0] || null)
 const availableJobs = computed(() => {
   const jobs = new Map<string, JobRecord>()
   for (const job of [...historicalJobs.value, ...store.jobs]) jobs.set(job.id, job)
@@ -47,6 +46,62 @@ function asRecord(value: unknown): Record<string, unknown> {
     ? (value as Record<string, unknown>)
     : {}
 }
+
+function addressWithoutPrefix(value: unknown) {
+  return String(value || '').split('/', 1)[0]
+}
+
+function instanceForVip(facts: Record<string, unknown>, vip: string) {
+  const summary = asRecord(facts.config_summary)
+  const instances = Array.isArray(summary.instances) ? summary.instances.map(asRecord) : []
+  return instances.find((instance) =>
+    Array.isArray(instance.virtual_ips) && instance.virtual_ips.some(
+      (address) => addressWithoutPrefix(address) === vip,
+    ),
+  )
+}
+
+function nodeAddress(node: NodeRecord, facts: Record<string, unknown>, vip: string) {
+  const labeled = String(node.labels?.ha_ip || '').trim()
+  if (labeled) return labeled
+  const configured = String(instanceForVip(facts, vip)?.unicast_src_ip || '').trim()
+  if (configured) return configured
+  const addresses = Array.isArray(facts.local_addresses)
+    ? facts.local_addresses.map(addressWithoutPrefix).filter(Boolean)
+    : []
+  return addresses.find((address) => address !== vip && address.includes('.') && !address.startsWith('127.'))
+    || addresses.find((address) => address !== vip && address !== '::1')
+    || node.node_name
+    || node.hostname
+    || node.id
+}
+
+const group = computed<HighAvailabilityGroup | null>(() => {
+  const groups = new Map<string, Array<{ node: NodeRecord; facts: Record<string, unknown> }>>()
+  for (const node of store.nodes) {
+    const facts = asRecord(node.facts.keepalived)
+    const vip = addressWithoutPrefix(facts.vip)
+    if (!vip) continue
+    const members = groups.get(vip) || []
+    members.push({ node, facts })
+    groups.set(vip, members)
+  }
+  const selected = [...groups.entries()]
+    .sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))[0]
+  if (!selected) return null
+  const [vip, members] = selected
+  return {
+    id: `keepalived-${vip}`,
+    name: 'NGINX 高可用',
+    type: 'keepalived',
+    vip,
+    nodes: members.map(({ node, facts }) => ({
+      nodeId: node.id,
+      address: nodeAddress(node, facts, vip),
+      label: node.node_name || node.hostname,
+    })),
+  }
+})
 
 function jobTime(job: JobRecord) {
   const value = Date.parse(job.completed_at || job.created_at)
@@ -62,32 +117,6 @@ function jobDetails(job: JobRecord | null, key: KeepalivedJobAction) {
   const nested = asRecord(result[key])
   const generic = asRecord(result.keepalived)
   return Object.keys(nested).length ? nested : Object.keys(generic).length ? generic : result
-}
-
-function nodeMatchesAddress(node: NodeRecord, address: string) {
-  const exact = [
-    node.id,
-    node.node_name,
-    node.hostname,
-    ...Object.values(node.labels || {}),
-    String(node.facts.ip_address || ''),
-    String(node.facts.primary_ip || ''),
-  ]
-  if (exact.some((value) => value === address)) return true
-  const escaped = address.replaceAll('.', '\\.')
-  const addressPattern = new RegExp(`(^|[^\\d.])${escaped}([^\\d.]|$)`)
-  if (addressPattern.test(JSON.stringify(node.facts))) return true
-  const suffix = address.split('.').at(-1) || ''
-  return Boolean(suffix && new RegExp(`(^|\\D)${suffix}(\\D|$)`).test(`${node.node_name} ${node.hostname}`))
-}
-
-function resolveNode(reference: HighAvailabilityNodeRef, used: Set<string>) {
-  const explicit = reference.nodeId
-    ? store.nodes.find((node) => node.id === reference.nodeId)
-    : undefined
-  const matched = explicit || store.nodes.find((node) => !used.has(node.id) && nodeMatchesAddress(node, reference.address))
-  if (matched) used.add(matched.id)
-  return matched || null
 }
 
 function normalizedRole(value: unknown): KeepalivedRole {
@@ -163,9 +192,8 @@ function observation(node: NodeRecord | null) {
 }
 
 const nodeEntries = computed(() => {
-  const used = new Set<string>()
   return (group.value?.nodes || []).map((reference) => {
-    const node = resolveNode(reference, used)
+    const node = store.nodes.find((candidate) => candidate.id === reference.nodeId) || null
     return { reference, node, observation: observation(node) }
   })
 })
