@@ -58,72 +58,98 @@ sudo bash -s -- \
   --node-name edge-a-01
 ```
 
-安装在 `/apps/nginx` 的示例：
+安装后去 Web 的“节点 Agent”批准接入，再导入配置和扫描证书。
+
+### `/apps/nginx`：常用短命令
+
+`--nginx-prefix /apps/nginx` 会自动带上常见的二进制、主配置、证书、日志和 `conf.d` 路径。证书目录优先使用已有的 `cert`，其次是 `certs`，都没有时创建 `cert`。`--manage-stream` 表示同一个 `conf.d` 目录内的 `*.stream` 也由平台管理。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
 sudo bash -s -- \
   --server http://192.0.2.20:8443 \
   --node-name edge-a-01 \
-  --nginx-binary /apps/nginx/sbin/nginx \
-  --nginx-root /apps/nginx \
-  --nginx-config /apps/nginx/conf/nginx.conf \
-  --managed-config-dir /apps/nginx/conf/conf.d \
-  --managed-stream-dir /apps/nginx/conf/conf.d \
-  --managed-config-already-included \
-  --managed-cert-dir /apps/nginx/cert \
-  --nginx-log-dir /apps/nginx/logs \
-  --stub-status-url http://127.0.0.1:18080/nginx_status \
+  --nginx-prefix /apps/nginx \
+  --manage-stream \
   --allow-plaintext-log-stream \
-  --nginx-service nginx.service
+  --allow-main-config-edit
 ```
 
-### 接入 Keepalived 高可用
+`--allow-main-config-edit` 允许平台编辑 `nginx.conf`；不需要时删掉即可。HTTP 控制端的实时日志需要显式保留 `--allow-plaintext-log-stream`，HTTPS 控制端不受它影响。
 
-先确认两台机器都已安装 Keepalived：
+短命令适用于现有 `nginx.conf` 已加载 `conf/conf.d/*.conf` 的机器；安装器会用 `nginx -T` 实测，不满足时会停止且不接管目录。
+
+### Stub Status（可选）
+
+先在节点上确认 URL 返回 `Active connections`，再把同一个 URL 加到安装命令中。URL 必须和 Nginx 的真实 `location` 完全一致；例如 Nginx-UI 常见配置是 `51820 + /stub_status`：
 
 ```bash
-command -v keepalived
-systemctl cat keepalived.service
+curl -fsS http://localhost:51820/stub_status
+# 输出中应包含：Active connections
 ```
 
-如果 `command -v keepalived` 没有输出，但 systemd 服务实际使用自定义目录，请额外指定二进制路径，例如：
+```bash
+--stub-status-url http://localhost:51820/stub_status
+```
+
+### 两台 Keepalived 高可用节点
+
+只有高可用对中的两台机器才加这一段；普通独立节点不要加。下面用脱敏地址示例：`.108` 和 `.111` 是两台 Nginx，VIP 是 `.110`；`.198` 是独立节点，不带 Keepalived 参数。`--node-ip` 是 `--labels ha_ip=...` 的短写法。
+
+```bash
+  --node-ip 192.0.2.108 \
+  --keepalived-vip 192.0.2.110
+```
+
+另一台只需换成本机 IP：
+
+```bash
+  --node-ip 192.0.2.111 \
+  --keepalived-vip 192.0.2.110
+```
+
+只给 `--keepalived-vip` 时，安装器默认读取 `/etc/keepalived/keepalived.conf`，默认服务为 `keepalived.service`。如果 Keepalived 放在自定义位置，再追加：
 
 ```bash
 --keepalived-binary /apps/keepalived/sbin/keepalived
 ```
 
-`--keepalived-vip` 填两台机器共享的 VIP，不是节点自己的 IP。节点 IP 会由 Agent 自动识别；多网卡机器建议同时用 `ha_ip` 明确指定。
+高可用页面只读取真实 VIP 归属、Keepalived 状态和脱敏的 VRRP 摘要，不会修改配置、启停 Keepalived 或主动漂移 VIP。
 
-`192.0.2.108` 节点在原安装命令后追加：
+### 已装 Agent：只升级程序
 
-```bash
-  --labels ha_ip=192.0.2.108 \
-  --keepalived-binary /apps/keepalived/sbin/keepalived \
-  --keepalived-config /etc/keepalived/keepalived.conf \
-  --keepalived-service keepalived.service \
-  --keepalived-vip 192.0.2.110
-```
-
-`192.0.2.111` 节点追加：
+日常升级不必重打一长串参数，单独执行 `--upgrade` 会保留原来的配置、身份和 systemd 服务：
 
 ```bash
-  --labels ha_ip=192.0.2.111 \
-  --keepalived-binary /apps/keepalived/sbin/keepalived \
-  --keepalived-config /etc/keepalived/keepalived.conf \
-  --keepalived-service keepalived.service \
-  --keepalived-vip 192.0.2.110
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
+sudo bash -s -- --upgrade
 ```
 
-两端的 VIP 必须相同，`ha_ip` 分别填写本机 IP。Web 会按 Agent 上报自动生成拓扑，不需要再单独配置 IP。升级 Agent 时也要保留这些参数和标签。
+它只更新程序文件。要改节点名、目录、日志、Stub Status、Keepalived 或 systemd 权限，仍需重新运行完整安装命令。
 
-“高可用”页面只查看真实 VIP 归属和校验现有配置，不会启动、停止或修改 Keepalived，也不会主动漂移 VIP。
+### 已有身份、改名与重复节点
 
-安装后登录 Web 页面：
+已经装过 Agent 的机器会保留本机身份；单纯改 `--node-name` **不会**自动新增或改名。需要纠正重名、重新命名或重新接入时，在完整安装命令末尾加 `--force-enroll`，然后去 Web 批准新的接入申请。
 
-1. 在“节点 Agent”批准接入。
-2. 在“站点与配置”导入节点现有配置。
-3. 在“证书”扫描节点证书。
+`--node-name` 在同一个 Server 中必须唯一。不要让两台机器复用同名，否则后接入的机器可能替换原节点身份。已经错绑时，先让占错名字的机器用自己的正确名称 `--force-enroll` 并批准，再让原机器用原名称 `--force-enroll` 并批准；一次处理一台。
+
+### 写多行命令时的一个坑
+
+反斜杠 `\` 必须是每一行的最后一个字符，后面不能有空格、字母或其他参数；否则下一行不会被当成同一条命令。
+
+### 高级：自定义目录
+
+默认没有覆盖到你的目录时再用这些参数。目录参数可重复写多次：
+
+```bash
+--nginx-binary /绝对路径/nginx \
+--nginx-root /绝对路径 \
+--nginx-config /绝对路径/nginx.conf \
+--managed-config-dir /绝对路径/conf.d \
+--managed-stream-dir /绝对路径/stream.d \
+--managed-cert-dir /绝对路径/cert \
+--nginx-log-dir /绝对路径/logs
+```
 
 ## 配置目录
 
@@ -141,7 +167,7 @@ Agent 会通过 `nginx -T` 确认 Nginx 已加载这些目录。平台只管理�
 
 ## 升级与检查
 
-重新运行原安装命令即可升级。先升级 Server，再升级 Agent，最后在浏览器按 `Ctrl+F5`。
+先升级 Server，再执行 Agent 的 `--upgrade`，最后在浏览器按 `Ctrl+F5`。
 
 ```bash
 # Server

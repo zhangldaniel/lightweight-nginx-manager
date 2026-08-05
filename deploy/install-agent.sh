@@ -19,6 +19,8 @@ KEEPALIVED_BINARY=""
 KEEPALIVED_CONFIG=""
 KEEPALIVED_SERVICE=""
 KEEPALIVED_VIP=""
+DEFAULT_KEEPALIVED_CONFIG="/etc/keepalived/keepalived.conf"
+DEFAULT_KEEPALIVED_SERVICE="keepalived.service"
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PACKAGE_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -26,18 +28,21 @@ AGENT_SOURCE="${PACKAGE_DIR}/agent/nginx_agent.py"
 
 SERVER_URL=""
 NODE_NAME="$(hostname -s 2>/dev/null || hostname)"
+NODE_IP=""
 LABELS=""
 CA_SOURCE=""
 TLS_SKIP_VERIFY="0"
 ALLOW_INSECURE_HTTP="0"
 NGINX_BINARY=""
-NGINX_ROOT="/etc/nginx"
-NGINX_CONFIG="/etc/nginx/nginx.conf"
+NGINX_PREFIX=""
+NGINX_ROOT=""
+NGINX_CONFIG=""
 MANAGED_CONFIG_DIRS=()
 MANAGED_STREAM_DIRS=()
 MANAGED_CERT_DIR=""
 MANAGED_INCLUDE_FILE=""
 MANAGED_CONFIG_ALREADY_INCLUDED="0"
+MANAGE_STREAM="0"
 ALLOW_MAIN_CONFIG_EDIT="0"
 HEALTH_URL=""
 NGINX_LOG_DIRS=()
@@ -46,6 +51,7 @@ ALLOW_PLAINTEXT_LOG_STREAM="0"
 POLL_SECONDS="3"
 INSTALL_NGINX="0"
 FORCE_ENROLL="0"
+UPGRADE_MODE="0"
 PYTHON_BIN="python3"
 INSTALL_TRANSACTION_ACTIVE="0"
 INSTALL_BACKUP_DIR=""
@@ -81,14 +87,17 @@ usage() {
   cat <<'USAGE'
 用法：
   sudo ./deploy/install-agent.sh --server <HTTP(S)地址> [选项]
+  sudo ./deploy/install-agent.sh --upgrade
 
 选项：
   --server <URL>       控制端地址，例如 http://192.0.2.20:8443（必填）
   --node-name <名称>   节点名称，默认当前短主机名
+  --node-ip <地址>     本机展示 IP；等价于标签 ha_ip=<地址>
   --labels <键值>      逗号分隔标签；多网卡高可用节点可填写 ha_ip=192.0.2.11
   --ca-file <路径>     自签控制端 CA；公共 CA 证书不需要
   --insecure-skip-tls-verify 不复制 CA，仍使用 HTTPS 但不校验控制端身份（仅可信内网）
   --nginx-binary <路径> Nginx 可执行文件，默认从 PATH 查找
+  --nginx-prefix <路径> 按 <路径>/sbin、conf、cert、logs 套用常见源码安装布局
   --nginx-root <路径>  Nginx 配置根；脚本只在其下建立专用托管子目录，默认 /etc/nginx
   --nginx-config <路径> Nginx 主配置，默认 /etc/nginx/nginx.conf
   --managed-config-dir <路径> HTTP 配置入口（直属 *.conf）；可重复指定，第一个为默认入口
@@ -96,11 +105,12 @@ usage() {
   --managed-cert-dir <路径> Agent 专用托管证书目录，默认 <nginx-root>/ssl/nginx-manager
   --managed-include-file <路径> 引入托管配置的 include 文件，默认 <nginx-root>/conf.d/00-nginx-manager.conf
   --managed-config-already-included 托管目录已由现有 nginx.conf 加载；不创建额外 include 文件
+  --manage-stream      配合 --nginx-prefix 管理 conf/conf.d 下的直属 *.stream
   --allow-main-config-edit 允许平台编辑 nginx.conf；默认仅查看且始终禁止删除/迁移
   --nginx-service <单元> Nginx systemd 单元，默认 nginx.service
-  --keepalived-binary <路径> Keepalived 可执行文件；默认从 PATH、/usr/sbin、/sbin 查找
-  --keepalived-config <路径> Keepalived 主配置文件；与 service、vip 一起指定后启用只读纳管
-  --keepalived-service <单元> Keepalived systemd 单元，例如 keepalived.service
+  --keepalived-binary <路径> Keepalived 可执行文件；自定义安装目录时指定
+  --keepalived-config <路径> Keepalived 主配置，默认 /etc/keepalived/keepalived.conf
+  --keepalived-service <单元> Keepalived systemd 单元，默认 keepalived.service
   --keepalived-vip <地址> 本节点组的 Keepalived VIP，例如 10.165.0.110
   --health-url <URL>   发布后的节点本地健康检查 URL
   --nginx-log-dir <路径> 允许实时查看的 Nginx 日志目录；可重复指定
@@ -109,6 +119,7 @@ usage() {
   --poll-seconds <秒>  任务轮询周期，默认 3
   --install-nginx      节点未安装 Nginx 时由脚本安装
   --force-enroll       请求管理员批准并替换现有 Agent 身份
+  --upgrade            仅升级 Agent 程序；保留现有配置、身份和 systemd 设置
   -h, --help           显示帮助
 
 安装后 Agent 会出现在 Web 的“待审批接入”列表；管理员批准后自动上线。
@@ -127,6 +138,76 @@ log() {
 
 require_root() {
   [[ "${EUID}" -eq 0 ]] || die "请使用 root 或 sudo 运行"
+}
+
+apply_nginx_prefix_defaults() {
+  if [[ -z "${NGINX_PREFIX}" ]]; then
+    [[ -n "${NGINX_ROOT}" ]] || NGINX_ROOT="/etc/nginx"
+    [[ -n "${NGINX_CONFIG}" ]] || NGINX_CONFIG="${NGINX_ROOT}/nginx.conf"
+    [[ "${MANAGE_STREAM}" != "1" ]] || die "--manage-stream 需要同时使用 --nginx-prefix"
+    return
+  fi
+  [[ "${NGINX_PREFIX}" = /* && ! "${NGINX_PREFIX}" =~ [[:space:]] ]] || \
+    die "--nginx-prefix 必须是不含空白的绝对路径"
+  NGINX_PREFIX="${NGINX_PREFIX%/}"
+  [[ -n "${NGINX_BINARY}" ]] || NGINX_BINARY="${NGINX_PREFIX}/sbin/nginx"
+  [[ -n "${NGINX_ROOT}" ]] || NGINX_ROOT="${NGINX_PREFIX}"
+  [[ -n "${NGINX_CONFIG}" ]] || NGINX_CONFIG="${NGINX_PREFIX}/conf/nginx.conf"
+  if [[ -z "${MANAGED_CONFIG_DIRS[@]+x}" ]]; then
+    MANAGED_CONFIG_DIRS+=("${NGINX_PREFIX}/conf/conf.d")
+  fi
+  if [[ "${MANAGE_STREAM}" == "1" && -z "${MANAGED_STREAM_DIRS[@]+x}" ]]; then
+    MANAGED_STREAM_DIRS+=("${NGINX_PREFIX}/conf/conf.d")
+  fi
+  if [[ -z "${MANAGED_CERT_DIR}" ]]; then
+    if [[ -d "${NGINX_PREFIX}/cert" ]]; then
+      MANAGED_CERT_DIR="${NGINX_PREFIX}/cert"
+    elif [[ -d "${NGINX_PREFIX}/certs" ]]; then
+      MANAGED_CERT_DIR="${NGINX_PREFIX}/certs"
+    else
+      MANAGED_CERT_DIR="${NGINX_PREFIX}/cert"
+    fi
+  fi
+  if [[ -z "${NGINX_LOG_DIRS[@]+x}" && -d "${NGINX_PREFIX}/logs" ]]; then
+    NGINX_LOG_DIRS+=("${NGINX_PREFIX}/logs")
+  fi
+  MANAGED_CONFIG_ALREADY_INCLUDED="1"
+}
+
+apply_node_ip_label() {
+  [[ -n "${NODE_IP}" ]] || return
+  "${PYTHON_BIN}" - "${NODE_IP}" <<'PY'
+import ipaddress
+import sys
+try:
+    ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit("错误：--node-ip 必须是 IP 地址")
+PY
+  [[ ! "${LABELS}" =~ (^|,)ha_ip= ]] || die "--node-ip 不能与 --labels 中的 ha_ip 同时使用"
+  LABELS="${LABELS:+${LABELS},}ha_ip=${NODE_IP}"
+}
+
+validate_existing_identity_binding() {
+  local existing_node
+  [[ -s "${STATE_DIR}/identity.json" && -f "${CONFIG_FILE}" ]] || return
+  existing_node="$("${PYTHON_BIN}" - "${CONFIG_FILE}" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        value = json.load(handle)
+except (OSError, ValueError):
+    raise SystemExit(1)
+node_name = value.get("node_name") if isinstance(value, dict) else None
+if not isinstance(node_name, str):
+    raise SystemExit(1)
+print(node_name)
+PY
+)" || die "无法读取现有 Agent 节点名称；请先检查 ${CONFIG_FILE}"
+  if [[ "${existing_node}" != "${NODE_NAME}" && "${FORCE_ENROLL}" != "1" ]]; then
+    die "现有 Agent 身份属于 ${existing_node}，不能静默改为 ${NODE_NAME}；确认更名或纠正重名时请添加 --force-enroll，并在 Web 重新批准"
+  fi
 }
 
 refuse_unresolved_transactions() {
@@ -400,7 +481,7 @@ prepare_managed_directories() {
   local created dump temporary include_dir probe directory suffix context expected_file
   local resolved_root resolved_cert resolved_config resolved_main
   local -a all_managed_dirs=()
-  if [[ "${#MANAGED_CONFIG_DIRS[@]}" -eq 0 && "${#MANAGED_STREAM_DIRS[@]}" -eq 0 ]]; then
+  if [[ -z "${MANAGED_CONFIG_DIRS[@]+x}" && -z "${MANAGED_STREAM_DIRS[@]+x}" ]]; then
     MANAGED_CONFIG_DIRS+=("${NGINX_ROOT}/nginx-manager.d")
   fi
   [[ -n "${MANAGED_CERT_DIR}" ]] || MANAGED_CERT_DIR="${NGINX_ROOT}/ssl/nginx-manager"
@@ -482,7 +563,7 @@ prepare_managed_directories() {
     return
   fi
 
-  [[ "${#MANAGED_STREAM_DIRS[@]}" -eq 0 ]] || \
+  [[ -z "${MANAGED_STREAM_DIRS[@]+x}" ]] || \
     die "Stream 入口不会由安装器自动改写 nginx.conf；请先配置 stream include，并添加 --managed-config-already-included"
   [[ -n "${MANAGED_INCLUDE_FILE}" ]] || MANAGED_INCLUDE_FILE="${NGINX_ROOT}/conf.d/00-nginx-manager.conf"
   include_dir="$(dirname -- "${MANAGED_INCLUDE_FILE}")"
@@ -586,7 +667,7 @@ PY
 
 prepare_monitoring_options() {
   local candidate parsed_status
-  if [[ "${#NGINX_LOG_DIRS[@]}" -eq 0 ]]; then
+  if [[ -z "${NGINX_LOG_DIRS[@]+x}" ]]; then
     for candidate in "${NGINX_ROOT}/logs" /var/log/nginx; do
       if [[ -d "${candidate}" && ! -L "${candidate}" ]]; then
         NGINX_LOG_DIRS+=("${candidate}")
@@ -618,7 +699,7 @@ PY
       log "警告：暂时无法访问 Stub Status；不阻断安装，Agent 将继续自动重试"
     fi
   fi
-  if [[ "${#NGINX_LOG_DIRS[@]}" -eq 0 ]]; then
+  if [[ -z "${NGINX_LOG_DIRS[@]+x}" ]]; then
     log "警告：未探测到日志目录；可重新安装并添加 --nginx-log-dir"
   else
     log "实时日志白名单：${NGINX_LOG_DIRS[*]}"
@@ -628,6 +709,10 @@ PY
 prepare_keepalived_options() {
   if [[ -z "${KEEPALIVED_BINARY}${KEEPALIVED_CONFIG}${KEEPALIVED_SERVICE}${KEEPALIVED_VIP}" ]]; then
     return
+  fi
+  if [[ -n "${KEEPALIVED_VIP}" ]]; then
+    [[ -n "${KEEPALIVED_CONFIG}" ]] || KEEPALIVED_CONFIG="${DEFAULT_KEEPALIVED_CONFIG}"
+    [[ -n "${KEEPALIVED_SERVICE}" ]] || KEEPALIVED_SERVICE="${DEFAULT_KEEPALIVED_SERVICE}"
   fi
   [[ -n "${KEEPALIVED_CONFIG}" && -n "${KEEPALIVED_SERVICE}" && -n "${KEEPALIVED_VIP}" ]] || \
     die "--keepalived-config、--keepalived-service 和 --keepalived-vip 必须一起指定"
@@ -645,10 +730,128 @@ try:
 except ValueError:
     raise SystemExit("--keepalived-vip 必须是 IP 地址")
 PY
+  "${PYTHON_BIN}" - "${KEEPALIVED_CONFIG}" "${KEEPALIVED_VIP}" <<'PY'
+import glob
+import ipaddress
+import os
+import re
+import sys
+
+config_path, expected = sys.argv[1:]
+expected_ip = ipaddress.ip_address(expected)
+config_path = os.path.realpath(config_path)
+config_root = os.path.dirname(config_path)
+include_directives = {"include", "includer", "includem", "includew", "includeb", "includea"}
+max_include_depth = 16
+max_config_files = 256
+max_config_bytes = 8 * 1024 * 1024
+state = {"files": 0, "bytes": 0}
+active = set()
+
+
+def inside_config_root(path):
+    try:
+        return os.path.normcase(os.path.commonpath((config_root, path))) == os.path.normcase(config_root)
+    except ValueError:
+        return False
+
+
+def expanded_tokens(path, depth):
+    if depth > max_include_depth:
+        raise SystemExit("错误：Keepalived include 嵌套超过 {} 层".format(max_include_depth))
+    real_path = os.path.realpath(path)
+    if not inside_config_root(real_path):
+        raise SystemExit("错误：Keepalived include 超出主配置目录：{}".format(path))
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise SystemExit("错误：Keepalived include 必须是普通文件且不能是符号链接：{}".format(path))
+    if real_path in active:
+        raise SystemExit("错误：Keepalived include 存在循环：{}".format(path))
+    state["files"] += 1
+    if state["files"] > max_config_files:
+        raise SystemExit("错误：Keepalived include 文件超过 {} 个".format(max_config_files))
+    remaining = max_config_bytes - state["bytes"]
+    if remaining < 0:
+        raise SystemExit("错误：Keepalived 配置总大小超过 {} 字节".format(max_config_bytes))
+    with open(real_path, "rb") as handle:
+        data = handle.read(remaining + 1)
+    state["bytes"] += len(data)
+    if state["bytes"] > max_config_bytes:
+        raise SystemExit("错误：Keepalived 配置总大小超过 {} 字节".format(max_config_bytes))
+    text = data.decode("utf-8", errors="replace")
+    lines = [re.split(r"[#\!]", raw_line, maxsplit=1)[0] for raw_line in text.splitlines()]
+    source_tokens = re.findall(r"\{|\}|[^\s{}]+", "\n".join(lines))
+    tokens = []
+    active.add(real_path)
+    try:
+        index = 0
+        while index < len(source_tokens):
+            token = source_tokens[index]
+            if token.lower() not in include_directives:
+                tokens.append(token)
+                index += 1
+                continue
+            if index + 1 >= len(source_tokens):
+                raise SystemExit("错误：Keepalived include 缺少文件名：{}".format(path))
+            include_name = source_tokens[index + 1].strip("'\"")
+            if not include_name or "\x00" in include_name or len(include_name) > 4096:
+                raise SystemExit("错误：Keepalived include 文件名无效：{}".format(path))
+            include_pattern = include_name
+            if not os.path.isabs(include_pattern):
+                include_pattern = os.path.join(os.path.dirname(real_path), include_pattern)
+            include_pattern = os.path.abspath(os.path.normpath(include_pattern))
+            if not inside_config_root(include_pattern):
+                raise SystemExit("错误：Keepalived include 超出主配置目录：{}".format(include_name))
+            matches = []
+            for matched in glob.iglob(include_pattern):
+                matches.append(matched)
+                if len(matches) > max_config_files - state["files"]:
+                    raise SystemExit("错误：Keepalived include 文件超过 {} 个".format(max_config_files))
+            for matched in sorted(matches):
+                tokens.extend(expanded_tokens(matched, depth + 1))
+            index += 2
+    finally:
+        active.remove(real_path)
+    return tokens
+
+
+tokens = expanded_tokens(config_path, 0)
+depth = 0
+pending_virtual_ipaddress = False
+virtual_depth = None
+found = False
+for token in tokens:
+    if token == "virtual_ipaddress":
+        pending_virtual_ipaddress = True
+        continue
+    if token == "{":
+        depth += 1
+        if pending_virtual_ipaddress:
+            virtual_depth = depth
+            pending_virtual_ipaddress = False
+        continue
+    if token == "}":
+        if virtual_depth == depth:
+            virtual_depth = None
+        depth = max(0, depth - 1)
+        pending_virtual_ipaddress = False
+        continue
+    if virtual_depth is None:
+        pending_virtual_ipaddress = False
+        continue
+    candidate = token.split("/", 1)[0]
+    try:
+        if ipaddress.ip_address(candidate) == expected_ip:
+            found = True
+            break
+    except ValueError:
+        pass
+if not found:
+    raise SystemExit("错误：--keepalived-vip {} 未出现在 {} 的 virtual_ipaddress 中".format(expected, config_path))
+PY
   if [[ -z "${KEEPALIVED_BINARY}" ]]; then
     KEEPALIVED_BINARY="$(command -v keepalived || true)"
     if [[ -z "${KEEPALIVED_BINARY}" ]]; then
-      for candidate in /usr/sbin/keepalived /sbin/keepalived; do
+      for candidate in /usr/sbin/keepalived /sbin/keepalived /apps/keepalived/sbin/keepalived; do
         if [[ -x "${candidate}" && -f "${candidate}" ]]; then
           KEEPALIVED_BINARY="${candidate}"
           break
@@ -936,6 +1139,68 @@ run_as_agent() {
   runuser -u "${APP_USER}" -- "$@"
 }
 
+upgrade_agent_binary() {
+  local backup temporary helper_was_active="0" agent_was_active="0" failed="0"
+  [[ -f "${AGENT_SOURCE}" && ! -L "${AGENT_SOURCE}" ]] || die "找不到新版本 agent/nginx_agent.py"
+  [[ -f "${APP_DIR}/nginx_agent.py" && ! -L "${APP_DIR}/nginx_agent.py" ]] || \
+    die "尚未安装 Agent；首次安装不能使用 --upgrade"
+  [[ -f "${CONFIG_FILE}" && ! -L "${CONFIG_FILE}" ]] || \
+    die "找不到现有 Agent 配置；请使用完整安装命令修复"
+  [[ -f "${AGENT_SERVICE}" && -f "${HELPER_SERVICE}" ]] || \
+    die "找不到现有 Agent systemd 单元；请使用完整安装命令修复"
+  id "${APP_USER}" >/dev/null 2>&1 || die "找不到现有 Agent 系统用户"
+
+  install_base_dependencies
+  recover_existing_transactions
+  temporary="$(mktemp "${APP_DIR}/.nginx_agent.py.upgrade.XXXXXX")"
+  install -m 0755 -o root -g root "${AGENT_SOURCE}" "${temporary}"
+  if ! run_as_agent "${PYTHON_BIN}" "${temporary}" --config "${CONFIG_FILE}" validate-config; then
+    rm -f -- "${temporary}"
+    die "新版本 Agent 无法读取现有配置，尚未替换程序"
+  fi
+  systemctl is-active --quiet "${APP_NAME}-helper.service" && helper_was_active="1" || true
+  systemctl is-active --quiet "${APP_NAME}.service" && agent_was_active="1" || true
+
+  backup="$(mktemp "${APP_DIR}/.nginx_agent.py.backup.XXXXXX")"
+  cp -a -- "${APP_DIR}/nginx_agent.py" "${backup}"
+  mv -f -- "${temporary}" "${APP_DIR}/nginx_agent.py"
+  run_as_agent "${PYTHON_BIN}" "${APP_DIR}/nginx_agent.py" --config "${CONFIG_FILE}" validate-config || failed="1"
+  if [[ "${failed}" == "0" && "${helper_was_active}" == "1" ]]; then
+    systemctl restart "${APP_NAME}-helper.service" || failed="1"
+  fi
+  if [[ "${failed}" == "0" && "${agent_was_active}" == "1" ]]; then
+    systemctl restart "${APP_NAME}.service" || failed="1"
+  fi
+  [[ "${failed}" != "0" ]] || sleep 2
+  if [[ "${failed}" == "0" && "${helper_was_active}" == "1" ]]; then
+    systemctl is-active --quiet "${APP_NAME}-helper.service" || failed="1"
+  fi
+  if [[ "${failed}" == "0" && "${agent_was_active}" == "1" ]]; then
+    systemctl is-active --quiet "${APP_NAME}.service" || failed="1"
+  fi
+
+  if [[ "${failed}" != "0" ]]; then
+    local rollback_failed="0"
+    log "升级启动检查失败，恢复上一版 Agent 程序"
+    temporary="$(mktemp "${APP_DIR}/.nginx_agent.py.rollback.XXXXXX")"
+    install -m 0755 -o root -g root "${backup}" "${temporary}"
+    mv -f -- "${temporary}" "${APP_DIR}/nginx_agent.py"
+    [[ "${helper_was_active}" != "1" ]] || systemctl restart "${APP_NAME}-helper.service" >/dev/null 2>&1 || rollback_failed="1"
+    [[ "${agent_was_active}" != "1" ]] || systemctl restart "${APP_NAME}.service" >/dev/null 2>&1 || rollback_failed="1"
+    sleep 2
+    [[ "${helper_was_active}" != "1" ]] || systemctl is-active --quiet "${APP_NAME}-helper.service" || rollback_failed="1"
+    [[ "${agent_was_active}" != "1" ]] || systemctl is-active --quiet "${APP_NAME}.service" || rollback_failed="1"
+    rm -f -- "${backup}"
+    [[ "${rollback_failed}" == "0" ]] || \
+      die "Agent 程序已恢复，但旧服务未恢复运行；请检查 journalctl -u ${APP_NAME} -u ${APP_NAME}-helper"
+    die "Agent 升级失败，已恢复上一版本"
+  fi
+
+  rm -f -- "${backup}"
+  log "Agent 程序升级完成；现有配置、身份和 systemd 设置均已保留"
+  echo "服务状态：systemctl status ${APP_NAME} ${APP_NAME}-helper"
+}
+
 enroll_if_needed() {
   if [[ -s "${STATE_DIR}/identity.json" && "${FORCE_ENROLL}" != "1" ]]; then
     log "保留现有 Agent 身份"
@@ -952,13 +1217,24 @@ enroll_if_needed() {
   ENROLLMENT_COMPLETED="1"
 }
 
+if [[ "$#" -eq 1 && "$1" == "--upgrade" ]]; then
+  UPGRADE_MODE="1"
+  shift
+else
+  for argument in "$@"; do
+    [[ "${argument}" != "--upgrade" ]] || die "--upgrade 必须单独使用，修改路径或能力请运行完整安装命令"
+  done
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --server) [[ $# -ge 2 ]] || die "--server 缺少值"; SERVER_URL="$2"; shift 2 ;;
     --node-name) [[ $# -ge 2 ]] || die "--node-name 缺少值"; NODE_NAME="$2"; shift 2 ;;
+    --node-ip) [[ $# -ge 2 ]] || die "--node-ip 缺少值"; NODE_IP="$2"; shift 2 ;;
     --labels) [[ $# -ge 2 ]] || die "--labels 缺少值"; LABELS="$2"; shift 2 ;;
     --ca-file) [[ $# -ge 2 ]] || die "--ca-file 缺少值"; CA_SOURCE="$2"; shift 2 ;;
     --insecure-skip-tls-verify) TLS_SKIP_VERIFY="1"; shift ;;
+    --nginx-prefix) [[ $# -ge 2 ]] || die "--nginx-prefix 缺少值"; NGINX_PREFIX="$2"; shift 2 ;;
     --nginx-binary) [[ $# -ge 2 ]] || die "--nginx-binary 缺少值"; NGINX_BINARY="$2"; shift 2 ;;
     --nginx-root) [[ $# -ge 2 ]] || die "--nginx-root 缺少值"; NGINX_ROOT="$2"; shift 2 ;;
     --nginx-config) [[ $# -ge 2 ]] || die "--nginx-config 缺少值"; NGINX_CONFIG="$2"; shift 2 ;;
@@ -967,6 +1243,7 @@ while [[ $# -gt 0 ]]; do
     --managed-cert-dir) [[ $# -ge 2 ]] || die "--managed-cert-dir 缺少值"; MANAGED_CERT_DIR="$2"; shift 2 ;;
     --managed-include-file) [[ $# -ge 2 ]] || die "--managed-include-file 缺少值"; MANAGED_INCLUDE_FILE="$2"; shift 2 ;;
     --managed-config-already-included) MANAGED_CONFIG_ALREADY_INCLUDED="1"; shift ;;
+    --manage-stream) MANAGE_STREAM="1"; shift ;;
     --allow-main-config-edit) ALLOW_MAIN_CONFIG_EDIT="1"; shift ;;
     --nginx-service) [[ $# -ge 2 ]] || die "--nginx-service 缺少值"; NGINX_SERVICE="$2"; shift 2 ;;
     --keepalived-binary) [[ $# -ge 2 ]] || die "--keepalived-binary 缺少值"; KEEPALIVED_BINARY="$2"; shift 2 ;;
@@ -986,6 +1263,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_root
+install -d -m 0755 /run/lock
+exec 9>/run/lock/nginx-manager-agent-install.lock
+flock -n 9 || die "另一个 Agent 安装或升级进程正在运行"
+refuse_unresolved_transactions
+
+if [[ "${UPGRADE_MODE}" == "1" ]]; then
+  upgrade_agent_binary
+  exit 0
+fi
+
+apply_nginx_prefix_defaults
 [[ -n "${SERVER_URL}" ]] || { usage; die "必须指定 --server"; }
 [[ -n "${NODE_NAME}" && "${NODE_NAME}" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "节点名称只允许字母、数字、点、下划线和短横线"
 [[ "${TLS_SKIP_VERIFY}" != "1" || -z "${CA_SOURCE}" ]] || die "--ca-file 与 --insecure-skip-tls-verify 不能同时使用"
@@ -1012,13 +1300,10 @@ done
 [[ "${NGINX_SERVICE}" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || die "--nginx-service 必须是合法的 .service 单元名"
 NGINX_DROPIN="/etc/systemd/system/${NGINX_SERVICE}.d/nginx-manager-agent-recovery.conf"
 
-install -d -m 0755 /run/lock
-exec 9>/run/lock/nginx-manager-agent-install.lock
-flock -n 9 || die "另一个 Agent 安装或升级进程正在运行"
-refuse_unresolved_transactions
-
 install_base_dependencies
+apply_node_ip_label
 validate_server_url
+validate_existing_identity_binding
 install_nginx_if_requested
 prepare_keepalived_options
 prepare_monitoring_options

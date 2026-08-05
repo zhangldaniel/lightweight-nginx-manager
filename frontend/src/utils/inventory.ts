@@ -34,6 +34,7 @@ export interface InventoryImportSummary {
   changed: boolean
   configurations: number
   certificates: number
+  removedCertificatePaths: number
   failures: number
   failureMessages: string[]
   skipped: number
@@ -288,6 +289,40 @@ function importCertificate(
   return true
 }
 
+function detachMissingCertificatePaths(
+  ui: UiState,
+  node: NodeRecord,
+  observedPaths: string[],
+) {
+  const scannedPaths = new Set(observedPaths.map(String).filter(Boolean))
+  const affectedCertificateIds = new Set<string>()
+  for (const certificate of ui.certificates) {
+    if (certificate.pendingRemote) continue
+    const stored = certificate.nodePaths?.[node.id]
+    if (!stored || scannedPaths.has(stored.certificatePath)) continue
+    delete certificate.nodePaths?.[node.id]
+    delete certificate.nodeHashes?.[node.id]
+    certificate.nodeIds = (certificate.nodeIds || []).filter((id) => id !== node.id)
+    affectedCertificateIds.add(certificate.id)
+  }
+  return affectedCertificateIds
+}
+
+function pruneOrphanedImportedCertificates(ui: UiState, candidates: Set<string>) {
+  if (!candidates.size) return
+  const linkedCertificateIds = new Set(
+    ui.sites.map((site) => String(site.certificateId || '')).filter(Boolean),
+  )
+  ui.certificates = ui.certificates.filter(
+    (certificate) =>
+      !candidates.has(certificate.id) ||
+      certificate.source !== '节点导入' ||
+      certificate.nodeIds.length > 0 ||
+      linkedCertificateIds.has(certificate.id) ||
+      Boolean(certificate.pendingRemote),
+  )
+}
+
 export function processInventoryJobs(
   ui: UiState,
   nodes: NodeRecord[],
@@ -297,6 +332,7 @@ export function processInventoryJobs(
     changed: false,
     configurations: 0,
     certificates: 0,
+    removedCertificatePaths: 0,
     failures: 0,
     failureMessages: [],
     skipped: 0,
@@ -307,7 +343,13 @@ export function processInventoryJobs(
   const certificateProcessed = new Set(ui.importedCertificateInventoryJobs || [])
   const terminal = new Set(['succeeded', 'failed', 'expired'])
 
-  for (const job of jobs) {
+  const orderedJobs = [...jobs].sort((left, right) => {
+    const leftTime = Date.parse(left.completed_at || left.created_at || '')
+    const rightTime = Date.parse(right.completed_at || right.created_at || '')
+    return (Number.isFinite(leftTime) ? leftTime : 0) - (Number.isFinite(rightTime) ? rightTime : 0)
+  })
+
+  for (const job of orderedJobs) {
     if (!terminal.has(job.status)) continue
     if (job.action === 'config_inventory' && !configProcessed.has(job.id)) {
       configProcessed.add(job.id)
@@ -343,6 +385,8 @@ export function processInventoryJobs(
       const inventory = job.result?.certificate_inventory as
         | {
             certificates?: CertificateInventoryItem[]
+            observed_certificate_paths?: string[]
+            scan_complete?: boolean
             skipped_count?: number
             truncated?: boolean
           }
@@ -353,9 +397,19 @@ export function processInventoryJobs(
         const failure = String(job.result?.error || job.result?.failure_code || job.status)
         result.failureMessages.push(`${node?.node_name || job.node_name || job.node_id}: ${failure}`)
       } else {
-        for (const item of inventory.certificates || []) {
+        const certificates = inventory.certificates || []
+        const hasObservedSnapshot =
+          inventory.scan_complete === true && Array.isArray(inventory.observed_certificate_paths)
+        const complete = !inventory.truncated && hasObservedSnapshot
+        const observedPaths = hasObservedSnapshot ? inventory.observed_certificate_paths || [] : []
+        const detached = complete
+          ? detachMissingCertificatePaths(ui, node, observedPaths)
+          : new Set<string>()
+        result.removedCertificatePaths += detached.size
+        for (const item of certificates) {
           if (importCertificate(ui, item, node)) result.certificates += 1
         }
+        pruneOrphanedImportedCertificates(ui, detached)
         result.skipped += Number(inventory.skipped_count || 0)
         result.truncated ||= Boolean(inventory.truncated)
       }

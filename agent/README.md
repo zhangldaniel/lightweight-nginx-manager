@@ -35,13 +35,13 @@ python3 nginx_agent.py --config config.json enroll --force
 
 ## 实时日志与监控
 
-Agent 每 15 秒上报宿主机、磁盘、网络、Nginx 进程和可选 `stub_status` 指标。`stub_status` 地址只允许本机回环 URL，暂时不可用不会阻断安装或其他任务。
+Agent 每 15 秒上报宿主机、磁盘、网络、Nginx 进程和可选 `stub_status` 指标。`stub_status` 地址只允许本机回环 URL，暂时不可用不会阻断安装或其他任务。填写前先用 `curl` 确认它确实返回 `Active connections`；例如 Nginx-UI 的常见地址是 `http://localhost:51820/stub_status`，不能把路径写成别的 location。
 
 实时日志由普通 Agent 主动轮询会话，root Helper 只读取安装时通过 `--nginx-log-dir` 声明的目录。文件必须是普通 `*.log`，符号链接、路径越界和前端自定义路径都会被拒绝。日志内容只经内存转发给当前浏览器，不写入任务状态或数据库。
 
 HTTP 管理网只有在安装时显式添加 `--allow-plaintext-log-stream` 才会上报日志能力；该开关只是授权，在 HTTPS Server 下不会降级 TLS。
 
-Keepalived 纳管需要同时设置 `--keepalived-config`、`--keepalived-service` 和 `--keepalived-vip`。自定义安装目录再加 `--keepalived-binary /绝对路径/keepalived`。VIP 相同的 Agent 会自动组成高可用组；多网卡节点可用 `--labels ha_ip=本机IP` 明确展示地址。Agent 只上报服务状态、VIP 归属和脱敏的 VRRP 摘要，不回传配置原文或 `auth_pass`，也不提供强制主备切换。
+Keepalived 最短只要 `--keepalived-vip <共享VIP>`；安装器默认读取 `/etc/keepalived/keepalived.conf` 并检查 `keepalived.service`。自定义安装目录再加 `--keepalived-binary /绝对路径/keepalived`。VIP 相同的 Agent 会自动组成高可用组；多网卡节点可用 `--node-ip 本机IP`（等价于 `--labels ha_ip=本机IP`）明确展示地址。Agent 只上报服务状态、VIP 归属和脱敏的 VRRP 摘要，不回传配置原文或 `auth_pass`，也不提供强制主备切换。
 
 `config_apply.expected_sha256` 支持真实 SHA-256、`missing` 和 `present`。`missing` 只允许新建，文件已存在即拒绝；`present` 只允许替换，文件不存在即拒绝，并在结果中返回替换前 Hash。这样控制端可以把同一份配置安全复制到不同节点各自的托管配置目录。
 
@@ -49,3 +49,11 @@ Keepalived 纳管需要同时设置 `--keepalived-config`、`--keepalived-servic
 
 推荐通过根目录的 `deploy/install-agent.sh` 安装 systemd 服务，不要手工以 root 运行网络 Agent。
 安装器接受 HTTP 或 HTTPS 控制端；HTTP 会自动写入 `allow_insecure_http=true`，仅应在隔离且可信的管理网使用。
+
+## 安装器速记
+
+- `--nginx-prefix /apps/nginx`：自动派生常见 `/apps/nginx` 路径；配合 `--manage-stream` 同时纳管 `conf.d` 的 `*.stream`。
+- `--upgrade`：单独使用时只更新 Agent 程序，保留原有配置、身份和 systemd 服务；修改路径、监控、Keepalived 或权限时仍需完整安装命令。
+- 已有本机身份时改 `--node-name` 不会自动创建新节点。改名或修复重名请完整重装并加 `--force-enroll`，然后在 Web 批准。
+- `--node-name` 必须全局唯一；两台机器复用同名可能替换旧节点。错绑时先修复占错名称的机器，再让原机器重新接入。
+- 多行命令的 `\` 后面不能再跟空格或任何字符。

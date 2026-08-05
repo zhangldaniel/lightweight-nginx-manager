@@ -379,11 +379,31 @@ def _safe_certificate_inventory(value: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(value, dict) or not isinstance(value.get("certificates"), list):
         return None
     safe_certificates: List[Dict[str, Any]] = []
+    safe_observed_paths: List[str] = []
     rejected = 0
     truncated = bool(value.get("truncated", False))
     fingerprint_pattern = re.compile(r"^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$", re.IGNORECASE)
     timestamp_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
     domain_pattern = re.compile(r"^[A-Za-z0-9*](?:[A-Za-z0-9*._-]{0,251}[A-Za-z0-9])?$")
+
+    raw_observed_paths = value.get("observed_certificate_paths")
+    observed_paths_valid = isinstance(raw_observed_paths, list)
+    if isinstance(raw_observed_paths, list):
+        if len(raw_observed_paths) > INVENTORY_MAX_FILES:
+            truncated = True
+        for path in raw_observed_paths[:INVENTORY_MAX_FILES]:
+            if (
+                not isinstance(path, str)
+                or not os.path.isabs(path)
+                or len(path) > 4096
+                or "\0" in path
+                or Path(path).suffix.lower() not in (".pem", ".crt")
+            ):
+                rejected += 1
+                observed_paths_valid = False
+                continue
+            if path not in safe_observed_paths:
+                safe_observed_paths.append(path)
 
     for item in value["certificates"]:
         if len(safe_certificates) >= INVENTORY_MAX_FILES:
@@ -463,12 +483,19 @@ def _safe_certificate_inventory(value: Any) -> Optional[Dict[str, Any]]:
     supplied_skipped = value.get("skipped_count", 0)
     if not isinstance(supplied_skipped, int) or supplied_skipped < 0:
         supplied_skipped = 0
-    return {
+    result = {
         "certificates": safe_certificates,
         "certificate_count": len(safe_certificates),
         "skipped_count": min(supplied_skipped + rejected, 100000),
         "truncated": truncated,
     }
+    if isinstance(raw_observed_paths, list):
+        result["observed_certificate_paths"] = safe_observed_paths
+    if isinstance(value.get("scan_complete"), bool):
+        result["scan_complete"] = bool(
+            value["scan_complete"] and observed_paths_valid and not truncated
+        )
+    return result
 
 
 def _safe_keepalived_address(value: Any) -> Optional[str]:

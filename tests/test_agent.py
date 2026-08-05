@@ -739,6 +739,12 @@ vrrp_instance VI_REAL {
         inventory = response["result"]
         self.assertEqual(1, inventory["certificate_count"])
         self.assertEqual(1, inventory["skipped_count"])
+        self.assertTrue(inventory["scan_complete"])
+        self.assertIn(str(certificate_path.resolve()), inventory["observed_certificate_paths"])
+        self.assertIn(
+            str((self.certificate_root / "orphan.crt").resolve()),
+            inventory["observed_certificate_paths"],
+        )
         item = inventory["certificates"][0]
         self.assertTrue(Path(item["certificate_path"]).samefile(certificate_path))
         self.assertTrue(Path(item["private_key_path"]).samefile(private_key_path))
@@ -746,7 +752,21 @@ vrrp_instance VI_REAL {
         self.assertEqual(self.sha(private_key_data), item["key_material_sha256"])
         mapped = agent._to_server_result(response)
         self.assertEqual("certificate_inventory", mapped["action"])
+        self.assertTrue(mapped["details"]["scan_complete"])
+        self.assertIn(str(certificate_path.resolve()), mapped["details"]["observed_certificate_paths"])
         self.assertNotIn("super-secret-key-material", json.dumps(mapped))
+
+    def test_certificate_inventory_marks_missing_managed_root_as_incomplete(self):
+        shutil.rmtree(str(self.certificate_root))
+
+        response = self.executor.execute(
+            self.job("job-certificate-inventory-missing-root", "certificate_inventory", {})
+        )
+
+        self.assertEqual("succeeded", response["status"])
+        self.assertEqual([], response["result"]["certificates"])
+        self.assertGreaterEqual(response["result"]["skipped_count"], 1)
+        self.assertFalse(response["result"]["scan_complete"])
 
     def test_config_apply_present_replaces_existing_but_never_creates(self):
         target = self.config_root / "migrated-site.conf"
@@ -1841,6 +1861,10 @@ vrrp_instance VI_REAL {
     def test_installer_accepts_custom_apps_nginx_layout(self):
         installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
         for option in (
+            "--nginx-prefix",
+            "--manage-stream",
+            "--node-ip",
+            "--upgrade",
             "--insecure-skip-tls-verify",
             "--nginx-binary",
             "--managed-config-dir",
@@ -1880,6 +1904,270 @@ vrrp_instance VI_REAL {
         self.assertIn("NGINX_MANAGER_REQUIRE_PINNED_REF", bootstrap)
         self.assertIn("NGINX_MANAGER_ARCHIVE_SHA256", bootstrap)
 
+    def test_installer_derives_common_layout_from_nginx_prefix(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^apply_nginx_prefix_defaults\(\) \{.*?^\}", installer)
+        self.assertIsNotNone(match)
+        bash = shutil.which("bash")
+        if bash is None and os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+            if candidate.exists():
+                bash = str(candidate)
+        if bash is None:
+            self.skipTest("bash is unavailable")
+
+        probe = match.group(0) + r'''
+set -Eeuo pipefail
+die() { printf '%s\n' "$*" >&2; exit 99; }
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+mkdir -p "$temporary/apps/nginx/sbin" "$temporary/apps/nginx/conf/conf.d" \
+  "$temporary/apps/nginx/cert" "$temporary/apps/nginx/logs"
+NGINX_PREFIX="$temporary/apps/nginx"
+NGINX_BINARY=""
+NGINX_ROOT=""
+NGINX_CONFIG=""
+MANAGED_CONFIG_DIRS=()
+MANAGED_STREAM_DIRS=()
+MANAGED_CERT_DIR=""
+NGINX_LOG_DIRS=()
+MANAGED_CONFIG_ALREADY_INCLUDED="0"
+MANAGE_STREAM="1"
+apply_nginx_prefix_defaults
+[[ "$NGINX_BINARY" == "$NGINX_PREFIX/sbin/nginx" ]]
+[[ "$NGINX_ROOT" == "$NGINX_PREFIX" ]]
+[[ "$NGINX_CONFIG" == "$NGINX_PREFIX/conf/nginx.conf" ]]
+[[ "${MANAGED_CONFIG_DIRS[0]}" == "$NGINX_PREFIX/conf/conf.d" ]]
+[[ "${MANAGED_STREAM_DIRS[0]}" == "$NGINX_PREFIX/conf/conf.d" ]]
+[[ "$MANAGED_CERT_DIR" == "$NGINX_PREFIX/cert" ]]
+[[ "${NGINX_LOG_DIRS[0]}" == "$NGINX_PREFIX/logs" ]]
+[[ "$MANAGED_CONFIG_ALREADY_INCLUDED" == "1" ]]
+'''
+        result = subprocess.run(
+            [bash, "-c", probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(os.environ, BASH_COMPAT="4.2"),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_installer_rejects_changed_node_name_without_force_enroll(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^validate_existing_identity_binding\(\) \{.*?^\}", installer)
+        self.assertIsNotNone(match)
+        bash = shutil.which("bash")
+        if bash is None and os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+            if candidate.exists():
+                bash = str(candidate)
+        if bash is None:
+            self.skipTest("bash is unavailable")
+
+        probe = match.group(0) + r'''
+set -Eeuo pipefail
+die() { printf '%s\n' "$*" >&2; exit 99; }
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+STATE_DIR="$temporary/state"
+CONFIG_FILE="$temporary/config.json"
+mkdir -p "$STATE_DIR"
+printf '{}\n' > "$STATE_DIR/identity.json"
+printf '{"node_name":"old-node","server_url":"http://192.0.2.20:8443"}\n' > "$CONFIG_FILE"
+PYTHON_BIN="$TEST_PYTHON"
+NODE_NAME=new-node
+SERVER_URL=http://192.0.2.20:8443
+FORCE_ENROLL=0
+validate_existing_identity_binding
+'''
+        result = subprocess.run(
+            [bash, "-c", probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
+        )
+        self.assertEqual(99, result.returncode, result.stderr)
+        self.assertIn("--force-enroll", result.stderr)
+
+    def test_installer_keepalived_vip_uses_safe_defaults(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^prepare_keepalived_options\(\) \{.*?^\}", installer)
+        self.assertIsNotNone(match)
+        bash = shutil.which("bash")
+        if bash is None and os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+            if candidate.exists():
+                bash = str(candidate)
+        if bash is None:
+            self.skipTest("bash is unavailable")
+
+        probe = match.group(0) + r'''
+set -Eeuo pipefail
+die() { printf '%s\n' "$*" >&2; exit 99; }
+systemctl() { [[ "$1" == "cat" && "$2" == "keepalived.service" ]]; }
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+mkdir -p "$temporary/apps/keepalived/sbin"
+printf '#!/bin/sh\nexit 0\n' > "$temporary/apps/keepalived/sbin/keepalived"
+chmod +x "$temporary/apps/keepalived/sbin/keepalived"
+cat > "$temporary/keepalived.conf" <<'EOF'
+vrrp_instance VI_1 {
+  virtual_ipaddress {
+    192.0.2.110/24 dev eth0
+  }
+}
+EOF
+DEFAULT_KEEPALIVED_CONFIG="$temporary/keepalived.conf"
+DEFAULT_KEEPALIVED_SERVICE="keepalived.service"
+KEEPALIVED_BINARY="$temporary/apps/keepalived/sbin/keepalived"
+KEEPALIVED_CONFIG=""
+KEEPALIVED_SERVICE=""
+KEEPALIVED_VIP="192.0.2.110"
+PYTHON_BIN="$TEST_PYTHON"
+prepare_keepalived_options
+[[ "$KEEPALIVED_CONFIG" == "$temporary/keepalived.conf" ]]
+[[ "$KEEPALIVED_SERVICE" == "keepalived.service" ]]
+'''
+        result = subprocess.run(
+            [bash, "-c", probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('/apps/keepalived/sbin/keepalived', installer)
+        bad_probe = probe.replace('KEEPALIVED_VIP="192.0.2.110"', 'KEEPALIVED_VIP="192.0.2.111"')
+        bad_result = subprocess.run(
+            [bash, "-c", bad_probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
+        )
+        self.assertNotEqual(0, bad_result.returncode)
+        self.assertIn("virtual_ipaddress", bad_result.stderr)
+
+    def test_installer_keepalived_vip_follows_safe_includes(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^prepare_keepalived_options\(\) \{.*?^\}", installer)
+        self.assertIsNotNone(match)
+        bash = shutil.which("bash")
+        if bash is None and os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+            if candidate.exists():
+                bash = str(candidate)
+        if bash is None:
+            self.skipTest("bash is unavailable")
+
+        probe = match.group(0) + r'''
+set -Eeuo pipefail
+die() { printf '%s\n' "$*" >&2; exit 99; }
+systemctl() { [[ "$1" == "cat" && "$2" == "keepalived.service" ]]; }
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+mkdir -p "$temporary/apps/keepalived/sbin" "$temporary/keepalived/conf.d"
+printf '#!/bin/sh\nexit 0\n' > "$temporary/apps/keepalived/sbin/keepalived"
+chmod +x "$temporary/apps/keepalived/sbin/keepalived"
+cat > "$temporary/keepalived/keepalived.conf" <<'EOF'
+include conf.d/*.conf
+EOF
+cat > "$temporary/keepalived/conf.d/vrrp.conf" <<'EOF'
+vrrp_instance VI_1 {
+  virtual_ipaddress {
+    192.0.2.110/24 dev eth0
+  }
+}
+EOF
+KEEPALIVED_BINARY="$temporary/apps/keepalived/sbin/keepalived"
+KEEPALIVED_CONFIG="$temporary/keepalived/keepalived.conf"
+KEEPALIVED_SERVICE="keepalived.service"
+KEEPALIVED_VIP="192.0.2.110"
+PYTHON_BIN="$TEST_PYTHON"
+prepare_keepalived_options
+'''
+        result = subprocess.run(
+            [bash, "-c", probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        escaped_probe = (
+            probe.replace(
+                '"$temporary/keepalived/conf.d"',
+                '"$temporary/keepalived/conf.d" "$temporary/outside"',
+            )
+            .replace("include conf.d/*.conf", "include ../outside/*.conf")
+            .replace(
+                '"$temporary/keepalived/conf.d/vrrp.conf"',
+                '"$temporary/outside/vrrp.conf"',
+            )
+        )
+        escaped_result = subprocess.run(
+            [bash, "-c", escaped_probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
+        )
+        self.assertNotEqual(0, escaped_result.returncode)
+        self.assertIn("include", escaped_result.stderr)
+
+    def test_installer_upgrade_only_replaces_agent_program(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^upgrade_agent_binary\(\) \{.*?^\}", installer)
+        self.assertIsNotNone(match)
+        body = match.group(0)
+        self.assertIn('recover_existing_transactions', body)
+        self.assertIn('validate-config', body)
+        self.assertIn('cp -a -- "${APP_DIR}/nginx_agent.py" "${backup}"', body)
+        self.assertIn('mv -f -- "${temporary}" "${APP_DIR}/nginx_agent.py"', body)
+        self.assertIn('sleep 2', body)
+        self.assertIn('rollback_failed', body)
+        self.assertIn('systemctl is-active --quiet "${APP_NAME}.service"', body)
+        for forbidden in (
+            "write_config",
+            "write_services",
+            "prepare_managed_directories",
+            "enroll_if_needed",
+        ):
+            self.assertNotIn(forbidden, body)
+
     def test_installer_accepts_explicit_keepalived_binary(self):
         installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
         match = re.search(r"(?ms)^prepare_keepalived_options\(\) \{.*?^\}", installer)
@@ -1901,12 +2189,12 @@ trap 'rm -rf "$temporary"' EXIT
 mkdir -p "$temporary/apps/keepalived/sbin"
 printf '#!/bin/sh\nexit 0\n' > "$temporary/apps/keepalived/sbin/keepalived"
 chmod +x "$temporary/apps/keepalived/sbin/keepalived"
-printf 'vrrp_instance VI_1 { state BACKUP }\n' > "$temporary/keepalived.conf"
+printf 'vrrp_instance VI_1 { state BACKUP virtual_ipaddress { 10.165.0.110 } }\n' > "$temporary/keepalived.conf"
 KEEPALIVED_BINARY="$temporary/apps/keepalived/sbin/keepalived"
 KEEPALIVED_CONFIG="$temporary/keepalived.conf"
 KEEPALIVED_SERVICE="keepalived.service"
 KEEPALIVED_VIP="10.165.0.110"
-PYTHON_BIN=true
+PYTHON_BIN="$TEST_PYTHON"
 prepare_keepalived_options
 [[ "$KEEPALIVED_BINARY" == "$temporary/apps/keepalived/sbin/keepalived" ]]
 '''
@@ -1916,13 +2204,18 @@ prepare_keepalived_options
             stderr=subprocess.PIPE,
             universal_newlines=True,
             check=False,
-            env=dict(os.environ, BASH_COMPAT="4.2"),
+            env=dict(os.environ, BASH_COMPAT="4.2", TEST_PYTHON=Path(sys.executable).as_posix()),
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_installer_empty_optional_arrays_are_safe_with_nounset(self):
         installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
         for name in ("MANAGED_CONFIG_DIRS", "MANAGED_STREAM_DIRS", "NGINX_LOG_DIRS", "all_managed_dirs"):
+            self.assertNotIn(
+                '${#' + name + '[@]}',
+                installer,
+                "Bash 4.2 treats an empty array length as an unbound variable under set -u",
+            )
             guarded = '${' + name + '[@]+"${' + name + '[@]}"}'
             self.assertIn(guarded, installer)
             bare = '${' + name + '[@]}'

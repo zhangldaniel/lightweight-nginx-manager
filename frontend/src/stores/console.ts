@@ -296,13 +296,20 @@ export const useConsoleStore = defineStore('console', () => {
               imported.failureMessages.slice(0, 2).join('；') ||
                 '已导入成功结果；失败原因可在“执行记录”中查看。',
             )
-          } else if (imported.configurations || imported.certificates) {
+          } else if (
+            imported.configurations ||
+            imported.certificates ||
+            imported.removedCertificatePaths
+          ) {
             notify(
               '节点清单已同步',
               'success',
               [
                 imported.configurations ? `${imported.configurations} 份配置` : '',
                 imported.certificates ? `${imported.certificates} 张证书` : '',
+                imported.removedCertificatePaths
+                  ? `移除 ${imported.removedCertificatePaths} 条失效证书路径`
+                  : '',
                 imported.skipped ? `跳过 ${imported.skipped} 项` : '',
                 imported.truncated ? '结果达到安全上限' : '',
               ]

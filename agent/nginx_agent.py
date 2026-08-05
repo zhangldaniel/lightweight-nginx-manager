@@ -2377,13 +2377,21 @@ class JobExecutor:
         certificates: List[Dict[str, Any]] = []
         skipped = 0
         truncated = False
+        scan_complete = True
         referenced_keys = self._referenced_certificate_keys()
         candidates: List[Path] = []
         seen = set()
         for root in self._allowed_certificate_roots:
             if not root.is_dir() or root.is_symlink():
+                skipped += 1
+                scan_complete = False
                 continue
-            for current_root, directory_names, file_names in os.walk(str(root), followlinks=False):
+            walk_errors: List[OSError] = []
+            for current_root, directory_names, file_names in os.walk(
+                str(root),
+                followlinks=False,
+                onerror=walk_errors.append,
+            ):
                 directory_names[:] = sorted(
                     name for name in directory_names
                     if not (Path(current_root) / name).is_symlink()
@@ -2399,8 +2407,14 @@ class JobExecutor:
                     if str(candidate) not in seen:
                         candidates.append(candidate)
                         seen.add(str(candidate))
+            if walk_errors:
+                skipped += len(walk_errors)
+                scan_complete = False
 
-        for certificate_path in sorted(candidates, key=lambda item: str(item)):
+        ordered_candidates = sorted(candidates, key=lambda item: str(item))
+        if len(ordered_candidates) > INVENTORY_MAX_FILES:
+            truncated = True
+        for certificate_path in ordered_candidates:
             if len(certificates) >= INVENTORY_MAX_FILES:
                 truncated = True
                 break
@@ -2438,6 +2452,10 @@ class JobExecutor:
         return {
             "certificates": certificates,
             "certificate_count": len(certificates),
+            "observed_certificate_paths": [
+                str(path) for path in ordered_candidates[:INVENTORY_MAX_FILES]
+            ],
+            "scan_complete": scan_complete,
             "skipped_count": skipped,
             "truncated": truncated,
         }
@@ -4176,6 +4194,8 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
         details = {
             "certificates": raw.get("certificates", []),
             "certificate_count": raw.get("certificate_count", 0),
+            "observed_certificate_paths": raw.get("observed_certificate_paths", []),
+            "scan_complete": bool(raw.get("scan_complete", False)),
             "skipped_count": raw.get("skipped_count", 0),
             "truncated": bool(raw.get("truncated", False)),
         }

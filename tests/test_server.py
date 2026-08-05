@@ -1795,6 +1795,11 @@ class ServerTestCase(unittest.TestCase):
                 "action": "certificate_inventory",
                 "details": {
                     "certificates": [valid, invalid],
+                    "observed_certificate_paths": [
+                        valid["certificate_path"],
+                        invalid["certificate_path"],
+                    ],
+                    "scan_complete": True,
                     "skipped_count": 1,
                     "truncated": False,
                 },
@@ -1810,8 +1815,13 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(2, inventory["skipped_count"])
         self.assertEqual(valid["private_key_path"], inventory["certificates"][0]["private_key_path"])
         self.assertEqual(valid["key_material_sha256"], inventory["certificates"][0]["key_material_sha256"])
+        self.assertTrue(inventory["scan_complete"])
+        self.assertEqual(
+            [valid["certificate_path"], invalid["certificate_path"]],
+            inventory["observed_certificate_paths"],
+        )
         self.assertNotIn("PRIVATE KEY", json.dumps(inventory))
-        self.assertNotIn("rejected.pem", json.dumps(inventory))
+        self.assertNotIn("rejected.pem", json.dumps(inventory["certificates"]))
 
     def test_certificate_payload_is_retained_for_lease_retry_then_redacted(self):
         enrolled = self.enroll()
