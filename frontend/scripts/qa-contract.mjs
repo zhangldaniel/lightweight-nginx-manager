@@ -10,11 +10,11 @@ const appSource = await readFile(resolve(root, 'src/App.vue'), 'utf8')
 const storeSource = await readFile(resolve(root, 'src/stores/console.ts'), 'utf8')
 const certificateSource = await readFile(resolve(root, 'src/views/CertificatesView.vue'), 'utf8')
 const fontAssets = {
-  'SmileySans-Oblique.woff2': '4895e7a5b72753b7d4bf090581fbc4375e0ec53484944f369a584588f1eeaf08',
-  'SarasaUiSC-Regular.ttf': '9f6c9e41b3d9cc982c7d57653f956aa23c896f6833d58862447a9a8c584a36dd',
-  'SarasaUiSC-SemiBold.ttf': '8e44ca2705bffe1ab341e413b381a1d065a9825a162eb7397010fed59a93c9dd',
-  'SmileySans-LICENSE.txt': '9401f4050f1b66c26b6ccdc8b0e14a3c1cc37aac122eda84386f25854a9bec72',
-  'SarasaGothic-LICENSE.txt': '32c932e0dbae4f6e6386964bbc2d04178707665a05ca65cf636241af13d50a53',
+  'IBMPlexSansSC-Regular.woff': '4fe05da7f352b98d34fc443ffe5eed25020755a851adf70af92c7d485f9049c6',
+  'IBMPlexSansSC-Medium.woff': '9dd35d1a4126864277a332a652c8484330a69f0843ebcd4a8917be215bf24a5f',
+  'IBMPlexSansSC-SemiBold.woff': '99ebffc1a4d460ecc9f3e88c3538631420457ddca62550bbbfd8ece6bcef30df',
+  'IBMPlexSansSC-Bold.woff': 'fef21d494aff15234b5162ddd8eaa40769763b2bd7025038f01bd4ab61253b85',
+  'IBMPlexSansSC-LICENSE.txt': '7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da',
 }
 const fontAssetsUnmodified = (
   await Promise.all(
@@ -33,8 +33,8 @@ const checks = [
   ['单文件输出', !/<script[^>]+src=|<link[^>]+rel=["']stylesheet/i.test(html)],
   ['无公网字体或静态资源', !/(?:src|href)=["']https?:\/\//i.test(html)],
   [
-    'Smiley Sans 与 Sarasa Gothic 原版字体及许可证已打包',
-    html.includes('Smiley Sans') && html.includes('Sarasa UI SC') && fontAssetsUnmodified,
+    'IBM Plex Sans SC 原版字体及许可证已打包',
+    html.includes('IBM Plex Sans SC') && fontAssetsUnmodified,
   ],
   ['Vue 应用入口存在', html.includes('id="app"')],
   ['站点管理能力已打包', html.includes('站点与配置')],

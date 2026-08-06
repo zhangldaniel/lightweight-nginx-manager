@@ -2,45 +2,47 @@
 @import '@fontsource/jetbrains-mono/latin-600.css';
 
 /*
- * Fonts are served by the control plane from the same origin so the console
- * keeps its typography in isolated management networks.
+ * IBM Plex Sans SC is served by the control plane from the same origin so
+ * typography stays consistent in isolated management networks.
  */
 @font-face {
-  font-family: "Sarasa UI SC";
-  src:
-    local("Sarasa UI SC"),
-    local("SarasaUiSC-Regular"),
-    url("/ui-assets/SarasaUiSC-Regular.ttf") format("truetype");
+  font-family: "IBM Plex Sans SC";
+  src: url("/ui-assets/IBMPlexSansSC-Regular.woff") format("woff");
   font-style: normal;
-  font-weight: 300 500;
+  font-weight: 400;
   font-display: swap;
 }
 
 @font-face {
-  font-family: "Sarasa UI SC";
-  src:
-    local("Sarasa UI SC SemiBold"),
-    local("SarasaUiSC-SemiBold"),
-    url("/ui-assets/SarasaUiSC-SemiBold.ttf") format("truetype");
+  font-family: "IBM Plex Sans SC";
+  src: url("/ui-assets/IBMPlexSansSC-Medium.woff") format("woff");
   font-style: normal;
-  font-weight: 501 900;
+  font-weight: 500;
   font-display: swap;
 }
 
 @font-face {
-  font-family: "Smiley Sans";
-  src: url("/ui-assets/SmileySans-Oblique.woff2") format("woff2");
-  font-style: oblique;
-  font-weight: 100 900;
+  font-family: "IBM Plex Sans SC";
+  src: url("/ui-assets/IBMPlexSansSC-SemiBold.woff") format("woff");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans SC";
+  src: url("/ui-assets/IBMPlexSansSC-Bold.woff") format("woff");
+  font-style: normal;
+  font-weight: 700;
   font-display: swap;
 }
 
 :root {
   color-scheme: light;
-  --font-sans: "Sarasa UI SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  --font-display: "Sarasa UI SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  --font-accent: "Smiley Sans", "Sarasa UI SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
-  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --font-sans: "IBM Plex Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-display: "IBM Plex Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-accent: "IBM Plex Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "IBM Plex Sans SC", monospace;
   --bg: #eff6ff;
   --surface: rgba(255, 255, 255, .82);
   --surface-soft: rgba(248, 251, 255, .72);
@@ -78,6 +80,7 @@
   --topbar: 58px;
   font-family: var(--font-sans);
   font-synthesis: none;
+  font-kerning: normal;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
@@ -490,7 +493,6 @@ pre {
   color: var(--text);
   font-family: var(--font-accent);
   font-size: 30px;
-  font-style: oblique;
   font-weight: 700;
   letter-spacing: -.015em;
   line-height: 1.15;
@@ -600,7 +602,6 @@ pre {
   color: #091d36;
   font-family: var(--font-accent);
   font-size: 27px;
-  font-style: oblique;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: -.01em;
@@ -954,6 +955,8 @@ pre {
 .code-panel,
 .log-output,
 .conf-editor {
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
   color: var(--code-text);
   background:
     linear-gradient(rgba(255, 255, 255, .018) 1px, transparent 1px),

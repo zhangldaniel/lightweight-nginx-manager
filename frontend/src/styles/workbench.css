@@ -289,7 +289,6 @@ body {
 .page-header h1 {
   font-family: var(--font-accent);
   font-size: clamp(28px, 2vw, 34px);
-  font-style: oblique;
   font-weight: 700;
   letter-spacing: -.015em;
   line-height: 1.15;
@@ -407,7 +406,6 @@ body {
   color: var(--text);
   font-family: var(--font-accent);
   font-size: 23px;
-  font-style: oblique;
   font-weight: 700;
   letter-spacing: -.01em;
 }
@@ -468,7 +466,6 @@ body {
   color: var(--sites-ink);
   font-family: var(--font-accent);
   font-size: clamp(32px, 2.25vw, 39px);
-  font-style: oblique;
   font-weight: 700;
   letter-spacing: -.015em;
   line-height: 1.08;
@@ -506,7 +503,6 @@ body {
 .page-sites .site-fact strong {
   color: var(--sites-ink);
   font: 700 27px/1 var(--font-accent);
-  font-style: oblique;
   font-variant-numeric: tabular-nums;
   letter-spacing: -.01em;
 }
@@ -1305,7 +1301,6 @@ body {
   color: var(--sites-ink);
   font-family: var(--font-accent);
   font-size: 29px;
-  font-style: oblique;
   font-weight: 700;
   letter-spacing: -.01em;
   line-height: 1;
@@ -2792,7 +2787,6 @@ body:has(.site-editor-modal) .toast-host {
   margin-top: 3px;
   font-family: var(--font-accent);
   font-size: 27px;
-  font-style: oblique;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: -.01em;

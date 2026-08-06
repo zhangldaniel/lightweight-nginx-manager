@@ -4,7 +4,7 @@
 
 每台 Nginx 主机安装一个主动连接 Server 的 Agent。Agent 只执行内置运维动作，不提供任意 Shell 入口。
 
-界面正文使用[更纱黑体 UI SC](frontend/public/ui-assets/SarasaGothic-LICENSE.txt)，标题和关键数字使用[得意黑](frontend/public/ui-assets/SmileySans-LICENSE.txt)。字体随 Server 同源提供，内网环境也能正常显示。
+界面统一使用 [IBM Plex Sans SC](frontend/public/ui-assets/IBMPlexSansSC-LICENSE.txt)，配置与日志使用 JetBrains Mono。字体随 Server 同源提供，内网环境也能正常显示。
 
 ## 界面
 

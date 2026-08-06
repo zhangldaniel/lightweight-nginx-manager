@@ -155,9 +155,10 @@ class ServerTestCase(unittest.TestCase):
         ui_index = ui_root / "index.html"
         ui_index.write_text("<!doctype html><title>test</title>", encoding="utf-8")
         font_payloads = {
-            "SmileySans-Oblique.woff2": b"test-woff2-font-payload",
-            "SarasaUiSC-Regular.ttf": b"test-regular-ttf-font-payload",
-            "SarasaUiSC-SemiBold.ttf": b"test-semibold-ttf-font-payload",
+            "IBMPlexSansSC-Regular.woff": b"test-regular-woff-font-payload",
+            "IBMPlexSansSC-Medium.woff": b"test-medium-woff-font-payload",
+            "IBMPlexSansSC-SemiBold.woff": b"test-semibold-woff-font-payload",
+            "IBMPlexSansSC-Bold.woff": b"test-bold-woff-font-payload",
         }
         for font_name, font_payload in font_payloads.items():
             (asset_root / font_name).write_bytes(font_payload)
@@ -174,9 +175,10 @@ class ServerTestCase(unittest.TestCase):
             self.assertIn("font-src 'self'", index.headers["content-security-policy"])
 
             expected_media_types = {
-                "SmileySans-Oblique.woff2": "font/woff2",
-                "SarasaUiSC-Regular.ttf": "font/ttf",
-                "SarasaUiSC-SemiBold.ttf": "font/ttf",
+                "IBMPlexSansSC-Regular.woff": "font/woff",
+                "IBMPlexSansSC-Medium.woff": "font/woff",
+                "IBMPlexSansSC-SemiBold.woff": "font/woff",
+                "IBMPlexSansSC-Bold.woff": "font/woff",
             }
             for font_name, font_payload in font_payloads.items():
                 font = ui_client.get("/ui-assets/" + font_name)
@@ -189,7 +191,7 @@ class ServerTestCase(unittest.TestCase):
             rejected = ui_client.get("/ui-assets/not-allowlisted.ttf")
             self.assertEqual(404, rejected.status_code, rejected.text)
 
-            for missing_name in ("SmileySans-Oblique.woff2", "SarasaUiSC-SemiBold.ttf"):
+            for missing_name in ("IBMPlexSansSC-Regular.woff", "IBMPlexSansSC-Bold.woff"):
                 (asset_root / missing_name).unlink()
                 missing = ui_client.get("/ui-assets/" + missing_name)
                 self.assertEqual(404, missing.status_code, missing.text)

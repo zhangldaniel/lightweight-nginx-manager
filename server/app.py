@@ -141,13 +141,15 @@ INVENTORY_MAX_FILE_BYTES = 256 * 1024
 INVENTORY_MAX_TOTAL_BYTES = 1024 * 1024
 UI_FONT_ASSETS = frozenset(
     {
-        "SmileySans-Oblique.woff2",
-        "SarasaUiSC-Regular.ttf",
-        "SarasaUiSC-SemiBold.ttf",
+        "IBMPlexSansSC-Regular.woff",
+        "IBMPlexSansSC-Medium.woff",
+        "IBMPlexSansSC-SemiBold.woff",
+        "IBMPlexSansSC-Bold.woff",
     }
 )
 UI_FONT_MEDIA_TYPES = {
     ".ttf": "font/ttf",
+    ".woff": "font/woff",
     ".woff2": "font/woff2",
 }
 
