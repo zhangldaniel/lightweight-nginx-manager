@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover - Windows development only
     pwd = None
 
 
-VERSION = "0.11.0"
+VERSION = "0.11.1"
 KEEPALIVED_CAPABILITIES = (
     "keepalived_inspect",
     "keepalived_validate",
@@ -298,6 +298,17 @@ def _keepalived_version_tuple(value: str) -> Optional[Tuple[int, int, int]]:
     return tuple(int(item) for item in matched.groups())
 
 
+def _keepalived_validation_failure_code(version: str, returncode: int) -> str:
+    """Classify only stable, non-sensitive Keepalived config-test exit codes."""
+    parsed = _keepalived_version_tuple(version)
+    if parsed is not None:
+        if (2, 1, 0) <= parsed < (2, 2, 0) and returncode == 5:
+            return "keepalived_script_security_required"
+        if parsed >= (2, 2, 0) and returncode == 6:
+            return "keepalived_script_security_required"
+    return "keepalived_config_test_failed"
+
+
 def _detect_keepalived_validation_support(configured_binary: Optional[str] = None) -> bool:
     binary = configured_binary or shutil.which("keepalived")
     if not binary:
@@ -333,6 +344,7 @@ FAILURE_CODES = {
     "config_policy_rejected",
     "certificate_validation_failed",
     "keepalived_config_test_failed",
+    "keepalived_script_security_required",
     "keepalived_validation_unavailable",
     "nginx_config_test_failed",
     "nginx_reload_failed",
@@ -515,7 +527,8 @@ def _failure_metadata(error: Any, action: str = "", status: str = "failed",
         elif code in {
             "permission_denied", "path_rejected", "concurrent_change",
             "config_policy_rejected", "certificate_validation_failed",
-            "keepalived_config_test_failed", "keepalived_validation_unavailable",
+            "keepalived_config_test_failed", "keepalived_script_security_required",
+            "keepalived_validation_unavailable",
         }:
             stage = "precheck"
         elif code == "nginx_config_test_failed":
@@ -2247,8 +2260,8 @@ class JobExecutor:
                 pass
         return observation
 
-    def _keepalived_validation_flag(self, binary: str) -> str:
-        version = _keepalived_version_tuple(self._keepalived_version(binary))
+    def _keepalived_validation_flag(self, binary: str, version_text: Optional[str] = None) -> str:
+        version = _keepalived_version_tuple(version_text or self._keepalived_version(binary))
         if version is None or version < (2, 0, 5):
             raise ActionError(
                 "configured Keepalived version cannot reliably validate configuration",
@@ -2292,7 +2305,8 @@ class JobExecutor:
             raise ActionError("keepalived_validate payload must be empty")
         config_path, config_data = self._keepalived_config_data()
         binary = self._keepalived_executable()
-        flag = self._keepalived_validation_flag(binary)
+        version = self._keepalived_version(binary)
+        flag = self._keepalived_validation_flag(binary, version)
         try:
             completed = subprocess.run(
                 [binary, "-f", str(config_path), flag],
@@ -2318,9 +2332,15 @@ class JobExecutor:
         if completed.returncode != 0:
             # Keepalived may echo arbitrary configuration tokens on failure.
             # Never persist or return its stdout/stderr.
+            failure_code = _keepalived_validation_failure_code(version, completed.returncode)
+            message = (
+                "Keepalived script security policy is required"
+                if failure_code == "keepalived_script_security_required"
+                else "Keepalived configuration validation failed"
+            )
             raise ActionError(
-                "Keepalived configuration validation failed",
-                failure_code="keepalived_config_test_failed",
+                message,
+                failure_code=failure_code,
                 failure_stage="precheck",
             )
         verified_path, verified_data = self._keepalived_config_data()
@@ -2335,7 +2355,7 @@ class JobExecutor:
             "source": "existing",
             "config_path": str(config_path),
             "keepalived_config_hash": hashlib.sha256(verified_data).hexdigest(),
-            "keepalived_version": self._keepalived_version(binary),
+            "keepalived_version": version,
         }
 
     def _action_inspect(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:

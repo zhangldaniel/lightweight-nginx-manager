@@ -117,6 +117,8 @@ curl -fsS http://localhost:51820/stub_status
 
 高可用页面只读取真实 VIP 归属、Keepalived 状态和脱敏的 VRRP 摘要，不会修改配置、启停 Keepalived 或主动漂移 VIP。
 
+配置里用了 `vrrp_script` 时，先确认检查脚本及其父目录不能被非 root 用户写入，再在 `global_defs` 中显式加入 `script_user root` 和 `enable_script_security`。否则 Keepalived 服务可能仍在运行，但“校验配置”会按安全问题报错；平台不会替你忽略或自动改写这项策略。
+
 ### LVS / IPVS 只读观测（可选）
 
 只有运行 Linux IPVS 的调度节点才需要加：

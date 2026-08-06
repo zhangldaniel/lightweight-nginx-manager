@@ -2239,7 +2239,7 @@ class ServerTestCase(unittest.TestCase):
                 "action": "keepalived_validate",
                 "error": "MUST-NOT-BE-STORED",
                 "details": {
-                    "failure_code": "keepalived_config_test_failed",
+                    "failure_code": "keepalived_script_security_required",
                     "failure_stage": "precheck",
                 },
             },
@@ -2248,7 +2248,7 @@ class ServerTestCase(unittest.TestCase):
         stored_failure = self.client.get(
             "/api/v1/admin/jobs?ids=" + failed_job_id, headers=self.admin_headers
         ).json()["items"][0]["result"]
-        self.assertEqual("keepalived_config_test_failed", stored_failure["failure_code"])
+        self.assertEqual("keepalived_script_security_required", stored_failure["failure_code"])
         self.assertEqual("precheck", stored_failure["failure_stage"])
         self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(stored_failure))
 

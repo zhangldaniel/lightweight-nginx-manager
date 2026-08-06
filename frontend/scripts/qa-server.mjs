@@ -482,24 +482,89 @@ const recordJobs = [
   },
 ]
 if (process.env.QA_HA_FAILURE === '1') {
-  recordJobs.unshift({
-    id: 'job-keepalived-validate-failed',
-    batch_id: 'batch-keepalived-validate-failed',
-    operation_id: null,
-    node_id: 'node-sh-01',
-    node_name: 'it-nginx-sh-01',
-    action: 'keepalived_validate',
-    status: 'failed',
-    created_at: minutesFromNow(-1),
-    expires_at: minutesFromNow(29),
-    claimed_at: minutesFromNow(-1),
-    completed_at: minutesFromNow(-1),
-    created_by: 'admin',
-    result: {
-      failure_code: 'keepalived_config_test_failed',
-      failure_stage: 'precheck',
+  recordJobs.unshift(
+    {
+      id: 'job-keepalived-validate-sh-new-success',
+      batch_id: 'batch-keepalived-validate-sh-new-success',
+      operation_id: null,
+      node_id: 'node-sh-01',
+      node_name: 'it-nginx-sh-01',
+      action: 'keepalived_validate',
+      status: 'succeeded',
+      created_at: minutesFromNow(-2),
+      expires_at: minutesFromNow(28),
+      claimed_at: minutesFromNow(-2),
+      completed_at: minutesFromNow(-2),
+      created_by: 'admin',
+      result: { valid: true, keepalived_config_hash: '11'.repeat(32) },
     },
-  })
+    {
+      id: 'job-keepalived-validate-sh-old-failure',
+      batch_id: 'batch-keepalived-validate-sh-old-failure',
+      operation_id: null,
+      node_id: 'node-sh-01',
+      node_name: 'it-nginx-sh-01',
+      action: 'keepalived_validate',
+      status: 'failed',
+      created_at: minutesFromNow(-4),
+      expires_at: minutesFromNow(26),
+      claimed_at: minutesFromNow(-4),
+      completed_at: minutesFromNow(-1),
+      created_by: 'admin',
+      result: {
+        failure_code: 'keepalived_config_test_failed',
+        failure_stage: 'precheck',
+      },
+    },
+    {
+      id: 'job-keepalived-validate-bj-new-failure',
+      batch_id: 'batch-keepalived-validate-bj-new-failure',
+      operation_id: null,
+      node_id: 'node-bj-01',
+      node_name: 'it-nginx-bj-01',
+      action: 'keepalived_validate',
+      status: 'failed',
+      created_at: minutesFromNow(-2),
+      expires_at: minutesFromNow(28),
+      claimed_at: minutesFromNow(-2),
+      completed_at: minutesFromNow(-2),
+      created_by: 'admin',
+      result: {
+        failure_code: 'keepalived_script_security_required',
+        failure_stage: 'precheck',
+      },
+    },
+    {
+      id: 'job-keepalived-validate-bj-retry-pending',
+      batch_id: 'batch-keepalived-validate-bj-retry-pending',
+      operation_id: null,
+      node_id: 'node-bj-01',
+      node_name: 'it-nginx-bj-01',
+      action: 'keepalived_validate',
+      status: 'queued',
+      created_at: minutesFromNow(-1),
+      expires_at: minutesFromNow(29),
+      claimed_at: null,
+      completed_at: null,
+      created_by: 'admin',
+      result: null,
+    },
+    {
+      id: 'job-keepalived-validate-bj-old-success',
+      batch_id: 'batch-keepalived-validate-bj-old-success',
+      operation_id: null,
+      node_id: 'node-bj-01',
+      node_name: 'it-nginx-bj-01',
+      action: 'keepalived_validate',
+      status: 'succeeded',
+      created_at: minutesFromNow(-4),
+      expires_at: minutesFromNow(26),
+      claimed_at: minutesFromNow(-4),
+      completed_at: minutesFromNow(-1),
+      created_by: 'admin',
+      result: { valid: true, keepalived_config_hash: '22'.repeat(32) },
+    },
+  )
 }
 
 const recordOperations = [
@@ -611,7 +676,18 @@ export const qaServer = createServer((request, response) => {
   }
   if (path === '/api/v1/admin/ui-state') return send(response, { revision: 1, state })
   if (path === '/api/v1/admin/nodes') return send(response, { items: nodes })
-  if (path === '/api/v1/admin/jobs') return send(response, { items: recordJobs })
+  if (path === '/api/v1/admin/jobs') {
+    const action = requestUrl.searchParams.get('action')
+    const items = action ? recordJobs.filter((job) => job.action === action) : recordJobs
+    if (process.env.QA_HA_FAILURE === '1' && !action) {
+      return send(response, {
+        items: items.map((job) => job.id === 'job-keepalived-validate-bj-new-failure'
+          ? { ...job, status: 'queued', claimed_at: null, completed_at: null, result: null }
+          : job),
+      })
+    }
+    return send(response, { items })
+  }
   if (path === '/api/v1/admin/operations') {
     return send(response, {
       items: requestUrl.searchParams.has('reconciliation_status') ? [] : recordOperations,

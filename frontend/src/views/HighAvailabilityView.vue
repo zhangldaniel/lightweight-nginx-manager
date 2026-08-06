@@ -35,9 +35,36 @@ const loadingHistory = ref(false)
 const historicalJobs = ref<JobRecord[]>([])
 let pollTimer: number | undefined
 
+const jobStatusRanks: Record<string, number> = {
+  queued: 0,
+  claimed: 1,
+  running: 2,
+  succeeded: 3,
+  failed: 3,
+  expired: 3,
+}
+
+function mergeJobSnapshot(current: JobRecord, incoming: JobRecord) {
+  const currentRank = jobStatusRanks[current.status] ?? -1
+  const incomingRank = jobStatusRanks[incoming.status] ?? -1
+  if (incomingRank < currentRank) return current
+  if (incomingRank > currentRank) return incoming
+  return {
+    ...current,
+    ...incoming,
+    status: currentRank === 3 ? current.status : incoming.status,
+    claimed_at: incoming.claimed_at || current.claimed_at,
+    completed_at: incoming.completed_at || current.completed_at,
+    result: incoming.result || current.result,
+  }
+}
+
 const availableJobs = computed(() => {
   const jobs = new Map<string, JobRecord>()
-  for (const job of [...historicalJobs.value, ...store.jobs]) jobs.set(job.id, job)
+  for (const job of [...historicalJobs.value, ...store.jobs]) {
+    const current = jobs.get(job.id)
+    jobs.set(job.id, current ? mergeJobSnapshot(current, job) : job)
+  }
   return [...jobs.values()].sort((left, right) => jobTime(right) - jobTime(left))
 })
 
@@ -108,8 +135,22 @@ function jobTime(job: JobRecord) {
   return Number.isFinite(value) ? value : 0
 }
 
-function latestJob(nodeId: string, action: KeepalivedJobAction) {
-  return availableJobs.value.find((job) => job.node_id === nodeId && job.action === action) || null
+function jobCreatedTime(job: JobRecord) {
+  const value = Date.parse(job.created_at)
+  return Number.isFinite(value) ? value : 0
+}
+
+function jobsFor(nodeId: string, action: KeepalivedJobAction) {
+  return availableJobs.value
+    .filter((job) => job.node_id === nodeId && job.action === action)
+    .sort((left, right) =>
+      jobCreatedTime(right) - jobCreatedTime(left) || jobTime(right) - jobTime(left),
+    )
+}
+
+function latestTerminalJob(nodeId: string, action: KeepalivedJobAction) {
+  return jobsFor(nodeId, action)
+    .find((job) => ['succeeded', 'failed', 'expired'].includes(job.status)) || null
 }
 
 function jobDetails(job: JobRecord | null, key: KeepalivedJobAction) {
@@ -129,8 +170,8 @@ function boolOrNull(value: unknown) {
 }
 
 function observation(node: NodeRecord | null) {
-  const inspectJob = node ? latestJob(node.id, 'keepalived_inspect') : null
-  const validateJob = node ? latestJob(node.id, 'keepalived_validate') : null
+  const inspectJob = node ? latestTerminalJob(node.id, 'keepalived_inspect') : null
+  const validateJob = node ? latestTerminalJob(node.id, 'keepalived_validate') : null
   const facts = asRecord(node?.facts.keepalived)
   const inspected = inspectJob?.status === 'succeeded'
     ? jobDetails(inspectJob, 'keepalived_inspect')
@@ -339,16 +380,19 @@ const partialMessage = computed(() => {
 const latestFailedJob = computed(() =>
   targetNodeIds.value
     .flatMap((nodeId) => [
-      latestJob(nodeId, 'keepalived_inspect'),
-      latestJob(nodeId, 'keepalived_validate'),
+      latestTerminalJob(nodeId, 'keepalived_inspect'),
+      latestTerminalJob(nodeId, 'keepalived_validate'),
     ])
     .filter((job): job is JobRecord => Boolean(job))
-    .sort((left, right) => jobTime(right) - jobTime(left))
+    .sort((left, right) =>
+      jobCreatedTime(right) - jobCreatedTime(left) || jobTime(right) - jobTime(left),
+    )
     .find((job) => ['failed', 'expired'].includes(job.status)) || null,
 )
 
 const failureReasonLabels: Record<string, string> = {
   keepalived_config_test_failed: 'Keepalived 配置校验未通过',
+  keepalived_script_security_required: '已配置检查脚本，但未启用 Keepalived 脚本安全策略；请先确认脚本路径权限，再启用 enable_script_security',
   keepalived_validation_unavailable: '当前 Keepalived 不支持安全配置校验',
   command_timeout: 'Keepalived 配置校验超时',
   concurrent_change: '校验期间配置已发生变化',

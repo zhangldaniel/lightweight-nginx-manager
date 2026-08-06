@@ -59,6 +59,12 @@ try {
   const visibleHtml = html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+  if (visibleHtml.includes('it-nginx-sh-01 的配置校验未完成')) {
+    throw new Error('HA page must clear an older failure after a newer successful validation')
+  }
+  if (!visibleHtml.includes('it-nginx-bj-01 的配置校验未完成')) {
+    throw new Error('HA page must preserve a terminal historical job over a stale queued snapshot')
+  }
   const required = [
     '高可用',
     '192.0.2.110',
@@ -72,7 +78,7 @@ try {
     '校验配置',
     '配置一致性',
     '观测边界',
-    'Keepalived 配置校验未通过',
+    '已配置检查脚本，但未启用 Keepalived 脚本安全策略',
   ]
   for (const text of required) {
     if (!visibleHtml.includes(text)) throw new Error(`HA page is missing: ${text}`)

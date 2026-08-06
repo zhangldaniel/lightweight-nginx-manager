@@ -81,6 +81,7 @@ FAILURE_CODES = {
     "config_policy_rejected",
     "certificate_validation_failed",
     "keepalived_config_test_failed",
+    "keepalived_script_security_required",
     "keepalived_validation_unavailable",
     "nginx_config_test_failed",
     "nginx_reload_failed",

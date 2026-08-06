@@ -244,6 +244,7 @@ class AgentTestCase(unittest.TestCase):
         with (
             mock.patch.object(executor, "_keepalived_executable", return_value="/usr/sbin/keepalived"),
             mock.patch.object(executor, "_keepalived_validation_flag", return_value="--config-test"),
+            mock.patch.object(executor, "_keepalived_version", return_value="2.2.8"),
             mock.patch.object(agent.subprocess, "run", return_value=failed_command),
         ):
             failed = executor.execute(self.job("job-keepalived-invalid", "keepalived_validate", {}))
@@ -299,6 +300,48 @@ class AgentTestCase(unittest.TestCase):
                 successful_executor._keepalived_validation_flag("/usr/sbin/keepalived")
         self.assertEqual("keepalived_validation_unavailable", raised.exception.failure_code)
         self.assertEqual("precheck", raised.exception.failure_stage)
+
+    def test_keepalived_validate_classifies_script_security_exit_by_version_without_output(self):
+        config_path = Path(self.temporary.name) / "keepalived.conf"
+        config_path.write_text(
+            'vrrp_script chk_nginx { script "/apps/chk_nginx.sh" }\n',
+            encoding="utf-8",
+        )
+        settings = self.keepalived_settings(config_path)
+        jobs_path = self.state / "keepalived-security-validation-jobs.json"
+        executor = agent.JobExecutor(settings, agent.JobStore(jobs_path))
+        secret = "auth_pass must-not-leak"
+
+        cases = (
+            ("2.1.5", 5, "keepalived_script_security_required"),
+            ("2.1.5", 4, "keepalived_config_test_failed"),
+            ("2.2.0", 6, "keepalived_script_security_required"),
+            ("2.2.8", 5, "keepalived_config_test_failed"),
+            ("2.0.5", 1, "keepalived_config_test_failed"),
+        )
+        for index, (version, returncode, expected_code) in enumerate(cases):
+            failed_command = subprocess.CompletedProcess(
+                ["keepalived"],
+                returncode,
+                stdout=("config " + secret).encode("utf-8"),
+                stderr=("diagnostic " + secret).encode("utf-8"),
+            )
+            with (
+                mock.patch.object(executor, "_keepalived_executable", return_value="/usr/sbin/keepalived"),
+                mock.patch.object(executor, "_keepalived_validation_flag", return_value="--config-test"),
+                mock.patch.object(executor, "_keepalived_version", return_value=version),
+                mock.patch.object(agent.subprocess, "run", return_value=failed_command),
+            ):
+                failed = executor.execute(
+                    self.job("job-keepalived-security-{}".format(index), "keepalived_validate", {})
+                )
+
+            self.assertEqual("failed", failed["status"])
+            self.assertEqual(expected_code, failed["failure_code"])
+            self.assertEqual("precheck", failed["failure_stage"])
+            self.assertNotIn(secret, json.dumps(failed))
+
+        self.assertNotIn(secret, jobs_path.read_text(encoding="utf-8"))
 
     def test_keepalived_summary_ignores_both_comment_styles_and_marks_includes_partial(self):
         summary = agent._keepalived_config_summary(
