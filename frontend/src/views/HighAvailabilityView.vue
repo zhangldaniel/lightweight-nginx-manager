@@ -33,6 +33,7 @@ const pageError = ref('')
 const historyError = ref('')
 const loadingHistory = ref(false)
 const historicalJobs = ref<JobRecord[]>([])
+const currentCheckJobIds = ref<string[]>([])
 let pollTimer: number | undefined
 
 const jobStatusRanks: Record<string, number> = {
@@ -377,12 +378,9 @@ const partialMessage = computed(() => {
   return ''
 })
 
-const latestFailedJob = computed(() =>
-  targetNodeIds.value
-    .flatMap((nodeId) => [
-      latestTerminalJob(nodeId, 'keepalived_inspect'),
-      latestTerminalJob(nodeId, 'keepalived_validate'),
-    ])
+const currentFailedJob = computed(() =>
+  currentCheckJobIds.value
+    .map((jobId) => availableJobs.value.find((job) => job.id === jobId) || null)
     .filter((job): job is JobRecord => Boolean(job))
     .sort((left, right) =>
       jobCreatedTime(right) - jobCreatedTime(left) || jobTime(right) - jobTime(left),
@@ -402,17 +400,29 @@ const failureReasonLabels: Record<string, string> = {
   job_failed: 'Agent 未提供可公开的具体失败分类，请查看执行记录',
 }
 
-const operationError = computed(() => {
-  if (pageError.value) return pageError.value
-  const job = latestFailedJob.value
-  if (!job) return historyError.value
+const operationNotice = computed(() => {
+  if (pageError.value) {
+    return { title: '高可用检查存在异常', message: pageError.value, tone: 'danger' as const }
+  }
+  const job = currentFailedJob.value
+  if (!job) {
+    return historyError.value
+      ? { title: '高可用记录读取异常', message: historyError.value, tone: 'danger' as const }
+      : null
+  }
   const result = asRecord(job.result)
   const node = store.nodes.find((item) => item.id === job.node_id)
-  const action = job.action === 'keepalived_validate' ? '配置校验' : '状态检查'
+  const isValidation = job.action === 'keepalived_validate'
+  const action = isValidation ? '配置校验' : '状态检查'
   const failureCode = String(result.failure_code || '')
   const reason = failureReasonLabels[failureCode]
     || String(result.failure_stage || (job.status === 'expired' ? '任务已过期' : 'Agent 返回失败'))
-  return `${node?.node_name || job.node_name || job.node_id} 的${action}未完成：${reason}`
+  const runtimeHealthy = isValidation && groupHealth.value.tone === 'success'
+  return {
+    title: runtimeHealthy ? '配置校验需要处理' : '高可用检查存在异常',
+    message: `${node?.node_name || job.node_name || job.node_id} 的${action}未完成：${reason}${runtimeHealthy ? '；当前 VIP 与主备状态正常' : ''}`,
+    tone: runtimeHealthy ? 'partial' as const : 'danger' as const,
+  }
 })
 
 function roleTone(role: KeepalivedRole): Tone {
@@ -503,9 +513,11 @@ function schedulePoll(remaining = 8) {
 
 async function runCheck(action: KeepalivedJobAction) {
   pageError.value = ''
+  currentCheckJobIds.value = []
   busyAction.value = action
   try {
-    await store.runHighAvailabilityCheck(eligibleNodeIds(action), action)
+    const response = await store.runHighAvailabilityCheck(eligibleNodeIds(action), action)
+    currentCheckJobIds.value = response.jobs.map((job) => job.id)
     await loadHighAvailabilityJobs(true)
     schedulePoll()
   } catch (error) {
@@ -553,9 +565,13 @@ onBeforeUnmount(() => {
       </div>
     </PageHeader>
 
-    <div v-if="operationError" class="ha-notice danger" role="alert">
+    <div
+      v-if="operationNotice"
+      :class="['ha-notice', operationNotice.tone]"
+      :role="operationNotice.tone === 'danger' ? 'alert' : 'status'"
+    >
       <AlertTriangle :size="18" aria-hidden="true" />
-      <div><strong>高可用检查存在异常</strong><span>{{ operationError }}</span></div>
+      <div><strong>{{ operationNotice.title }}</strong><span>{{ operationNotice.message }}</span></div>
     </div>
     <div v-if="partialMessage" class="ha-notice partial" role="status">
       <Activity :size="18" aria-hidden="true" />
