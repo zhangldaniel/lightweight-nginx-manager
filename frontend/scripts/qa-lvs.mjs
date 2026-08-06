@@ -1,8 +1,7 @@
 import { spawn } from 'node:child_process'
 import { access } from 'node:fs/promises'
 
-process.env.QA_PORT ||= '4192'
-process.env.QA_HA_FAILURE = '1'
+process.env.QA_PORT ||= '4194'
 const port = Number(process.env.QA_PORT)
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error(`Invalid QA_PORT: ${process.env.QA_PORT}`)
@@ -33,9 +32,9 @@ function renderedHtml() {
       [
         '--headless=new',
         '--disable-gpu',
-        '--virtual-time-budget=2200',
+        '--virtual-time-budget=2600',
         '--dump-dom',
-        `http://127.0.0.1:${port}/#/high-availability`,
+        `http://127.0.0.1:${port}/#/lvs`,
       ],
       { windowsHide: true },
     )
@@ -60,27 +59,29 @@ try {
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
   const required = [
-    '高可用',
-    '192.0.2.110',
-    '192.0.2.108',
-    '192.0.2.111',
-    'MASTER',
-    'BACKUP',
-    'FAULT',
-    'UNKNOWN',
-    '刷新状态',
-    '校验配置',
-    '配置一致性',
-    '观测边界',
-    'Keepalived 配置校验未通过',
+    'LVS',
+    '只读观测',
+    'Virtual Services',
+    'Backend Pools',
+    'Pool Members',
+    '192.0.2.110:443',
+    '192.0.2.108:53',
+    '配置漂移',
+    '已停用',
+    '健康状态需由外部 Monitor 证明',
   ]
   for (const text of required) {
-    if (!visibleHtml.includes(text)) throw new Error(`HA page is missing: ${text}`)
+    if (!visibleHtml.includes(text)) throw new Error(`LVS page is missing: ${text}`)
   }
-  if (visibleHtml.includes('尚未匹配')) throw new Error('HA page must bind nodes from Agent facts')
-  if (visibleHtml.includes('10.165.0.110')) throw new Error('HA page must not use a hard-coded VIP')
-  if (visibleHtml.includes('强制切换')) throw new Error('HA page must not expose forced failover')
-  console.log('high-availability page contract: ok')
+  const forbiddenButtons = ['修改权重', '删除成员', '新增虚拟服务', '执行 ipvsadm']
+  const buttonText = [...visibleHtml.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/gi)]
+    .map((match) => match[1].replace(/<[^>]+>/g, '').trim())
+  for (const text of forbiddenButtons) {
+    if (buttonText.some((label) => label.includes(text))) {
+      throw new Error(`LVS page exposes a write action: ${text}`)
+    }
+  }
+  console.log('lvs read-only page contract: ok')
 } finally {
   await new Promise((resolve) => qaServer.close(resolve))
 }

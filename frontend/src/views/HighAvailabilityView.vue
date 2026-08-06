@@ -347,6 +347,17 @@ const latestFailedJob = computed(() =>
     .find((job) => ['failed', 'expired'].includes(job.status)) || null,
 )
 
+const failureReasonLabels: Record<string, string> = {
+  keepalived_config_test_failed: 'Keepalived 配置校验未通过',
+  keepalived_validation_unavailable: '当前 Keepalived 不支持安全配置校验',
+  command_timeout: 'Keepalived 配置校验超时',
+  concurrent_change: '校验期间配置已发生变化',
+  helper_unavailable: 'Agent 特权 Helper 不可用',
+  permission_denied: 'Agent 没有读取或执行权限',
+  job_expired: '任务已过期',
+  job_failed: 'Agent 未提供可公开的具体失败分类，请查看执行记录',
+}
+
 const operationError = computed(() => {
   if (pageError.value) return pageError.value
   const job = latestFailedJob.value
@@ -354,7 +365,9 @@ const operationError = computed(() => {
   const result = asRecord(job.result)
   const node = store.nodes.find((item) => item.id === job.node_id)
   const action = job.action === 'keepalived_validate' ? '配置校验' : '状态检查'
-  const reason = String(result.failure_code || result.failure_stage || (job.status === 'expired' ? '任务已过期' : 'Agent 返回失败'))
+  const failureCode = String(result.failure_code || '')
+  const reason = failureReasonLabels[failureCode]
+    || String(result.failure_stage || (job.status === 'expired' ? '任务已过期' : 'Agent 返回失败'))
   return `${node?.node_name || job.node_name || job.node_id} 的${action}未完成：${reason}`
 })
 

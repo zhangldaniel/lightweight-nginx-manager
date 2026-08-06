@@ -43,6 +43,8 @@ HTTP 管理网只有在安装时显式添加 `--allow-plaintext-log-stream` 才�
 
 Keepalived 最短只要 `--keepalived-vip <共享VIP>`；安装器默认读取 `/etc/keepalived/keepalived.conf` 并检查 `keepalived.service`。自定义安装目录再加 `--keepalived-binary /绝对路径/keepalived`。VIP 相同的 Agent 会自动组成高可用组；多网卡节点可用 `--node-ip 本机IP`（等价于 `--labels ha_ip=本机IP`）明确展示地址。Agent 只上报服务状态、VIP 归属和脱敏的 VRRP 摘要，不回传配置原文或 `auth_pass`，也不提供强制主备切换。
 
+LVS 调度节点可在完整安装命令中添加 `--enable-lvs-observer`。启用后 Agent 只读取 `/proc/net/ip_vs` 和 `/proc/net/ip_vs_stats`，并上报有数量和大小限制的结构化快照；不会执行 `ipvsadm`，也不会修改 IPVS 规则。该开关不依赖 Keepalived；仅有 VRRP 主备但没有 IPVS 表的 Nginx 节点不必启用。
+
 `config_apply.expected_sha256` 支持真实 SHA-256、`missing` 和 `present`。`missing` 只允许新建，文件已存在即拒绝；`present` 只允许替换，文件不存在即拒绝，并在结果中返回替换前 Hash。这样控制端可以把同一份配置安全复制到不同节点各自的托管配置目录。
 
 `config_delete` 只接受配置文件当前的精确 SHA-256，不接受 `present` 或盲删。它只可删除托管配置目录内的 `.conf`，删除后固定执行 `nginx -t` 和 reload；失败或掉电时使用持久化事务恢复原文件。此动作需要 Agent 0.4.0 或更高版本。
@@ -53,7 +55,8 @@ Keepalived 最短只要 `--keepalived-vip <共享VIP>`；安装器默认读取 `
 ## 安装器速记
 
 - `--nginx-prefix /apps/nginx`：自动派生常见 `/apps/nginx` 路径；配合 `--manage-stream` 同时纳管 `conf.d` 的 `*.stream`。
-- `--upgrade`：单独使用时只更新 Agent 程序，保留原有配置、身份和 systemd 服务；修改路径、监控、Keepalived 或权限时仍需完整安装命令。
+- `--enable-lvs-observer`：只读查看宿主机 IPVS 表；不安装模块、不执行 `ipvsadm`、不修改规则。
+- `--upgrade`：单独使用时只更新 Agent 程序，保留原有配置、身份和 systemd 服务；修改路径、监控、Keepalived、LVS 观测或权限时仍需完整安装命令。
 - 已有本机身份时改 `--node-name` 不会自动创建新节点。改名或修复重名请完整重装并加 `--force-enroll`，然后在 Web 批准。
 - `--node-name` 必须全局唯一；两台机器复用同名可能替换旧节点。错绑时先修复占错名称的机器，再让原机器重新接入。
 - 多行命令的 `\` 后面不能再跟空格或任何字符。

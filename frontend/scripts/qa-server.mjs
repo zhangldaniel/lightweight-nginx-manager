@@ -27,6 +27,7 @@ const nodes = [
       'log_stream_v1',
       'keepalived_inspect',
       'keepalived_validate',
+      'ipvs_observer_v1',
     ],
     facts: {
       nginx_config: '/apps/nginx/conf/nginx.conf',
@@ -56,6 +57,50 @@ const nodes = [
             unicast_peers: ['192.0.2.111'],
             virtual_ips: ['192.0.2.110'],
           }],
+        },
+      },
+      ipvs: {
+        available: true,
+        source: 'procfs',
+        version: '1.2.1',
+        service_count: 2,
+        destination_count: 4,
+        services: [
+          {
+            id: 'tcp-192-0-2-110-443',
+            kind: 'address',
+            protocol: 'TCP',
+            address: '192.0.2.110',
+            port: 443,
+            scheduler: 'wrr',
+            one_packet: false,
+            persistence_seconds: 300,
+            active_connections: 28,
+            inactive_connections: 76,
+            destinations: [
+              { address: '192.0.2.108', port: 8443, forwarding: 'dr', weight: 100, active_connections: 18, inactive_connections: 42 },
+              { address: '192.0.2.111', port: 8443, forwarding: 'dr', weight: 100, active_connections: 10, inactive_connections: 34 },
+            ],
+          },
+          {
+            id: 'udp-192-0-2-110-53',
+            kind: 'address',
+            protocol: 'UDP',
+            address: '192.0.2.110',
+            port: 53,
+            scheduler: 'rr',
+            one_packet: true,
+            active_connections: 2,
+            inactive_connections: 9,
+            destinations: [
+              { address: '192.0.2.108', port: 53, forwarding: 'nat', weight: 100, active_connections: 1, inactive_connections: 5 },
+              { address: '192.0.2.111', port: 53, forwarding: 'nat', weight: 0, active_connections: 1, inactive_connections: 4 },
+            ],
+          },
+        ],
+        stats: {
+          totals: { connections: 120540, in_packets: 802340, out_packets: 791022, in_bytes: 482300100, out_bytes: 920331440 },
+          rates: { connections_per_second: 36, in_packets_per_second: 420, out_packets_per_second: 408, in_bytes_per_second: 285000, out_bytes_per_second: 622000 },
         },
       },
       config_entries: [
@@ -106,6 +151,7 @@ const nodes = [
       'stub_status_v1',
       'keepalived_inspect',
       'keepalived_validate',
+      'ipvs_observer_v1',
     ],
     facts: {
       nginx_config: '/apps/nginx/conf/nginx.conf',
@@ -132,6 +178,50 @@ const nodes = [
             unicast_peers: ['192.0.2.108'],
             virtual_ips: ['192.0.2.110'],
           }],
+        },
+      },
+      ipvs: {
+        available: true,
+        source: 'procfs',
+        version: '1.2.1',
+        service_count: 2,
+        destination_count: 4,
+        services: [
+          {
+            id: 'tcp-192-0-2-110-443',
+            kind: 'address',
+            protocol: 'TCP',
+            address: '192.0.2.110',
+            port: 443,
+            scheduler: 'wrr',
+            one_packet: false,
+            persistence_seconds: 300,
+            active_connections: 0,
+            inactive_connections: 0,
+            destinations: [
+              { address: '192.0.2.108', port: 8443, forwarding: 'dr', weight: 100, active_connections: 0, inactive_connections: 0 },
+              { address: '192.0.2.111', port: 8443, forwarding: 'dr', weight: 80, active_connections: 0, inactive_connections: 0 },
+            ],
+          },
+          {
+            id: 'udp-192-0-2-110-53',
+            kind: 'address',
+            protocol: 'UDP',
+            address: '192.0.2.110',
+            port: 53,
+            scheduler: 'rr',
+            one_packet: true,
+            active_connections: 0,
+            inactive_connections: 0,
+            destinations: [
+              { address: '192.0.2.108', port: 53, forwarding: 'nat', weight: 100, active_connections: 0, inactive_connections: 0 },
+              { address: '192.0.2.111', port: 53, forwarding: 'nat', weight: 0, active_connections: 0, inactive_connections: 0 },
+            ],
+          },
+        ],
+        stats: {
+          totals: { connections: 120120, in_packets: 801100, out_packets: 790210, in_bytes: 481800100, out_bytes: 919700200 },
+          rates: { connections_per_second: 0, in_packets_per_second: 0, out_packets_per_second: 0, in_bytes_per_second: 0, out_bytes_per_second: 0 },
         },
       },
       config_entries: [
@@ -391,6 +481,26 @@ const recordJobs = [
     result: { summary: 'Agent 未在任务有效期内领取扫描任务' },
   },
 ]
+if (process.env.QA_HA_FAILURE === '1') {
+  recordJobs.unshift({
+    id: 'job-keepalived-validate-failed',
+    batch_id: 'batch-keepalived-validate-failed',
+    operation_id: null,
+    node_id: 'node-sh-01',
+    node_name: 'it-nginx-sh-01',
+    action: 'keepalived_validate',
+    status: 'failed',
+    created_at: minutesFromNow(-1),
+    expires_at: minutesFromNow(29),
+    claimed_at: minutesFromNow(-1),
+    completed_at: minutesFromNow(-1),
+    created_by: 'admin',
+    result: {
+      failure_code: 'keepalived_config_test_failed',
+      failure_stage: 'precheck',
+    },
+  })
+}
 
 const recordOperations = [
   {

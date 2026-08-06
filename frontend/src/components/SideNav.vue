@@ -7,13 +7,16 @@ import {
   PanelsTopLeft,
   ServerCog,
   ShieldCheck,
+  Waypoints,
 } from '@lucide/vue'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useConsoleStore } from '../stores/console'
+import { buildLvsOverview } from '../utils/ipvs'
 
 const route = useRoute()
 const store = useConsoleStore()
+const lvs = computed(() => buildLvsOverview(store.nodes))
 
 const items = computed(() => [
   { to: '/sites', label: '站点与配置', icon: PanelsTopLeft, count: store.sites.length },
@@ -28,6 +31,13 @@ const items = computed(() => [
   { to: '/logs', label: '实时日志', icon: FileTerminal },
   { to: '/monitoring', label: '运行监控', icon: Gauge, alert: store.unhealthyCount > 0 },
   { to: '/high-availability', label: '高可用', icon: Network },
+  {
+    to: '/lvs',
+    label: 'LVS',
+    icon: Waypoints,
+    count: lvs.value.virtualServiceCount,
+    alert: lvs.value.driftCount > 0 || lvs.value.unavailableNodes.length > 0,
+  },
   { to: '/records', label: '执行记录', icon: History, count: store.jobs.length },
 ])
 </script>

@@ -96,8 +96,199 @@ NGINX_TOKEN_RE = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{};]|[^\s{}
 KEEPALIVED_TOKEN_RE = re.compile(
     r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{}\n]|[^\s{}\n]+'''
 )
+IPVS_TABLE_PATH = "/proc/net/ip_vs"
+IPVS_STATS_PATH = "/proc/net/ip_vs_stats"
+IPVS_MAX_BYTES = 1024 * 1024
+IPVS_STATS_MAX_BYTES = 64 * 1024
+IPVS_MAX_SERVICES = 128
+IPVS_MAX_DESTINATIONS = 1024
+IPVS_PROTOCOLS = {"TCP", "UDP", "SCTP"}
+IPVS_FORWARDING = {
+    "Masq": "nat",
+    "Route": "dr",
+    "Tunnel": "tunnel",
+    "Local": "local",
+    "Bypass": "bypass",
+}
 LOG = logging.getLogger("nginx-manager-agent")
 _THREAD_LOCK = threading.RLock()
+
+
+def _ipvs_endpoint(value: str) -> Tuple[str, int]:
+    """Decode the address/hex-port representation exported by /proc/net/ip_vs."""
+    ipv6 = re.fullmatch(r"\[([^\]]+)\]:([0-9A-Fa-f]{4})", value)
+    if ipv6:
+        return str(ipaddress.ip_address(ipv6.group(1))), int(ipv6.group(2), 16)
+    ipv4 = re.fullmatch(r"([0-9A-Fa-f]{8}):([0-9A-Fa-f]{4})", value)
+    if ipv4:
+        return str(ipaddress.IPv4Address(int(ipv4.group(1), 16))), int(ipv4.group(2), 16)
+    raise ValueError("invalid IPVS endpoint")
+
+
+def _ipvs_service_id(service: Dict[str, Any]) -> str:
+    if service.get("kind") == "fwmark":
+        identity = "fwmark\0{}".format(service.get("fwmark", 0))
+    else:
+        identity = "{}\0{}\0{}".format(
+            service.get("protocol", ""), service.get("address", ""), service.get("port", 0)
+        )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
+def _parse_ipvs_table(text: str) -> Dict[str, Any]:
+    """Parse the bounded procfs service table without retaining raw kernel output."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    version = ""
+    services: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+    destinations = 0
+    parse_errors = 0
+    truncated = False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        header = re.fullmatch(r"IP Virtual Server version ([0-9]+\.[0-9]+\.[0-9]+) \(size=[0-9]+\)", line)
+        if header:
+            version = header.group(1)
+            continue
+        if line.startswith("Prot LocalAddress:Port") or line.startswith("-> RemoteAddress:Port"):
+            continue
+
+        destination = re.fullmatch(
+            r"->\s+(\S+)\s+([A-Za-z]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)", line
+        )
+        if destination:
+            if current is None:
+                parse_errors += 1
+                continue
+            if destinations >= IPVS_MAX_DESTINATIONS:
+                truncated = True
+                continue
+            try:
+                address, port = _ipvs_endpoint(destination.group(1))
+                weight = int(destination.group(3))
+                active = int(destination.group(4))
+                inactive = int(destination.group(5))
+            except (ValueError, OverflowError):
+                parse_errors += 1
+                continue
+            if any(value < 0 or value > 0x7FFFFFFFFFFFFFFF for value in (weight, active, inactive)):
+                parse_errors += 1
+                continue
+            current["destinations"].append({
+                "address": address,
+                "port": port,
+                "forwarding": IPVS_FORWARDING.get(destination.group(2), "unknown"),
+                "weight": weight,
+                "active_connections": active,
+                "inactive_connections": inactive,
+            })
+            destinations += 1
+            continue
+
+        fields = line.split()
+        service: Optional[Dict[str, Any]] = None
+        try:
+            if len(fields) >= 3 and fields[0] in IPVS_PROTOCOLS:
+                address, port = _ipvs_endpoint(fields[1])
+                service = {
+                    "kind": "address",
+                    "protocol": fields[0],
+                    "address": address,
+                    "port": port,
+                    "scheduler": fields[2],
+                    "destinations": [],
+                }
+                flags = fields[3:]
+            elif len(fields) >= 3 and fields[0] == "FWM" and re.fullmatch(r"[0-9A-Fa-f]{1,8}", fields[1]):
+                service = {
+                    "kind": "fwmark",
+                    "protocol": "FWM",
+                    "fwmark": int(fields[1], 16),
+                    "scheduler": fields[2],
+                    "destinations": [],
+                }
+                flags = fields[3:]
+            else:
+                parse_errors += 1
+                current = None
+                continue
+        except (ValueError, OverflowError):
+            parse_errors += 1
+            current = None
+            continue
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", str(service["scheduler"])):
+            parse_errors += 1
+            current = None
+            continue
+        service["one_packet"] = "ops" in flags
+        if "persistent" in flags:
+            index = flags.index("persistent")
+            try:
+                timeout = int(flags[index + 1])
+                if 0 <= timeout <= 0x7FFFFFFF:
+                    service["persistence_seconds"] = timeout
+            except (IndexError, ValueError, OverflowError):
+                parse_errors += 1
+        service["id"] = _ipvs_service_id(service)
+        if len(services) >= IPVS_MAX_SERVICES:
+            truncated = True
+            current = None
+            continue
+        services.append(service)
+        current = service
+
+    if not version:
+        return {"available": False, "source": "procfs", "reason": "invalid_format"}
+    for service in services:
+        service["active_connections"] = sum(
+            int(item["active_connections"]) for item in service["destinations"]
+        )
+        service["inactive_connections"] = sum(
+            int(item["inactive_connections"]) for item in service["destinations"]
+        )
+    return {
+        "available": True,
+        "source": "procfs",
+        "version": version,
+        "service_count": len(services),
+        "destination_count": destinations,
+        "partial": parse_errors > 0,
+        "truncated": truncated,
+        "services": services,
+    }
+
+
+def _parse_ipvs_stats(text: str) -> Optional[Dict[str, Any]]:
+    rows = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) == 5 and all(re.fullmatch(r"[0-9A-Fa-f]+", item) for item in fields):
+            try:
+                rows.append([int(item, 16) for item in fields])
+            except (ValueError, OverflowError):
+                continue
+    if not rows:
+        return None
+    names = ("connections", "in_packets", "out_packets", "in_bytes", "out_bytes")
+    result: Dict[str, Any] = {"totals": dict(zip(names, rows[0]))}
+    if len(rows) > 1:
+        rate_names = (
+            "connections_per_second", "in_packets_per_second", "out_packets_per_second",
+            "in_bytes_per_second", "out_bytes_per_second",
+        )
+        result["rates"] = dict(zip(rate_names, rows[1]))
+    return result
+
+
+def _read_bounded_file(path: str, limit: int) -> Tuple[str, bool]:
+    with open(path, "rb") as handle:
+        raw = handle.read(limit + 1)
+    truncated = len(raw) > limit
+    return raw[:limit].decode("utf-8", errors="replace"), truncated
 
 
 def _keepalived_version_tuple(value: str) -> Optional[Tuple[int, int, int]]:
@@ -141,6 +332,8 @@ FAILURE_CODES = {
     "concurrent_change",
     "config_policy_rejected",
     "certificate_validation_failed",
+    "keepalived_config_test_failed",
+    "keepalived_validation_unavailable",
     "nginx_config_test_failed",
     "nginx_reload_failed",
     "health_check_failed",
@@ -322,6 +515,7 @@ def _failure_metadata(error: Any, action: str = "", status: str = "failed",
         elif code in {
             "permission_denied", "path_rejected", "concurrent_change",
             "config_policy_rejected", "certificate_validation_failed",
+            "keepalived_config_test_failed", "keepalived_validation_unavailable",
         }:
             stage = "precheck"
         elif code == "nginx_config_test_failed":
@@ -439,6 +633,7 @@ class Settings:
         keepalived_config: Optional[str] = None,
         keepalived_service: Optional[str] = None,
         keepalived_vip: Optional[str] = None,
+        ipvs_observer_enabled: bool = False,
     ):
         self.server_url = server_url
         self.node_name = node_name
@@ -509,6 +704,7 @@ class Settings:
         self.keepalived_config = keepalived_config
         self.keepalived_service = keepalived_service
         self.keepalived_vip = keepalived_vip
+        self.ipvs_observer_enabled = ipvs_observer_enabled
         self._keepalived_validate_capability: Optional[bool] = None
 
     @classmethod
@@ -572,6 +768,7 @@ class Settings:
             keepalived_config=_optional_string(raw.get("keepalived_config")),
             keepalived_service=_optional_string(raw.get("keepalived_service")),
             keepalived_vip=_optional_string(raw.get("keepalived_vip")),
+            ipvs_observer_enabled=raw.get("ipvs_observer_enabled") is True,
         )
         settings.validate()
         return settings
@@ -717,6 +914,8 @@ class Settings:
             if self._keepalived_validate_capability:
                 result.append("keepalived_validate")
         result.append("metrics_v1")
+        if self.ipvs_observer_enabled:
+            result.append("ipvs_observer_v1")
         if self.stub_status_url:
             result.append("stub_status_v1")
         server_scheme = urllib.parse.urlparse(self.server_url).scheme
@@ -2021,10 +2220,41 @@ class JobExecutor:
     def keepalived_observation(self) -> Dict[str, Any]:
         return self._keepalived_inspection()
 
+    def ipvs_observation(self) -> Dict[str, Any]:
+        if not self.settings.ipvs_observer_enabled:
+            return {"available": False, "source": "procfs", "reason": "disabled"}
+        try:
+            table_text, table_truncated = _read_bounded_file(IPVS_TABLE_PATH, IPVS_MAX_BYTES)
+        except FileNotFoundError:
+            return {"available": False, "source": "procfs", "reason": "not_loaded"}
+        except PermissionError:
+            return {"available": False, "source": "procfs", "reason": "permission_denied"}
+        except OSError:
+            return {"available": False, "source": "procfs", "reason": "unavailable"}
+        observation = _parse_ipvs_table(table_text)
+        if table_truncated:
+            observation["truncated"] = True
+            observation["partial"] = True
+        if observation.get("available") is True:
+            try:
+                stats_text, stats_truncated = _read_bounded_file(IPVS_STATS_PATH, IPVS_STATS_MAX_BYTES)
+                stats = _parse_ipvs_stats(stats_text)
+                if stats is not None:
+                    observation["stats"] = stats
+                if stats_truncated:
+                    observation["partial"] = True
+            except (FileNotFoundError, PermissionError, OSError):
+                pass
+        return observation
+
     def _keepalived_validation_flag(self, binary: str) -> str:
         version = _keepalived_version_tuple(self._keepalived_version(binary))
         if version is None or version < (2, 0, 5):
-            raise ActionError("configured Keepalived version cannot reliably validate configuration")
+            raise ActionError(
+                "configured Keepalived version cannot reliably validate configuration",
+                failure_code="keepalived_validation_unavailable",
+                failure_stage="precheck",
+            )
         try:
             completed = subprocess.run(
                 [binary, "--help"],
@@ -2036,13 +2266,21 @@ class JobExecutor:
                 shell=False,
             )
         except (OSError, subprocess.TimeoutExpired):
-            raise ActionError("cannot inspect Keepalived validation support")
+            raise ActionError(
+                "cannot inspect Keepalived validation support",
+                failure_code="keepalived_validation_unavailable",
+                failure_stage="precheck",
+            )
         output = (completed.stdout + completed.stderr).decode("utf-8", errors="replace")[-32768:]
         if "--config-test" in output:
             return "--config-test"
         if re.search(r"(?:^|[\s,])-t(?:[\s,]|$).*config", output, re.IGNORECASE | re.MULTILINE):
             return "-t"
-        raise ActionError("configured Keepalived does not expose configuration validation support")
+        raise ActionError(
+            "configured Keepalived does not expose configuration validation support",
+            failure_code="keepalived_validation_unavailable",
+            failure_stage="precheck",
+        )
 
     def _action_keepalived_inspect(self, payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
         if payload:
@@ -2066,16 +2304,32 @@ class JobExecutor:
                 shell=False,
             )
         except subprocess.TimeoutExpired:
-            raise ActionError("Keepalived configuration validation timed out")
+            raise ActionError(
+                "Keepalived configuration validation timed out",
+                failure_code="command_timeout",
+                failure_stage="precheck",
+            )
         except OSError:
-            raise ActionError("cannot execute configured Keepalived binary")
+            raise ActionError(
+                "cannot execute configured Keepalived binary",
+                failure_code="keepalived_validation_unavailable",
+                failure_stage="precheck",
+            )
         if completed.returncode != 0:
             # Keepalived may echo arbitrary configuration tokens on failure.
             # Never persist or return its stdout/stderr.
-            raise ActionError("Keepalived configuration validation failed")
+            raise ActionError(
+                "Keepalived configuration validation failed",
+                failure_code="keepalived_config_test_failed",
+                failure_stage="precheck",
+            )
         verified_path, verified_data = self._keepalived_config_data()
         if verified_path != config_path or hashlib.sha256(verified_data).digest() != hashlib.sha256(config_data).digest():
-            raise ActionError("Keepalived configuration changed during validation")
+            raise ActionError(
+                "Keepalived configuration changed during validation",
+                failure_code="concurrent_change",
+                failure_stage="precheck",
+            )
         return {
             "valid": True,
             "source": "existing",
@@ -3401,6 +3655,22 @@ class HelperClient:
             raise AgentError("privileged helper returned an invalid Keepalived observation")
         return observation
 
+    def ipvs_observation(self) -> Dict[str, Any]:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(self.settings.helper_timeout)
+        try:
+            connection.connect(self.settings.helper_socket)
+            _send_frame(connection, {"ipvs_observation": True}, self.settings.helper_max_request_bytes)
+            response = _recv_frame(connection, self.settings.helper_max_request_bytes)
+        except (OSError, AgentError) as exc:
+            raise AgentError("privileged helper unavailable: {}".format(exc))
+        finally:
+            connection.close()
+        observation = response.get("ipvs_observation")
+        if not isinstance(observation, dict):
+            raise AgentError("privileged helper returned an invalid IPVS observation")
+        return observation
+
 
 class HelperServer:
     def __init__(self, settings: Settings, executor: JobExecutor, socket_path: str, allowed_uid: int,
@@ -3467,6 +3737,13 @@ class HelperServer:
                 _send_frame(
                     connection,
                     {"keepalived_observation": self.executor.keepalived_observation()},
+                    self.settings.helper_max_request_bytes,
+                )
+                return
+            if request.get("ipvs_observation") is True:
+                _send_frame(
+                    connection,
+                    {"ipvs_observation": self.executor.ipvs_observation()},
                     self.settings.helper_max_request_bytes,
                 )
                 return
@@ -4101,6 +4378,17 @@ class AgentService:
                     observation["facts"]["keepalived"] = executor.keepalived_observation()
                 except AgentError:
                     LOG.warning("cannot refresh privileged Keepalived observation")
+        if self.settings.ipvs_observer_enabled:
+            observation["facts"]["ipvs"] = {
+                "available": False,
+                "source": "procfs",
+                "reason": "helper_unavailable",
+            }
+            if executor is not None and hasattr(executor, "ipvs_observation"):
+                try:
+                    observation["facts"]["ipvs"] = executor.ipvs_observation()
+                except AgentError:
+                    LOG.warning("cannot refresh privileged IPVS observation")
         observation["metrics"] = self.metrics_collector.collect()
         try:
             completed = subprocess.run(

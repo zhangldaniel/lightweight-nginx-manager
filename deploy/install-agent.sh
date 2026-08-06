@@ -19,6 +19,7 @@ KEEPALIVED_BINARY=""
 KEEPALIVED_CONFIG=""
 KEEPALIVED_SERVICE=""
 KEEPALIVED_VIP=""
+ENABLE_LVS_OBSERVER="0"
 DEFAULT_KEEPALIVED_CONFIG="/etc/keepalived/keepalived.conf"
 DEFAULT_KEEPALIVED_SERVICE="keepalived.service"
 
@@ -112,6 +113,7 @@ usage() {
   --keepalived-config <路径> Keepalived 主配置，默认 /etc/keepalived/keepalived.conf
   --keepalived-service <单元> Keepalived systemd 单元，默认 keepalived.service
   --keepalived-vip <地址> 本节点组的 Keepalived VIP，例如 10.165.0.110
+  --enable-lvs-observer 只读观测宿主机 IPVS 表；不执行 ipvsadm，也不修改转发规则
   --health-url <URL>   发布后的节点本地健康检查 URL
   --nginx-log-dir <路径> 允许实时查看的 Nginx 日志目录；可重复指定
   --stub-status-url <URL> 本机 Nginx stub_status 地址，例如 http://127.0.0.1:18080/nginx_status
@@ -895,7 +897,7 @@ write_config() {
   "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${LABELS}" \
     "${ca_target}" "${TLS_SKIP_VERIFY}" "${ALLOW_INSECURE_HTTP}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
     "${config_dirs_text}" "${stream_dirs_text}" "${ALLOW_MAIN_CONFIG_EDIT}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" \
-    "${KEEPALIVED_BINARY}" "${KEEPALIVED_CONFIG}" "${KEEPALIVED_SERVICE}" "${KEEPALIVED_VIP}" <<'PY'
+    "${KEEPALIVED_BINARY}" "${KEEPALIVED_CONFIG}" "${KEEPALIVED_SERVICE}" "${KEEPALIVED_VIP}" "${ENABLE_LVS_OBSERVER}" <<'PY'
 import hashlib
 import json
 import os
@@ -908,7 +910,7 @@ from urllib.parse import urlparse
     tls_skip_verify, allow_insecure_http, poll_seconds, nginx_binary, openssl_binary, nginx_config, nginx_root,
     raw_config_dirs, raw_stream_dirs, allow_main_config_edit, managed_cert_dir, state_dir, helper_state_dir, health_url,
     raw_log_dirs, stub_status_url, allow_plaintext_log_stream,
-    keepalived_binary, keepalived_config, keepalived_service, keepalived_vip,
+    keepalived_binary, keepalived_config, keepalived_service, keepalived_vip, enable_lvs_observer,
 ) = sys.argv[1:]
 
 labels = {}
@@ -996,6 +998,7 @@ value = {
     "keepalived_config": keepalived_config or None,
     "keepalived_service": keepalived_service or None,
     "keepalived_vip": keepalived_vip or None,
+    "ipvs_observer_enabled": enable_lvs_observer == "1",
 }
 
 temporary = config_path + ".tmp"
@@ -1250,6 +1253,7 @@ while [[ $# -gt 0 ]]; do
     --keepalived-config) [[ $# -ge 2 ]] || die "--keepalived-config 缺少值"; KEEPALIVED_CONFIG="$2"; shift 2 ;;
     --keepalived-service) [[ $# -ge 2 ]] || die "--keepalived-service 缺少值"; KEEPALIVED_SERVICE="$2"; shift 2 ;;
     --keepalived-vip) [[ $# -ge 2 ]] || die "--keepalived-vip 缺少值"; KEEPALIVED_VIP="$2"; shift 2 ;;
+    --enable-lvs-observer) ENABLE_LVS_OBSERVER="1"; shift ;;
     --health-url) [[ $# -ge 2 ]] || die "--health-url 缺少值"; HEALTH_URL="$2"; shift 2 ;;
     --nginx-log-dir) [[ $# -ge 2 ]] || die "--nginx-log-dir 缺少值"; NGINX_LOG_DIRS+=("$2"); shift 2 ;;
     --stub-status-url) [[ $# -ge 2 ]] || die "--stub-status-url 缺少值"; STUB_STATUS_URL="$2"; shift 2 ;;

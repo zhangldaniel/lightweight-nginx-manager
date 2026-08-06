@@ -2095,6 +2095,76 @@ class ServerTestCase(unittest.TestCase):
         refreshed_node = self.client.get("/api/v1/admin/nodes", headers=self.admin_headers).json()["items"][0]
         self.assertEqual("nginx-config-hash", refreshed_node["config_hash"])
 
+    def test_ipvs_observation_is_recomputed_bounded_and_redacted(self):
+        enrolled = self.enroll("lvs-director")
+        agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        malicious = {
+            "available": True,
+            "source": "do-not-trust",
+            "version": "1.2.1",
+            "service_count": 9999,
+            "destination_count": 9999,
+            "services": [
+                {
+                    "id": "forged",
+                    "kind": "address",
+                    "protocol": "TCP",
+                    "address": "192.0.2.110",
+                    "port": 443,
+                    "scheduler": "wrr",
+                    "one_packet": "false",
+                    "raw_output": "MUST-NOT-BE-STORED",
+                    "destinations": [
+                        {
+                            "address": "192.0.2.108",
+                            "port": 443,
+                            "forwarding": "dr",
+                            "weight": 100,
+                            "active_connections": 7,
+                            "inactive_connections": 11,
+                            "secret": "MUST-NOT-BE-STORED",
+                        },
+                        {
+                            "address": "not-an-ip",
+                            "port": 70000,
+                            "forwarding": "shell",
+                            "weight": -1,
+                            "active_connections": 0,
+                            "inactive_connections": 0,
+                        },
+                    ],
+                }
+            ],
+            "stats": {
+                "totals": {"connections": 10, "in_packets": 20, "command": "MUST-NOT-BE-STORED"},
+                "rates": {"connections_per_second": 2},
+            },
+            "raw_table": "MUST-NOT-BE-STORED",
+            "partial": "false",
+            "truncated": "false",
+        }
+        heartbeat = self.client.post(
+            "/api/v1/agent/heartbeat",
+            headers=agent_headers,
+            json={
+                "status": "online",
+                "capabilities": ["ipvs_observer_v1"],
+                "facts": {"ipvs": malicious},
+            },
+        )
+        self.assertEqual(200, heartbeat.status_code, heartbeat.text)
+        node = self.client.get("/api/v1/admin/nodes", headers=self.admin_headers).json()["items"][0]
+        ipvs = node["facts"]["ipvs"]
+        self.assertEqual("procfs", ipvs["source"])
+        self.assertEqual(1, ipvs["service_count"])
+        self.assertEqual(1, ipvs["destination_count"])
+        self.assertEqual(7, ipvs["services"][0]["active_connections"])
+        self.assertFalse(ipvs["services"][0]["one_packet"])
+        self.assertTrue(ipvs["partial"])
+        self.assertFalse(ipvs["truncated"])
+        self.assertNotEqual("forged", ipvs["services"][0]["id"])
+        self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(node, ensure_ascii=False))
+
     def test_keepalived_validate_accepts_only_existing_config_without_payload(self):
         enrolled = self.enroll("keepalived-validate-node")
         agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
@@ -2152,6 +2222,35 @@ class ServerTestCase(unittest.TestCase):
             },
             stored,
         )
+
+        failed_job = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "action": "keepalived_validate", "payload": {}},
+        )
+        self.assertEqual(201, failed_job.status_code, failed_job.text)
+        failed_job_id = failed_job.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=agent_headers, json={})
+        failed_result = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(failed_job_id),
+            headers=agent_headers,
+            json={
+                "status": "failed",
+                "action": "keepalived_validate",
+                "error": "MUST-NOT-BE-STORED",
+                "details": {
+                    "failure_code": "keepalived_config_test_failed",
+                    "failure_stage": "precheck",
+                },
+            },
+        )
+        self.assertEqual(200, failed_result.status_code, failed_result.text)
+        stored_failure = self.client.get(
+            "/api/v1/admin/jobs?ids=" + failed_job_id, headers=self.admin_headers
+        ).json()["items"][0]["result"]
+        self.assertEqual("keepalived_config_test_failed", stored_failure["failure_code"])
+        self.assertEqual("precheck", stored_failure["failure_stage"])
+        self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(stored_failure))
 
         bypass = self.client.post(
             "/api/v1/admin/operations",

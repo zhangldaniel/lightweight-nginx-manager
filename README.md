@@ -20,6 +20,7 @@
 - 导入现有配置，替换节点原路径中的证书
 - 查看实时日志、宿主机状态和 Nginx Stub Status
 - 查看 Keepalived 主备角色、VIP 归属和双机架构
+- 只读查看 Linux LVS/IPVS 的虚拟服务、后端成员和连接统计
 - 发布前执行真实 `nginx -t`，失败时恢复原文件
 - 支持本地账号、LDAP/AD、操作记录和版本回滚
 
@@ -116,6 +117,18 @@ curl -fsS http://localhost:51820/stub_status
 
 高可用页面只读取真实 VIP 归属、Keepalived 状态和脱敏的 VRRP 摘要，不会修改配置、启停 Keepalived 或主动漂移 VIP。
 
+### LVS / IPVS 只读观测（可选）
+
+只有运行 Linux IPVS 的调度节点才需要加：
+
+```bash
+--enable-lvs-observer
+```
+
+Agent 只读取 `/proc/net/ip_vs` 和 `/proc/net/ip_vs_stats`，用于展示 Virtual Service、后端成员、权重、转发方式和连接统计；不会执行 `ipvsadm`，也不会新增、删除或修改转发规则。
+
+这个开关与 Keepalived 相互独立。仅用 Keepalived 给 Nginx 做 VIP 主备，不代表节点已经启用 LVS；如果 `/proc/net/ip_vs` 不存在，页面会显示“IPVS 未加载”，安装器不会替你加载内核模块。
+
 ### 已装 Agent：只升级程序
 
 日常升级不必重打一长串参数，单独执行 `--upgrade` 会保留原来的配置、身份和 systemd 服务：
@@ -125,7 +138,7 @@ curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-mana
 sudo bash -s -- --upgrade
 ```
 
-它只更新程序文件。要改节点名、目录、日志、Stub Status、Keepalived 或 systemd 权限，仍需重新运行完整安装命令。
+它只更新程序文件。要改节点名、目录、日志、Stub Status、Keepalived、LVS 观测或 systemd 权限，仍需重新运行完整安装命令。
 
 ### 已有身份、改名与重复节点
 

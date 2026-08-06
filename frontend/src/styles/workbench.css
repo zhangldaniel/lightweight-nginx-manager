@@ -2192,6 +2192,7 @@ body {
 .site-editor-modal > .n-card__footer {
   position: relative;
   z-index: 2;
+  padding-block: 14px 16px;
   border-top: 1px solid var(--line);
   box-shadow: 0 -8px 18px rgba(17, 24, 32, .04);
 }

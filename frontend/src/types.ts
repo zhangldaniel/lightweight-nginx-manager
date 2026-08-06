@@ -32,7 +32,62 @@ export interface NodeFacts {
   log_files?: string[]
   stub_status_url?: string
   log_stream_transport?: string
+  ipvs?: LvsObservation
   [key: string]: unknown
+}
+
+export interface LvsMember {
+  address: string
+  port: number
+  forwarding: 'nat' | 'dr' | 'tunnel' | 'local' | 'bypass' | 'unknown'
+  weight: number
+  active_connections: number
+  inactive_connections: number
+}
+
+export interface LvsVirtualService {
+  id: string
+  kind: 'address' | 'fwmark'
+  protocol: 'TCP' | 'UDP' | 'SCTP' | 'FWM'
+  address?: string
+  port?: number
+  fwmark?: number
+  scheduler: string
+  one_packet: boolean
+  persistence_seconds?: number
+  active_connections: number
+  inactive_connections: number
+  destinations: LvsMember[]
+}
+
+export interface LvsStats {
+  totals?: {
+    connections?: number
+    in_packets?: number
+    out_packets?: number
+    in_bytes?: number
+    out_bytes?: number
+  }
+  rates?: {
+    connections_per_second?: number
+    in_packets_per_second?: number
+    out_packets_per_second?: number
+    in_bytes_per_second?: number
+    out_bytes_per_second?: number
+  }
+}
+
+export interface LvsObservation {
+  available: boolean
+  source: 'procfs'
+  reason?: 'disabled' | 'not_loaded' | 'permission_denied' | 'unavailable' | 'invalid_format' | 'helper_unavailable'
+  version?: string
+  service_count?: number
+  destination_count?: number
+  partial?: boolean
+  truncated?: boolean
+  services?: LvsVirtualService[]
+  stats?: LvsStats
 }
 
 export interface NodeRecord {

@@ -250,6 +250,11 @@ class AgentTestCase(unittest.TestCase):
 
         self.assertEqual("failed", failed["status"])
         self.assertEqual("Keepalived configuration validation failed", failed["error"])
+        self.assertEqual("keepalived_config_test_failed", failed["failure_code"])
+        self.assertEqual("precheck", failed["failure_stage"])
+        failed_for_server = agent._to_server_result(failed)
+        self.assertEqual("keepalived_config_test_failed", failed_for_server["details"]["failure_code"])
+        self.assertEqual("precheck", failed_for_server["details"]["failure_stage"])
         self.assertNotIn(secret, json.dumps(failed))
         self.assertNotIn(secret, jobs_path.read_text(encoding="utf-8"))
 
@@ -290,8 +295,10 @@ class AgentTestCase(unittest.TestCase):
         )
 
         with mock.patch.object(successful_executor, "_keepalived_version", return_value="2.0.4"):
-            with self.assertRaisesRegex(agent.ActionError, "cannot reliably validate"):
+            with self.assertRaisesRegex(agent.ActionError, "cannot reliably validate") as raised:
                 successful_executor._keepalived_validation_flag("/usr/sbin/keepalived")
+        self.assertEqual("keepalived_validation_unavailable", raised.exception.failure_code)
+        self.assertEqual("precheck", raised.exception.failure_stage)
 
     def test_keepalived_summary_ignores_both_comment_styles_and_marks_includes_partial(self):
         summary = agent._keepalived_config_summary(
@@ -309,6 +316,118 @@ vrrp_instance VI_REAL {
         self.assertEqual(1, summary["instance_count"])
         self.assertEqual("VI_REAL", summary["instances"][0]["name"])
         self.assertFalse(summary["summary_complete"])
+
+    def test_ipvs_proc_parser_supports_address_ipv6_fwmark_and_stats(self):
+        table = """IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port Forward Weight ActiveConn InActConn
+TCP  C000026E:01BB wrr persistent 300 FFFFFFFF
+  -> C000026C:01BB      Route   100    7          11
+  -> C000026F:01BB      Masq    0      0          3
+UDP  [2001:db8::10]:0035 rr
+  -> [2001:db8::20]:0035      Tunnel 5      1          2
+FWM  0000002A lc
+  -> C0000270:0000      Local   1      0          0
+"""
+        parsed = agent._parse_ipvs_table(table)
+        self.assertTrue(parsed["available"])
+        self.assertEqual("1.2.1", parsed["version"])
+        self.assertEqual(3, parsed["service_count"])
+        self.assertEqual(4, parsed["destination_count"])
+        service = parsed["services"][0]
+        self.assertEqual("192.0.2.110", service["address"])
+        self.assertEqual(443, service["port"])
+        self.assertEqual(300, service["persistence_seconds"])
+        self.assertEqual("dr", service["destinations"][0]["forwarding"])
+        self.assertEqual("nat", service["destinations"][1]["forwarding"])
+        self.assertEqual(7, service["active_connections"])
+        self.assertEqual("2001:db8::10", parsed["services"][1]["address"])
+        self.assertEqual("tunnel", parsed["services"][1]["destinations"][0]["forwarding"])
+        self.assertEqual(42, parsed["services"][2]["fwmark"])
+
+        stats = agent._parse_ipvs_stats("""   Total Incoming Outgoing         Incoming         Outgoing
+   Conns  Packets  Packets            Bytes            Bytes
+0000000A 00000014 00000012 0000000000001000 0000000000000800
+
+ Conns/s   Pkts/s   Pkts/s          Bytes/s          Bytes/s
+00000002 00000004 00000003 0000000000000100 0000000000000080
+""")
+        self.assertEqual(10, stats["totals"]["connections"])
+        self.assertEqual(2, stats["rates"]["connections_per_second"])
+        self.assertEqual(256, stats["rates"]["in_bytes_per_second"])
+
+    def test_ipvs_observer_is_opt_in_bounded_and_has_no_command_execution(self):
+        self.assertNotIn("ipvs_observer_v1", self.settings.reported_capabilities())
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="lvs-director",
+            nginx_binary=str(Path(sys.executable).resolve()),
+            nginx_config=str(self.main_config),
+            nginx_root=str(self.root),
+            allowed_config_roots=[str(self.config_root)],
+            allowed_certificate_roots=[str(self.certificate_root)],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "lvs-helper.sock"),
+            ipvs_observer_enabled=True,
+        )
+        settings.validate()
+        self.assertIn("ipvs_observer_v1", settings.reported_capabilities())
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "lvs-jobs.json"))
+        table = """IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port Forward Weight ActiveConn InActConn
+TCP  C000026E:01BB rr
+  -> C000026C:01BB      Route   1      2          3
+"""
+        stats = """Total Incoming Outgoing Incoming Outgoing
+Conns Packets Packets Bytes Bytes
+1 2 3 4 5
+Conns/s Pkts/s Pkts/s Bytes/s Bytes/s
+1 1 1 1 1
+"""
+        with (
+            mock.patch.object(
+                agent,
+                "_read_bounded_file",
+                side_effect=[(table, False), (stats, False)],
+            ) as read_file,
+            mock.patch.object(agent.subprocess, "run") as command,
+        ):
+            observation = executor.ipvs_observation()
+        command.assert_not_called()
+        self.assertEqual(
+            [
+                mock.call(agent.IPVS_TABLE_PATH, agent.IPVS_MAX_BYTES),
+                mock.call(agent.IPVS_STATS_PATH, agent.IPVS_STATS_MAX_BYTES),
+            ],
+            read_file.call_args_list,
+        )
+        self.assertTrue(observation["available"])
+        self.assertEqual(1, observation["service_count"])
+
+        service = agent.AgentService(settings, threading.Event())
+        service.metrics_collector.collect = mock.Mock(return_value={})
+        helper = mock.Mock()
+        helper.log_inventory.return_value = []
+        helper.ipvs_observation.return_value = observation
+        with mock.patch.object(agent.subprocess, "run", side_effect=OSError("nginx unavailable")):
+            heartbeat = service._local_observation(helper)
+        self.assertEqual("192.0.2.110", heartbeat["facts"]["ipvs"]["services"][0]["address"])
+
+        helper.ipvs_observation.side_effect = agent.AgentError("helper unavailable")
+        with mock.patch.object(agent.subprocess, "run", side_effect=OSError("nginx unavailable")):
+            fallback = service._local_observation(helper)
+        self.assertEqual("helper_unavailable", fallback["facts"]["ipvs"]["reason"])
+
+    def test_ipvs_missing_proc_table_reports_module_not_loaded(self):
+        self.settings.ipvs_observer_enabled = True
+        with mock.patch.object(agent, "_read_bounded_file", side_effect=FileNotFoundError()):
+            observation = self.executor.ipvs_observation()
+        self.assertEqual(
+            {"available": False, "source": "procfs", "reason": "not_loaded"},
+            observation,
+        )
 
     def test_atomic_replace_retries_transient_windows_file_lock(self):
         with (
@@ -1674,6 +1793,17 @@ vrrp_instance VI_REAL {
         self.assertNotIn("mode & 0o077", source)
         self.assertIn("mode & 0o022", source)
         self.assertIn("控制端暂不可达或申请待审批", installer)
+
+    def test_lvs_observer_installer_contract_is_opt_in_and_read_only(self):
+        source = (AGENT_DIR / "nginx_agent.py").read_text(encoding="utf-8")
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        self.assertIn('ENABLE_LVS_OBSERVER="0"', installer)
+        self.assertIn('--enable-lvs-observer) ENABLE_LVS_OBSERVER="1"', installer)
+        self.assertIn('"ipvs_observer_enabled": enable_lvs_observer == "1"', installer)
+        self.assertNotIn("CAP_NET_ADMIN", installer)
+        self.assertIn('IPVS_TABLE_PATH = "/proc/net/ip_vs"', source)
+        self.assertIn('IPVS_STATS_PATH = "/proc/net/ip_vs_stats"', source)
+        self.assertNotIn("ipvsadm", source)
 
     def test_settings_mutable_defaults_are_isolated(self):
         first = agent.Settings("https://manager.example.test", "first")

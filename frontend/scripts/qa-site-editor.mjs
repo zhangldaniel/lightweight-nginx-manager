@@ -209,9 +209,13 @@ try {
   const existingEditorLayout = await evaluate(`(() => {
     const modal = document.querySelector('.site-editor-modal')
     const footer = modal?.querySelector('.modal-footer')
+    const footerShell = modal?.querySelector(':scope > .n-card__footer')
+    const footerButton = footer?.querySelector('button')
     const content = modal?.querySelector('.n-card-content')
     const modalRect = modal?.getBoundingClientRect()
     const footerRect = footer?.getBoundingClientRect()
+    const footerShellRect = footerShell?.getBoundingClientRect()
+    const footerButtonRect = footerButton?.getBoundingClientRect()
     return {
       viewportHeight: window.innerHeight,
       modalTop: modalRect?.top ?? -1,
@@ -219,6 +223,12 @@ try {
       footerTop: footerRect?.top ?? Number.POSITIVE_INFINITY,
       footerBottom: footerRect?.bottom ?? Number.POSITIVE_INFINITY,
       footerHeight: footerRect?.height ?? 0,
+      footerInsetTop: footerButtonRect && footerShellRect
+        ? footerButtonRect.top - footerShellRect.top
+        : -1,
+      footerInsetBottom: footerButtonRect && footerShellRect
+        ? footerShellRect.bottom - footerButtonRect.bottom
+        : -1,
       contentBottom: content?.getBoundingClientRect().bottom ?? Number.POSITIVE_INFINITY,
     }
   })()`)
@@ -235,6 +245,10 @@ try {
   assert(
     existingEditorLayout.contentBottom <= existingEditorLayout.footerTop + 1,
     `The existing-site editor content overlaps its footer: ${JSON.stringify(existingEditorLayout)}`,
+  )
+  assert(
+    existingEditorLayout.footerInsetTop >= 12 && existingEditorLayout.footerInsetBottom >= 12,
+    `The existing-site editor actions are too close to the footer divider or modal edge: ${JSON.stringify(existingEditorLayout)}`,
   )
   await command('Page.reload', { ignoreCache: true })
   await wait(700)

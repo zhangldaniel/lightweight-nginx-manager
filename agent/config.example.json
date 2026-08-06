@@ -20,6 +20,7 @@
   "keepalived_config": null,
   "keepalived_service": null,
   "keepalived_vip": null,
+  "ipvs_observer_enabled": false,
   "allowed_config_roots": [
     "/etc/nginx/conf.d",
     "/etc/nginx/stream.d"

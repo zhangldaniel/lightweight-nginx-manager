@@ -80,6 +80,8 @@ FAILURE_CODES = {
     "concurrent_change",
     "config_policy_rejected",
     "certificate_validation_failed",
+    "keepalived_config_test_failed",
+    "keepalived_validation_unavailable",
     "nginx_config_test_failed",
     "nginx_reload_failed",
     "health_check_failed",
@@ -628,6 +630,159 @@ def _safe_keepalived_status(value: Any) -> Optional[Dict[str, Any]]:
         }
 
     return result or None
+
+
+def _safe_ipvs_uint(value: Any, maximum: int = 0x7FFFFFFFFFFFFFFF) -> Optional[int]:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= maximum:
+        return value
+    return None
+
+
+def _safe_ipvs_address(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        return None
+
+
+def _safe_ipvs_stats(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+    result: Dict[str, Any] = {}
+    definitions = {
+        "totals": ("connections", "in_packets", "out_packets", "in_bytes", "out_bytes"),
+        "rates": (
+            "connections_per_second", "in_packets_per_second", "out_packets_per_second",
+            "in_bytes_per_second", "out_bytes_per_second",
+        ),
+    }
+    for group, fields in definitions.items():
+        raw_group = value.get(group)
+        if not isinstance(raw_group, dict):
+            continue
+        safe_group = {}
+        for field in fields:
+            item = _safe_ipvs_uint(raw_group.get(field))
+            if item is not None:
+                safe_group[field] = item
+        if safe_group:
+            result[group] = safe_group
+    return result or None
+
+
+def _safe_ipvs_status(value: Any) -> Optional[Dict[str, Any]]:
+    """Validate an Agent's read-only IPVS snapshot and discard raw or unknown data."""
+    if not isinstance(value, dict) or not isinstance(value.get("available"), bool):
+        return None
+    result: Dict[str, Any] = {
+        "available": value["available"],
+        "source": "procfs",
+    }
+    if not value["available"]:
+        reason = value.get("reason")
+        if reason in {"disabled", "not_loaded", "permission_denied", "unavailable", "invalid_format", "helper_unavailable"}:
+            result["reason"] = reason
+        return result
+
+    version = value.get("version")
+    if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        result["version"] = version[:32]
+
+    raw_services = value.get("services")
+    if not isinstance(raw_services, list):
+        return {"available": False, "source": "procfs", "reason": "invalid_format"}
+    services: List[Dict[str, Any]] = []
+    total_destinations = 0
+    rejected = 0
+    truncated = value.get("truncated") is True or len(raw_services) > 128
+    allowed_forwarding = {"nat", "dr", "tunnel", "local", "bypass", "unknown"}
+    for raw_service in raw_services[:128]:
+        if not isinstance(raw_service, dict):
+            rejected += 1
+            continue
+        kind = raw_service.get("kind")
+        service: Dict[str, Any]
+        if kind == "address":
+            protocol = raw_service.get("protocol")
+            address = _safe_ipvs_address(raw_service.get("address"))
+            port = _safe_ipvs_uint(raw_service.get("port"), 65535)
+            if protocol not in {"TCP", "UDP", "SCTP"} or address is None or port is None:
+                rejected += 1
+                continue
+            service = {"kind": "address", "protocol": protocol, "address": address, "port": port}
+            identity = "{}\0{}\0{}".format(protocol, address, port)
+        elif kind == "fwmark":
+            fwmark = _safe_ipvs_uint(raw_service.get("fwmark"), 0xFFFFFFFF)
+            if fwmark is None:
+                rejected += 1
+                continue
+            service = {"kind": "fwmark", "protocol": "FWM", "fwmark": fwmark}
+            identity = "fwmark\0{}".format(fwmark)
+        else:
+            rejected += 1
+            continue
+
+        scheduler = raw_service.get("scheduler")
+        if not isinstance(scheduler, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", scheduler):
+            rejected += 1
+            continue
+        service["id"] = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        service["scheduler"] = scheduler.lower()
+        service["one_packet"] = raw_service.get("one_packet") is True
+        persistence = _safe_ipvs_uint(raw_service.get("persistence_seconds"), 0x7FFFFFFF)
+        if persistence is not None:
+            service["persistence_seconds"] = persistence
+
+        raw_destinations = raw_service.get("destinations")
+        if not isinstance(raw_destinations, list):
+            rejected += 1
+            continue
+        safe_destinations: List[Dict[str, Any]] = []
+        if total_destinations + len(raw_destinations) > 1024:
+            truncated = True
+        for raw_destination in raw_destinations:
+            if total_destinations >= 1024:
+                break
+            if not isinstance(raw_destination, dict):
+                rejected += 1
+                continue
+            address = _safe_ipvs_address(raw_destination.get("address"))
+            port = _safe_ipvs_uint(raw_destination.get("port"), 65535)
+            forwarding = raw_destination.get("forwarding")
+            weight = _safe_ipvs_uint(raw_destination.get("weight"))
+            active = _safe_ipvs_uint(raw_destination.get("active_connections"))
+            inactive = _safe_ipvs_uint(raw_destination.get("inactive_connections"))
+            if (
+                address is None or port is None or forwarding not in allowed_forwarding
+                or weight is None or active is None or inactive is None
+            ):
+                rejected += 1
+                continue
+            safe_destinations.append({
+                "address": address,
+                "port": port,
+                "forwarding": forwarding,
+                "weight": weight,
+                "active_connections": active,
+                "inactive_connections": inactive,
+            })
+            total_destinations += 1
+        service["destinations"] = safe_destinations
+        service["active_connections"] = sum(item["active_connections"] for item in safe_destinations)
+        service["inactive_connections"] = sum(item["inactive_connections"] for item in safe_destinations)
+        services.append(service)
+
+    result["services"] = services
+    result["service_count"] = len(services)
+    result["destination_count"] = total_destinations
+    result["partial"] = value.get("partial") is True or rejected > 0
+    result["truncated"] = truncated
+    stats = _safe_ipvs_stats(value.get("stats"))
+    if stats is not None:
+        result["stats"] = stats
+    return result
 
 
 def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
@@ -1227,7 +1382,7 @@ class HeartbeatRequest(BaseModel):
             "nginx_root", "managed_config_root", "managed_certificate_root", "nginx_config",
             "config_entries", "main_config_editable",
             "log_roots", "log_files", "stub_status_url", "log_stream_transport",
-            "keepalived",
+            "keepalived", "ipvs",
         }
         result: Dict[str, Any] = {}
         for key, item in value.items():
@@ -1265,6 +1420,10 @@ class HeartbeatRequest(BaseModel):
                 keepalived = _safe_keepalived_status(item)
                 if keepalived is not None:
                     result[key] = keepalived
+            elif key == "ipvs":
+                ipvs = _safe_ipvs_status(item)
+                if ipvs is not None:
+                    result[key] = ipvs
             elif key in {"log_roots", "log_files"}:
                 if not isinstance(item, list):
                     continue
