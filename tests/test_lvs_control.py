@@ -159,6 +159,7 @@ class LvsControlTests(unittest.TestCase):
 
     def test_inventory_is_structured_and_does_not_expose_authentication(self):
         observation = self.module.observe()
+        self.assertEqual("vrrp", observation["mode"])
         self.assertTrue(observation["management_enabled"])
         self.assertRegex(observation["config_hash"], r"^[0-9a-f]{64}$")
         self.assertEqual(1, observation["service_count"])
@@ -168,6 +169,171 @@ class LvsControlTests(unittest.TestCase):
         self.assertEqual(2, len(service["members"]))
         self.assertTrue(service["editable"])
         self.assertNotIn("rotate-this-secret", json.dumps(observation))
+
+    def test_standalone_inventory_and_apply_require_explicit_topology(self):
+        self.main.write_text(EXISTING.split("vrrp_instance", 1)[0] + EXISTING.split("virtual_server", 1)[1].join(("virtual_server", "")), encoding="utf-8")
+        self.settings.lvs_topology = "standalone"
+        self.settings.keepalived_vip = None
+        module = lvs.LvsControlModule(self.settings)
+        observation = module.observe()
+        self.assertEqual("standalone", observation["mode"])
+
+        intent = {
+            "kind": "upsert_service",
+            "target": self.listener(),
+            "service": self.service(weight=3),
+            "change_note": "standalone update",
+        }
+        payload = {
+            "intent": intent,
+            "expected_config_hash": observation["config_hash"],
+            "plan_digest": hashlib.sha256(
+                json.dumps(intent, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            "expected_mode": "standalone",
+            "expected_topology": {"mode": "standalone"},
+            "expected_role": "STANDALONE",
+            "expected_vip": None,
+            "adopt_existing": True,
+        }
+        runtime = [{
+            "listener": self.listener(),
+            "scheduler": "mh",
+            "members": [
+                {"address": "10.165.0.43", "port": 443, "weight": 3, "forwarding": "Route"},
+                {"address": "10.165.0.44", "port": 443, "weight": 1, "forwarding": "Route"},
+            ],
+        }]
+        with mock.patch.object(module, "_service_active", return_value=True), mock.patch.object(
+            module, "_local_ip_addresses", return_value={"10.165.0.40"}
+        ) as local_addresses, mock.patch.object(module, "_validate"), mock.patch.object(
+            module, "_reload"
+        ), mock.patch("lvs_control._read_ipvs_services", return_value=runtime):
+            result = module.apply(payload, "standalone-job")
+        self.assertTrue(result["applied"])
+        self.assertGreaterEqual(local_addresses.call_count, 2)
+
+    def test_standalone_rejects_malformed_or_inactive_topology_before_writing(self):
+        self.main.write_text("virtual_server 10.165.0.40 443 { protocol TCP }\n", encoding="utf-8")
+        self.settings.lvs_topology = "standalone"
+        self.settings.keepalived_vip = None
+        module = lvs.LvsControlModule(self.settings)
+        original = self.main.read_bytes()
+        intent = {
+            "kind": "delete_service",
+            "target": self.listener(),
+            "change_note": "standalone delete",
+        }
+        base = {
+            "intent": intent,
+            "expected_config_hash": module.observe()["config_hash"],
+            "plan_digest": "a" * 64,
+            "expected_mode": "standalone",
+            "expected_topology": {"mode": "standalone"},
+            "expected_role": "STANDALONE",
+            "expected_vip": None,
+            "adopt_existing": True,
+        }
+        for override in (
+            {"expected_mode": "vrrp"},
+            {"expected_topology": {"mode": "standalone", "vip": None}},
+            {"expected_role": "BACKUP"},
+            {"expected_vip": "10.165.0.40"},
+        ):
+            with self.assertRaises(lvs.LvsControlError) as raised:
+                module.apply(dict(base, **override), "bad-standalone")
+            self.assertEqual("invalid_lvs_intent", raised.exception.failure_code)
+        with mock.patch.object(module, "_service_active", return_value=False):
+            with self.assertRaises(lvs.LvsControlError) as raised:
+                module.apply(base, "inactive-standalone")
+        self.assertEqual("concurrent_change", raised.exception.failure_code)
+        with mock.patch.object(module, "_service_active", return_value=True), mock.patch.object(
+            module, "_local_ip_addresses", return_value=set()
+        ):
+            with self.assertRaises(lvs.LvsControlError) as raised:
+                module.apply(base, "nonlocal-standalone")
+        self.assertEqual("concurrent_change", raised.exception.failure_code)
+        self.assertIn("no longer a local address", str(raised.exception))
+        self.assertEqual(original, self.main.read_bytes())
+
+    def test_standalone_address_drift_before_reload_restores_original(self):
+        self.main.write_text(
+            EXISTING.split("vrrp_instance", 1)[0]
+            + EXISTING.split("virtual_server", 1)[1].join(("virtual_server", "")),
+            encoding="utf-8",
+        )
+        self.settings.lvs_topology = "standalone"
+        self.settings.keepalived_vip = None
+        module = lvs.LvsControlModule(self.settings)
+        original = self.main.read_bytes()
+        intent = {
+            "kind": "upsert_service",
+            "target": self.listener(),
+            "service": self.service(weight=3),
+            "change_note": "address drift",
+        }
+        payload = {
+            "intent": intent,
+            "expected_config_hash": module.observe()["config_hash"],
+            "plan_digest": "c" * 64,
+            "expected_mode": "standalone",
+            "expected_topology": {"mode": "standalone"},
+            "expected_role": "STANDALONE",
+            "expected_vip": None,
+            "adopt_existing": True,
+        }
+        with mock.patch.object(module, "_service_active", return_value=True), mock.patch.object(
+            module, "_local_ip_addresses", side_effect=[{"10.165.0.40"}, set()]
+        ), mock.patch.object(module, "_validate"), mock.patch.object(
+            module, "_reload"
+        ) as reload_service, mock.patch("lvs_control._read_ipvs_services", return_value=[]):
+            with self.assertRaises(lvs.LvsControlError) as raised:
+                module.apply(payload, "address-drift-standalone")
+        self.assertEqual("concurrent_change", raised.exception.failure_code)
+        self.assertEqual("verify", raised.exception.failure_stage)
+        # Candidate reload is skipped; the single call restores the previous
+        # runtime after the candidate file was rolled back.
+        reload_service.assert_called_once_with()
+        self.assertEqual(original, self.main.read_bytes())
+
+    def test_standalone_rejects_vrrp_hidden_in_include_graph(self):
+        include_dir = self.root / "conf.d"
+        include_dir.mkdir()
+        self.main.write_text("include conf.d/*.conf\n", encoding="utf-8")
+        (include_dir / "hidden.conf").write_text(
+            "vrrp_instance VI_HIDDEN { virtual_ipaddress { 10.165.0.40 } }\n",
+            encoding="utf-8",
+        )
+        self.settings.lvs_topology = "standalone"
+        self.settings.keepalived_vip = None
+        module = lvs.LvsControlModule(self.settings)
+        intent = {
+            "kind": "delete_service",
+            "target": self.listener(),
+            "change_note": "must remain standalone",
+        }
+        payload = {
+            "intent": intent,
+            "expected_config_hash": module.observe()["config_hash"],
+            "plan_digest": "b" * 64,
+            "expected_mode": "standalone",
+            "expected_topology": {"mode": "standalone"},
+            "expected_role": "STANDALONE",
+            "expected_vip": None,
+        }
+        with mock.patch.object(module, "_service_active", return_value=True):
+            with self.assertRaises(lvs.LvsControlError) as raised:
+                module.apply(payload, "hidden-vrrp")
+        self.assertEqual("concurrent_change", raised.exception.failure_code)
+
+    def test_include_cycle_is_rejected_instead_of_treated_as_complete(self):
+        include_dir = self.root / "conf.d"
+        include_dir.mkdir()
+        self.main.write_text("include conf.d/one.conf\n", encoding="utf-8")
+        (include_dir / "one.conf").write_text("include ../keepalived.conf\n", encoding="utf-8")
+        with self.assertRaises(lvs.LvsControlError) as raised:
+            self.module.observe()
+        self.assertEqual("lvs_config_unsupported", raised.exception.failure_code)
 
     def test_unknown_virtual_service_directive_makes_only_that_service_read_only(self):
         self.main.write_text(EXISTING.replace("    protocol TCP\n", "    protocol TCP\n    quorum 2\n"), encoding="utf-8")

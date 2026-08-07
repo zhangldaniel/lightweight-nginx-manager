@@ -20,6 +20,7 @@ KEEPALIVED_BINARY=""
 KEEPALIVED_CONFIG=""
 KEEPALIVED_SERVICE=""
 KEEPALIVED_VIP=""
+LVS_TOPOLOGY=""
 ENABLE_LVS_OBSERVER="0"
 ENABLE_LVS_MANAGEMENT="0"
 LVS_MANAGED_FILE=""
@@ -133,6 +134,7 @@ usage() {
 
 安装后 Agent 会出现在 Web 的“待审批接入”列表；管理员批准后自动上线。
 脚本不会在节点开放端口，也不会修改防火墙。
+  --lvs-topology <vrrp|standalone> VRRP uses vrrp; a single LVS node without a VIP uses standalone
 USAGE
 }
 
@@ -199,7 +201,7 @@ PY
 
 validate_existing_identity_binding() {
   local existing_node
-  [[ -s "${STATE_DIR}/identity.json" && -f "${CONFIG_FILE}" ]] || return
+  [[ -s "${STATE_DIR}/identity.json" && -f "${CONFIG_FILE}" ]] || return 0
   existing_node="$("${PYTHON_BIN}" - "${CONFIG_FILE}" <<'PY'
 import json
 import sys
@@ -737,38 +739,47 @@ PY
 }
 
 prepare_keepalived_options() {
-  if [[ -z "${KEEPALIVED_BINARY}${KEEPALIVED_CONFIG}${KEEPALIVED_SERVICE}${KEEPALIVED_VIP}" ]]; then
-    return
+  if [[ -z "${KEEPALIVED_BINARY}${KEEPALIVED_CONFIG}${KEEPALIVED_SERVICE}${KEEPALIVED_VIP}${LVS_TOPOLOGY:-}" ]]; then
+    [[ "${NODE_PROFILE:-nginx}" != "lvs" ]] || die "--profile lvs requires --lvs-topology vrrp or standalone"
+    return 0
   fi
+  if [[ -z "${LVS_TOPOLOGY:-}" && -n "${KEEPALIVED_VIP}" ]]; then
+    LVS_TOPOLOGY="vrrp"
+  fi
+  [[ "${LVS_TOPOLOGY:-}" =~ ^(vrrp|standalone)$ ]] || \
+    die "--lvs-topology must be vrrp or standalone"
   if [[ -n "${KEEPALIVED_VIP}" ]]; then
     [[ -n "${KEEPALIVED_CONFIG}" ]] || KEEPALIVED_CONFIG="${DEFAULT_KEEPALIVED_CONFIG}"
     [[ -n "${KEEPALIVED_SERVICE}" ]] || KEEPALIVED_SERVICE="${DEFAULT_KEEPALIVED_SERVICE}"
   fi
-  [[ -n "${KEEPALIVED_CONFIG}" && -n "${KEEPALIVED_SERVICE}" && -n "${KEEPALIVED_VIP}" ]] || \
-    die "--keepalived-config、--keepalived-service 和 --keepalived-vip 必须一起指定"
+  if [[ "${LVS_TOPOLOGY}" == "standalone" ]]; then
+    [[ "${NODE_PROFILE:-nginx}" == "lvs" ]] || die "standalone LVS requires --profile lvs"
+    [[ -z "${KEEPALIVED_VIP}" ]] || die "standalone LVS must not use --keepalived-vip"
+    [[ -n "${KEEPALIVED_CONFIG}" ]] || KEEPALIVED_CONFIG="${DEFAULT_KEEPALIVED_CONFIG}"
+    [[ -n "${KEEPALIVED_SERVICE}" ]] || KEEPALIVED_SERVICE="${DEFAULT_KEEPALIVED_SERVICE}"
+  else
+    [[ -n "${KEEPALIVED_VIP}" ]] || die "VRRP LVS requires --keepalived-vip"
+  fi
+  [[ -n "${KEEPALIVED_CONFIG}" && -n "${KEEPALIVED_SERVICE}" ]] || \
+    die "--keepalived-config and --keepalived-service must be configured together"
   [[ "${KEEPALIVED_CONFIG}" = /* && ! "${KEEPALIVED_CONFIG}" =~ [[:space:]] ]] || \
     die "--keepalived-config 必须是不含空白的绝对路径"
   [[ -f "${KEEPALIVED_CONFIG}" && ! -L "${KEEPALIVED_CONFIG}" ]] || \
     die "--keepalived-config 必须是现有普通文件"
   [[ "${KEEPALIVED_SERVICE}" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || \
     die "--keepalived-service 必须是合法的 .service 单元名"
-  "${PYTHON_BIN}" - "${KEEPALIVED_VIP}" <<'PY'
-import ipaddress
-import sys
-try:
-    ipaddress.ip_address(sys.argv[1])
-except ValueError:
-    raise SystemExit("--keepalived-vip 必须是 IP 地址")
-PY
-  "${PYTHON_BIN}" - "${KEEPALIVED_CONFIG}" "${KEEPALIVED_VIP}" <<'PY'
+  "${PYTHON_BIN}" - "${KEEPALIVED_CONFIG}" "${KEEPALIVED_VIP}" "${LVS_TOPOLOGY}" <<'PY'
 import glob
 import ipaddress
 import os
 import re
 import sys
 
-config_path, expected = sys.argv[1:]
-expected_ip = ipaddress.ip_address(expected)
+config_path, expected, topology = sys.argv[1:]
+try:
+    expected_ip = ipaddress.ip_address(expected) if topology == "vrrp" else None
+except ValueError:
+    raise SystemExit("--keepalived-vip must be an IP address")
 config_path = os.path.realpath(config_path)
 config_root = os.path.dirname(config_path)
 include_directives = {"include", "includer", "includem", "includew", "includeb", "includea"}
@@ -845,6 +856,11 @@ def expanded_tokens(path, depth):
 
 
 tokens = expanded_tokens(config_path, 0)
+has_vrrp = any(token.lower() == "vrrp_instance" for token in tokens)
+if topology == "standalone":
+    if has_vrrp:
+        raise SystemExit("standalone LVS configuration must not contain vrrp_instance")
+    raise SystemExit(0)
 depth = 0
 pending_virtual_ipaddress = False
 virtual_depth = None
@@ -1039,7 +1055,7 @@ write_config() {
   "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${NODE_PROFILE}" "${LABELS}" \
     "${ca_target}" "${TLS_SKIP_VERIFY}" "${ALLOW_INSECURE_HTTP}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
     "${config_dirs_text}" "${stream_dirs_text}" "${ALLOW_MAIN_CONFIG_EDIT}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" \
-    "${KEEPALIVED_BINARY}" "${KEEPALIVED_CONFIG}" "${KEEPALIVED_SERVICE}" "${KEEPALIVED_VIP}" "${ENABLE_LVS_OBSERVER}" \
+    "${KEEPALIVED_BINARY}" "${KEEPALIVED_CONFIG}" "${KEEPALIVED_SERVICE}" "${KEEPALIVED_VIP}" "${LVS_TOPOLOGY}" "${ENABLE_LVS_OBSERVER}" \
     "${ENABLE_LVS_MANAGEMENT}" "${LVS_MANAGED_FILE}" <<'PY'
 import hashlib
 import json
@@ -1053,7 +1069,7 @@ from urllib.parse import urlparse
     tls_skip_verify, allow_insecure_http, poll_seconds, nginx_binary, openssl_binary, nginx_config, nginx_root,
     raw_config_dirs, raw_stream_dirs, allow_main_config_edit, managed_cert_dir, state_dir, helper_state_dir, health_url,
     raw_log_dirs, stub_status_url, allow_plaintext_log_stream,
-    keepalived_binary, keepalived_config, keepalived_service, keepalived_vip, enable_lvs_observer,
+    keepalived_binary, keepalived_config, keepalived_service, keepalived_vip, lvs_topology, enable_lvs_observer,
     enable_lvs_management, lvs_managed_file,
 ) = sys.argv[1:]
 
@@ -1143,6 +1159,7 @@ value = {
     "keepalived_config": keepalived_config or None,
     "keepalived_service": keepalived_service or None,
     "keepalived_vip": keepalived_vip or None,
+    "lvs_topology": lvs_topology or None,
     "ipvs_observer_enabled": enable_lvs_observer == "1",
     "lvs_management_enabled": enable_lvs_management == "1",
     "lvs_managed_file": lvs_managed_file or None,
@@ -1459,6 +1476,7 @@ while [[ $# -gt 0 ]]; do
     --keepalived-vip) [[ $# -ge 2 ]] || die "--keepalived-vip 缺少值"; KEEPALIVED_VIP="$2"; shift 2 ;;
     --enable-lvs-observer) ENABLE_LVS_OBSERVER="1"; shift ;;
     --enable-lvs-management) ENABLE_LVS_MANAGEMENT="1"; shift ;;
+    --lvs-topology) [[ $# -ge 2 ]] || die "--lvs-topology requires a value"; LVS_TOPOLOGY="$2"; shift 2 ;;
     --managed-lvs-file) [[ $# -ge 2 ]] || die "--managed-lvs-file requires a value"; LVS_MANAGED_FILE="$2"; shift 2 ;;
     --health-url) [[ $# -ge 2 ]] || die "--health-url 缺少值"; HEALTH_URL="$2"; shift 2 ;;
     --nginx-log-dir) [[ $# -ge 2 ]] || die "--nginx-log-dir 缺少值"; NGINX_LOG_DIRS+=("$2"); shift 2 ;;
@@ -1527,7 +1545,7 @@ if [[ "${NODE_PROFILE}" != "lvs" ]]; then
 fi
 prepare_keepalived_options
 if [[ "${NODE_PROFILE}" == "lvs" ]]; then
-  [[ -n "${KEEPALIVED_CONFIG}" && -n "${KEEPALIVED_SERVICE}" && -n "${KEEPALIVED_VIP}" ]] || \
+  [[ -n "${KEEPALIVED_CONFIG}" && -n "${KEEPALIVED_SERVICE}" && -n "${LVS_TOPOLOGY}" ]] || \
     die "--profile lvs requires Keepalived integration"
 else
   prepare_monitoring_options

@@ -219,7 +219,10 @@ class AgentTestCase(unittest.TestCase):
             side_effect=agent.AgentError("helper unavailable"),
         ):
             fallback = service._local_observation(executor)
-        self.assertEqual({"vip": "10.165.0.110"}, fallback["facts"]["keepalived"])
+        self.assertEqual(
+            {"mode": "vrrp", "vip": "10.165.0.110"},
+            fallback["facts"]["keepalived"],
+        )
 
         stopped_service = dict(service_status, active=False, active_state="inactive", sub_state="dead")
         with (
@@ -2117,6 +2120,113 @@ Conns/s Pkts/s Pkts/s Bytes/s Bytes/s
         with self.assertRaisesRegex(agent.AgentError, "requires ipvs_observer_enabled"):
             agent.Settings(**common).validate()
 
+    def test_standalone_lvs_profile_reports_explicit_mode_without_fake_vip(self):
+        keepalived_root = Path(self.temporary.name) / "standalone-keepalived"
+        keepalived_root.mkdir()
+        keepalived_config = keepalived_root / "keepalived.conf"
+        managed_file = keepalived_root / "nginx-manager.d" / "50-lvs-managed.conf"
+        managed_file.parent.mkdir()
+        managed_file.write_text("", encoding="utf-8")
+        keepalived_config.write_text(
+            "include nginx-manager.d/50-lvs-managed.conf\n"
+            "virtual_server 192.0.2.40 443 { protocol TCP }\n",
+            encoding="utf-8",
+        )
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="standalone-lvs",
+            node_profile="lvs",
+            nginx_binary="",
+            openssl_binary="",
+            nginx_config="",
+            nginx_root="",
+            config_entries=[],
+            allowed_certificate_roots=[],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "standalone-helper.sock"),
+            keepalived_binary=str(Path(sys.executable).resolve()),
+            keepalived_config=str(keepalived_config),
+            keepalived_service="keepalived.service",
+            keepalived_vip=None,
+            lvs_topology="standalone",
+            ipvs_observer_enabled=True,
+            lvs_management_enabled=True,
+            lvs_managed_file=str(managed_file),
+        )
+        settings.validate()
+        self.assertTrue(settings.keepalived_enabled())
+        self.assertIn("lvs_standalone_v1", settings.reported_capabilities())
+
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "standalone-jobs.json"))
+        service_status = {
+            "name": "keepalived.service",
+            "load_state": "loaded",
+            "active_state": "active",
+            "sub_state": "running",
+            "active": True,
+        }
+        with mock.patch.object(executor, "_keepalived_executable", return_value=str(Path(sys.executable).resolve())), mock.patch.object(
+            executor, "_keepalived_service_status", return_value=service_status
+        ), mock.patch.object(executor, "_keepalived_version", return_value="Keepalived v2.2.8"), mock.patch.object(
+            executor,
+            "_local_ip_addresses",
+            return_value={"192.0.2.40", "127.0.0.1"},
+        ) as local_addresses:
+            observation = executor.keepalived_observation()
+        self.assertEqual("standalone", observation["mode"])
+        self.assertEqual("STANDALONE", observation["role"])
+        self.assertTrue(observation["service"]["active"])
+        self.assertEqual(0, observation["config_summary"]["instance_count"])
+        self.assertEqual([], observation["config_summary"]["instances"])
+        self.assertTrue(observation["config_summary"]["summary_complete"])
+        self.assertFalse(observation["config_summary"]["truncated"])
+        self.assertNotIn("vip", observation)
+        self.assertNotIn("vip_owned", observation)
+        self.assertEqual(["127.0.0.1", "192.0.2.40"], observation["local_addresses"])
+        local_addresses.assert_called_once_with()
+
+    def test_standalone_lvs_rejects_vip_hybrid_profile_and_vrrp_graph(self):
+        common = {
+            "server_url": "https://manager.example.test",
+            "node_name": "invalid-standalone",
+            "node_profile": "lvs",
+            "nginx_binary": "",
+            "openssl_binary": "",
+            "nginx_config": "",
+            "nginx_root": "",
+            "config_entries": [],
+            "allowed_certificate_roots": [],
+            "keepalived_config": str(Path(self.temporary.name) / "standalone.conf"),
+            "keepalived_service": "keepalived.service",
+            "lvs_topology": "standalone",
+            "ipvs_observer_enabled": True,
+        }
+        with self.assertRaisesRegex(agent.AgentError, "must not configure keepalived_vip"):
+            agent.Settings(**dict(common, keepalived_vip="192.0.2.40")).validate()
+        hybrid = dict(
+            common,
+            node_profile="hybrid",
+            nginx_binary=str(Path(sys.executable).resolve()),
+            openssl_binary=str(Path(sys.executable).resolve()),
+            nginx_config=str(self.main_config),
+            nginx_root=str(self.root),
+            allowed_config_roots=[str(self.config_root)],
+            allowed_certificate_roots=[str(self.certificate_root)],
+        )
+        hybrid.pop("config_entries")
+        with self.assertRaisesRegex(agent.AgentError, "requires the lvs node_profile"):
+            agent.Settings(**hybrid).validate()
+
+    def test_legacy_keepalived_vip_infers_vrrp_topology(self):
+        keepalived_config = Path(self.temporary.name) / "legacy-vrrp.conf"
+        keepalived_config.write_text(
+            "vrrp_instance VI_1 { virtual_ipaddress { 192.0.2.110 } }\n",
+            encoding="utf-8",
+        )
+        settings = self.keepalived_settings(keepalived_config)
+        self.assertEqual("vrrp", settings.lvs_topology)
+
     def test_hybrid_profile_preserves_nginx_and_lvs_capabilities(self):
         keepalived_config = Path(self.temporary.name) / "hybrid-keepalived.conf"
         settings = self.keepalived_settings(keepalived_config)
@@ -2528,7 +2638,8 @@ apply_nginx_prefix_defaults
 [[ "$MANAGED_CONFIG_ALREADY_INCLUDED" == "1" ]]
 '''
         result = subprocess.run(
-            [bash, "-c", probe],
+            [bash, "-s"],
+            input=probe,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",
@@ -2566,7 +2677,8 @@ FORCE_ENROLL=0
 validate_existing_identity_binding
 '''
         result = subprocess.run(
-            [bash, "-c", probe],
+            [bash, "-s"],
+            input=probe,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",
@@ -2580,6 +2692,47 @@ validate_existing_identity_binding
         )
         self.assertEqual(99, result.returncode, result.stderr)
         self.assertIn("--force-enroll", result.stderr)
+
+    def test_installer_fresh_identity_binding_continues_without_existing_files(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^validate_existing_identity_binding\(\) \{.*?^\}", installer)
+        self.assertIsNotNone(match)
+        bash = shutil.which("bash")
+        if bash is None and os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+            if candidate.exists():
+                bash = str(candidate)
+        if bash is None:
+            self.skipTest("bash is unavailable")
+
+        probe = match.group(0) + r'''
+set -Eeuo pipefail
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+STATE_DIR="$temporary/state"
+CONFIG_FILE="$temporary/config.json"
+mkdir -p "$STATE_DIR"
+PYTHON_BIN="$TEST_PYTHON"
+NODE_NAME=new-node
+FORCE_ENROLL=0
+validate_existing_identity_binding
+printf 'installer-continued\n'
+'''
+        result = subprocess.run(
+            [bash, "-c", probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("installer-continued\n", result.stdout)
 
     def test_installer_keepalived_vip_uses_safe_defaults(self):
         installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
@@ -2621,7 +2774,8 @@ prepare_keepalived_options
 [[ "$KEEPALIVED_SERVICE" == "keepalived.service" ]]
 '''
         result = subprocess.run(
-            [bash, "-c", probe],
+            [bash, "-s"],
+            input=probe,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",
@@ -2637,7 +2791,8 @@ prepare_keepalived_options
         self.assertIn('/apps/keepalived/sbin/keepalived', installer)
         bad_probe = probe.replace('KEEPALIVED_VIP="192.0.2.110"', 'KEEPALIVED_VIP="192.0.2.111"')
         bad_result = subprocess.run(
-            [bash, "-c", bad_probe],
+            [bash, "-s"],
+            input=bad_probe,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",
@@ -2691,7 +2846,8 @@ PYTHON_BIN="$TEST_PYTHON"
 prepare_keepalived_options
 '''
         result = subprocess.run(
-            [bash, "-c", probe],
+            [bash, "-s"],
+            input=probe,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",
@@ -2717,7 +2873,8 @@ prepare_keepalived_options
             )
         )
         escaped_result = subprocess.run(
-            [bash, "-c", escaped_probe],
+            [bash, "-s"],
+            input=escaped_probe,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",
@@ -2731,6 +2888,102 @@ prepare_keepalived_options
         )
         self.assertNotEqual(0, escaped_result.returncode)
         self.assertIn("include", escaped_result.stderr)
+
+    def test_installer_standalone_lvs_requires_explicit_mode_and_rejects_vrrp_graph(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^prepare_keepalived_options\(\) \{.*?^\}", installer)
+        self.assertIsNotNone(match)
+        bash = shutil.which("bash")
+        if bash is None and os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe"
+            if candidate.exists():
+                bash = str(candidate)
+        if bash is None:
+            self.skipTest("bash is unavailable")
+
+        probe = match.group(0) + r'''
+set -Eeuo pipefail
+die() { printf '%s\n' "$*" >&2; exit 99; }
+systemctl() { [[ "$1" == "cat" && "$2" == "keepalived.service" ]]; }
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+mkdir -p "$temporary/bin" "$temporary/keepalived/conf.d"
+printf '#!/bin/sh\nexit 0\n' > "$temporary/bin/keepalived"
+chmod +x "$temporary/bin/keepalived"
+cat > "$temporary/keepalived/keepalived.conf" <<'EOF'
+include conf.d/*.conf
+virtual_server 192.0.2.40 443 {
+  protocol TCP
+}
+EOF
+printf 'virtual_server 192.0.2.41 443 { protocol TCP }\n' > "$temporary/keepalived/conf.d/lvs.conf"
+DEFAULT_KEEPALIVED_CONFIG="$temporary/keepalived/keepalived.conf"
+DEFAULT_KEEPALIVED_SERVICE="keepalived.service"
+KEEPALIVED_BINARY="$temporary/bin/keepalived"
+KEEPALIVED_CONFIG=""
+KEEPALIVED_SERVICE=""
+KEEPALIVED_VIP=""
+LVS_TOPOLOGY="standalone"
+NODE_PROFILE="lvs"
+PYTHON_BIN="$TEST_PYTHON"
+prepare_keepalived_options
+[[ "$KEEPALIVED_CONFIG" == "$temporary/keepalived/keepalived.conf" ]]
+[[ "$KEEPALIVED_SERVICE" == "keepalived.service" ]]
+[[ -z "$KEEPALIVED_VIP" ]]
+'''
+        result = subprocess.run(
+            [bash, "-s"],
+            input=probe,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        vrrp_probe = probe.replace(
+            "printf 'virtual_server 192.0.2.41 443 { protocol TCP }\\n'",
+            "printf 'vrrp_instance VI_1 { virtual_ipaddress { 192.0.2.40 } }\\n'",
+        )
+        rejected = subprocess.run(
+            [bash, "-s"],
+            input=vrrp_probe,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
+        )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("vrrp_instance", rejected.stderr)
+
+        implicit = probe.replace('LVS_TOPOLOGY="standalone"', 'LVS_TOPOLOGY=""')
+        implicit_result = subprocess.run(
+            [bash, "-s"],
+            input=implicit,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
+        )
+        self.assertNotEqual(0, implicit_result.returncode)
 
     def test_installer_upgrade_only_replaces_agent_program(self):
         installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
@@ -2783,12 +3036,18 @@ prepare_keepalived_options
 [[ "$KEEPALIVED_BINARY" == "$temporary/apps/keepalived/sbin/keepalived" ]]
 '''
         result = subprocess.run(
-            [bash, "-c", probe],
+            [bash, "-s"],
+            input=probe,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True,
+            encoding="utf-8",
             check=False,
-            env=dict(os.environ, BASH_COMPAT="4.2", TEST_PYTHON=Path(sys.executable).as_posix()),
+            env=dict(
+                os.environ,
+                BASH_COMPAT="4.2",
+                PYTHONUTF8="1",
+                TEST_PYTHON=Path(sys.executable).as_posix(),
+            ),
         )
         self.assertEqual(0, result.returncode, result.stderr)
 

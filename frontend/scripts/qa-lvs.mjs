@@ -123,6 +123,8 @@ try {
     'toggleMemberMonitor',
     'member.monitor.connect_timeout',
     'plannedHasChanges',
+    'lvsTopologyForNode',
+    '单 Director 发布没有 VRRP 主备接管能力',
   ]
   for (const token of safeInteractionContract) {
     if (!viewSource.includes(token)) throw new Error(`LVS UI is missing safe workflow token: ${token}`)

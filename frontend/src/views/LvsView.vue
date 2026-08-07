@@ -32,6 +32,7 @@ import type {
   LvsManagedService,
   LvsMember,
   LvsPlan,
+  NodeRecord,
   Tone,
 } from '../types'
 import {
@@ -104,6 +105,19 @@ const manageableNodes = computed(() => store.nodes.filter((node) =>
   lvsManagement(node)?.management_enabled === true,
 ))
 const onlineManageableNodes = computed(() => manageableNodes.value.filter((node) => node.status !== 'offline'))
+
+function lvsTopologyForNode(node: NodeRecord): 'vrrp' | 'standalone' {
+  const keepalived = node.facts.keepalived
+  return keepalived && typeof keepalived === 'object' && !Array.isArray(keepalived)
+    && (keepalived as Record<string, unknown>).mode === 'standalone'
+    ? 'standalone'
+    : 'vrrp'
+}
+
+function lvsTopologyLabel(node: NodeRecord) {
+  return lvsTopologyForNode(node) === 'standalone' ? '单 Director' : 'VRRP'
+}
+
 const draftTargetNodes = computed(() => {
   if (!draft.value) return []
   const selected = new Set(draft.value.nodeIds)
@@ -414,8 +428,20 @@ function openDelete() {
 
 function toggleDraftNode(nodeId: string, checked: boolean) {
   if (!draft.value || draft.value.mode !== 'create') return
+  const node = onlineManageableNodes.value.find((item) => item.id === nodeId)
+  if (!node) return
   const selected = new Set(draft.value.nodeIds)
-  if (checked) selected.add(nodeId)
+  if (checked && lvsTopologyForNode(node) === 'standalone') {
+    draft.value.nodeIds = [nodeId]
+    return
+  }
+  if (checked) {
+    for (const selectedId of selected) {
+      const selectedNode = onlineManageableNodes.value.find((item) => item.id === selectedId)
+      if (selectedNode && lvsTopologyForNode(selectedNode) === 'standalone') selected.delete(selectedId)
+    }
+    selected.add(nodeId)
+  }
   else selected.delete(nodeId)
   draft.value.nodeIds = [...selected]
 }
@@ -466,6 +492,16 @@ function draftValidationError() {
       lvsManagement(node)?.management_enabled !== true
   })
   if (invalidNode) return '目标 Director 必须在线且已启用 LVS 管理'
+  const targetTopologies = new Set(current.nodeIds.map((id) => {
+    const node = store.nodes.find((item) => item.id === id)
+    return node ? lvsTopologyForNode(node) : 'unknown'
+  }))
+  if (targetTopologies.size > 1) return '单 Director 与 VRRP Director 不能混合发布'
+  if (targetTopologies.has('standalone')) {
+    if (current.nodeIds.length !== 1) return '单 Director 拓扑只能选择一个节点'
+    const standalone = store.nodes.find((item) => item.id === current.nodeIds[0])
+    if (!standalone?.capabilities.includes('lvs_standalone_v1')) return '该 Agent 版本尚不支持单 Director 安全发布'
+  }
   if (current.mode === 'delete') return ''
   const service = current.service
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(service.name)) return '服务名称仅支持字母、数字、点、下划线、冒号和短横线'
@@ -581,6 +617,11 @@ function lvsApiMessage(error: unknown) {
     'Keepalived unicast peers are not represented by discovered Agents': 'Keepalived 配置中仍有未接入平台的 unicast peer，请先安装并批准对应 Agent。',
     'registered Agent membership in the Keepalived group is ambiguous': '同一 VIP 下存在摘要不完整或归属不明确的 Agent，请先修正节点状态。',
     'Keepalived unicast peer identity is shared by multiple Agents': '多个 Agent 使用了同一个 HA 地址标签，请修正 --node-ip 后再发布。',
+    'standalone LVS plans require exactly one node': '单 Director 拓扑一次只能选择一个节点。',
+    'standalone LVS target address must be local to the selected node': 'Virtual Service 地址不属于该单 Director 的本机地址；请先配置本机地址或改用 VRRP。',
+    'standalone LVS topology cannot manage a registered VRRP VIP': '该地址属于已登记的 VRRP 组，不能按单 Director 发布。',
+    'selected LVS nodes use mixed deployment topologies': '单 Director 与 VRRP Director 不能混合发布。',
+    'standalone LVS capability is required': '请先升级 Agent；当前节点尚不支持单 Director 安全发布。',
     'explicit LVS takeover acknowledgement is required': '该 Virtual Service 仍属于现有配置，请使用“接管”流程迁移到平台托管文件。',
     'LVS nodes have semantic configuration drift': 'Director 之间存在非目标配置漂移，需先处理漂移后再发布。',
   }
@@ -935,10 +976,12 @@ async function refresh() {
           <div class="lvs-detail-facts">
             <div><span>Virtual Service</span><strong>{{ selectedGroup.label }}</strong></div>
             <div><span>Scheduler</span><strong>{{ selectedGroup.scheduler }}</strong></div>
+            <div><span>部署拓扑</span><strong>{{ selectedGroup.snapshots.every((snapshot) => lvsTopologyForNode(snapshot.node) === 'standalone') ? '单 Director' : 'VRRP Director 组' }}</strong></div>
             <div><span>Persistence</span><strong>{{ selectedGroup.persistenceSeconds === null ? '未启用' : `${selectedGroup.persistenceSeconds}s` }}</strong></div>
             <div><span>管理状态</span><strong>{{ selectedManagement.label }}</strong></div>
             <div><span>运行状态</span><strong>{{ selectedGroup.partial ? '观测不完整' : 'IPVS 规则已观测' }}</strong></div>
             <div><span>Director 对账</span><strong>{{ selectedGroup.drift ? '配置漂移' : '规则一致' }}</strong></div>
+            <div><span>故障接管</span><strong>{{ selectedGroup.snapshots.every((snapshot) => lvsTopologyForNode(snapshot.node) === 'standalone') ? '无主备接管' : '由 Keepalived 提供' }}</strong></div>
           </div>
 
           <section class="lvs-topology">
@@ -1038,8 +1081,8 @@ async function refresh() {
                   :checked="draft.nodeIds.includes(node.id)"
                   @update:checked="(checked) => toggleDraftNode(node.id, checked)"
                 />
-                <span><strong>{{ node.node_name }}</strong><small>{{ node.hostname }} · 在线</small></span>
-                <StatusTag :label="lvsManagement(node)?.config_hash ? '已有托管清单' : '可管理'" tone="success" />
+                <span><strong>{{ node.node_name }}</strong><small>{{ node.hostname }} · {{ lvsTopologyForNode(node) === 'standalone' ? '无主备接管能力' : 'Keepalived 主备组' }}</small></span>
+                <StatusTag :label="lvsTopologyLabel(node)" :tone="lvsTopologyForNode(node) === 'standalone' ? 'warning' : 'success'" />
               </label>
             </div>
             <div v-else class="draft-locked-targets">
@@ -1054,6 +1097,9 @@ async function refresh() {
             </p>
             <p v-else-if="!draft.nodeIds.length" class="target-selection-warning">
               默认不选中 Director，请明确选择发布范围。
+            </p>
+            <p v-else-if="draftTargetNodes.some((node) => lvsTopologyForNode(node) === 'standalone')" class="target-selection-warning standalone">
+              单 Director 发布没有 VRRP 主备接管能力，只会修改当前选中的一台节点。
             </p>
             <label class="field-block">
               <span>变更说明</span>

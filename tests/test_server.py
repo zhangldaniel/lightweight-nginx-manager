@@ -124,6 +124,8 @@ class ServerTestCase(unittest.TestCase):
         local_addresses=None,
         unicast_src_ip=None,
         unicast_peers=None,
+        mode="vrrp",
+        keepalived_active=True,
     ):
         headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
         if virtual_ips is None:
@@ -132,6 +134,38 @@ class ServerTestCase(unittest.TestCase):
                 "10.165.0.50/22",
                 "10.165.0.60/22",
             ]
+        keepalived = {
+            "mode": mode,
+            "role": role,
+            "service": {
+                "name": "keepalived.service",
+                "load_state": "loaded",
+                "active_state": "active" if keepalived_active else "inactive",
+                "sub_state": "running" if keepalived_active else "dead",
+                "active": keepalived_active,
+            },
+            "local_addresses": local_addresses or [],
+            "config_summary": {
+                "instance_count": 0 if mode == "standalone" else 1,
+                "summary_complete": summary_complete,
+                "truncated": False,
+                "instances": [] if mode == "standalone" else [
+                    {
+                        "name": "VI_1",
+                        "configured_state": "MASTER" if role == "MASTER" else "BACKUP",
+                        "interface": "ens192",
+                        "virtual_router_id": virtual_router_id,
+                        "priority": 150 if role == "MASTER" else 100,
+                        "advert_int": 1,
+                        "virtual_ips": virtual_ips,
+                        "unicast_src_ip": unicast_src_ip,
+                        "unicast_peers": unicast_peers or [],
+                    }
+                ],
+            },
+        }
+        if mode != "standalone":
+            keepalived["vip"] = vip
         response = self.client.post(
             "/api/v1/agent/heartbeat",
             headers=headers,
@@ -139,28 +173,7 @@ class ServerTestCase(unittest.TestCase):
                 "status": "online",
                 "capabilities": capabilities if capabilities is not None else ["lvs_manage_v1", "lvs_adopt_v1"],
                 "facts": {
-                    "keepalived": {
-                        "role": role,
-                        "vip": vip,
-                        "local_addresses": local_addresses or [],
-                        "config_summary": {
-                            "instance_count": 1,
-                            "summary_complete": summary_complete,
-                            "instances": [
-                                {
-                                    "name": "VI_1",
-                                    "configured_state": "MASTER" if role == "MASTER" else "BACKUP",
-                                    "interface": "ens192",
-                                    "virtual_router_id": virtual_router_id,
-                                    "priority": 150 if role == "MASTER" else 100,
-                                    "advert_int": 1,
-                                    "virtual_ips": virtual_ips,
-                                    "unicast_src_ip": unicast_src_ip,
-                                    "unicast_peers": unicast_peers or [],
-                                }
-                            ],
-                        },
-                    },
+                    "keepalived": keepalived,
                     "lvs": {
                         "management_enabled": True,
                         "config_hash": config_hash or ("a" * 64),
@@ -2337,6 +2350,198 @@ class ServerTestCase(unittest.TestCase):
         )
         self.assertEqual(422, rejected_disabled.status_code, rejected_disabled.text)
 
+    def test_lvs_standalone_plan_and_apply_are_bound_to_one_local_director(self):
+        director = self.enroll("lvs-standalone")
+        headers = self.report_lvs(
+            director,
+            role="STANDALONE",
+            mode="standalone",
+            local_addresses=["10.165.0.41", "127.0.0.1"],
+            capabilities=["lvs_manage_v1", "lvs_adopt_v1", "lvs_standalone_v1"],
+        )
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [director["agent_id"]], "intent": self.lvs_intent("10.165.0.41")},
+        )
+        self.assertEqual(201, planned.status_code, planned.text)
+        plan = planned.json()["plan"]
+        topology = plan["diff"]["ha_group"]
+        self.assertEqual("standalone", topology["mode"])
+        self.assertIsNone(topology["vip"])
+        self.assertIsNone(topology["virtual_router_id"])
+        self.assertEqual({director["agent_id"]: "STANDALONE"}, topology["roles"])
+        self.assertEqual([director["agent_id"]], topology["discovered_node_ids"])
+        self.assertEqual({}, topology["peer_coverage"])
+
+        node = self.client.get("/api/v1/admin/nodes", headers=self.admin_headers).json()["items"][0]
+        self.assertEqual("standalone", node["facts"]["keepalived"]["mode"])
+        self.assertEqual("STANDALONE", node["facts"]["keepalived"]["role"])
+
+        applied = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": plan["plan_digest"], "request_id": "lvs-standalone-request-01"},
+        )
+        self.assertEqual(201, applied.status_code, applied.text)
+        self.assertEqual([director["agent_id"]], [job["node_id"] for job in applied.json()["jobs"]])
+        job = self.client.post("/api/v1/agent/poll", headers=headers, json={}).json()["jobs"][0]
+        self.assertEqual("standalone", job["payload"]["expected_mode"])
+        self.assertEqual({"mode": "standalone"}, job["payload"]["expected_topology"])
+        self.assertEqual("STANDALONE", job["payload"]["expected_role"])
+        self.assertIsNone(job["payload"]["expected_vip"])
+
+    def test_lvs_standalone_rejects_multiple_nodes_nonlocal_target_and_missing_capability(self):
+        first = self.enroll("lvs-standalone-first")
+        second = self.enroll("lvs-standalone-second")
+        standalone_capabilities = ["lvs_manage_v1", "lvs_adopt_v1", "lvs_standalone_v1"]
+        self.report_lvs(
+            first,
+            role="STANDALONE",
+            mode="standalone",
+            local_addresses=["10.165.0.41"],
+            capabilities=standalone_capabilities,
+        )
+        self.report_lvs(
+            second,
+            role="STANDALONE",
+            mode="standalone",
+            local_addresses=["10.165.0.42"],
+            capabilities=standalone_capabilities,
+        )
+
+        multiple = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [first["agent_id"], second["agent_id"]],
+                "intent": self.lvs_intent("10.165.0.41"),
+            },
+        )
+        self.assertEqual(409, multiple.status_code, multiple.text)
+        self.assertIn("exactly one", multiple.text)
+
+        nonlocal_target = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [first["agent_id"]], "intent": self.lvs_intent("10.165.0.99")},
+        )
+        self.assertEqual(409, nonlocal_target.status_code, nonlocal_target.text)
+        self.assertIn("local address", nonlocal_target.text)
+
+        self.report_lvs(
+            first,
+            role="STANDALONE",
+            mode="standalone",
+            local_addresses=["10.165.0.41"],
+            capabilities=["lvs_manage_v1", "lvs_adopt_v1"],
+        )
+        missing_capability = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [first["agent_id"]], "intent": self.lvs_intent("10.165.0.41")},
+        )
+        self.assertEqual(409, missing_capability.status_code, missing_capability.text)
+        self.assertIn("lvs_standalone_v1", missing_capability.text)
+
+        self.report_lvs(
+            first,
+            role="STANDALONE",
+            mode="standalone",
+            local_addresses=["10.165.0.41"],
+            capabilities=standalone_capabilities,
+            keepalived_active=False,
+        )
+        inactive = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [first["agent_id"]], "intent": self.lvs_intent("10.165.0.41")},
+        )
+        self.assertEqual(409, inactive.status_code, inactive.text)
+        self.assertIn("must be active", inactive.text)
+
+        self.report_lvs(
+            first,
+            role="STANDALONE",
+            mode="standalone",
+            local_addresses=["10.165.0.41"],
+            capabilities=standalone_capabilities,
+            summary_complete=False,
+        )
+        incomplete = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [first["agent_id"]], "intent": self.lvs_intent("10.165.0.41")},
+        )
+        self.assertEqual(409, incomplete.status_code, incomplete.text)
+        self.assertIn("complete Keepalived configuration summary", incomplete.text)
+
+    def test_lvs_standalone_rejects_mixed_or_registered_vrrp_address(self):
+        standalone = self.enroll("lvs-standalone-conflict")
+        vrrp = self.enroll("lvs-vrrp-conflict")
+        self.report_lvs(
+            standalone,
+            role="STANDALONE",
+            mode="standalone",
+            local_addresses=["10.165.0.41"],
+            capabilities=["lvs_manage_v1", "lvs_adopt_v1", "lvs_standalone_v1"],
+        )
+        self.report_lvs(
+            vrrp,
+            role="MASTER",
+            vip="10.165.0.41",
+            virtual_router_id=41,
+            virtual_ips=["10.165.0.41/22"],
+        )
+        conflict = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [standalone["agent_id"]], "intent": self.lvs_intent("10.165.0.41")},
+        )
+        self.assertEqual(409, conflict.status_code, conflict.text)
+        self.assertIn("registered VRRP", conflict.text)
+
+        mixed = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [standalone["agent_id"], vrrp["agent_id"]],
+                "intent": self.lvs_intent("10.165.0.41"),
+            },
+        )
+        self.assertEqual(409, mixed.status_code, mixed.text)
+        self.assertIn("mixed", mixed.text.lower())
+
+    def test_lvs_standalone_apply_revalidates_topology_after_plan(self):
+        director = self.enroll("lvs-standalone-topology-change")
+        capabilities = ["lvs_manage_v1", "lvs_adopt_v1", "lvs_standalone_v1"]
+        self.report_lvs(
+            director,
+            role="STANDALONE",
+            mode="standalone",
+            local_addresses=["10.165.0.41"],
+            capabilities=capabilities,
+        )
+        plan = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [director["agent_id"]], "intent": self.lvs_intent("10.165.0.41")},
+        ).json()["plan"]
+        self.report_lvs(
+            director,
+            role="STANDALONE",
+            mode="standalone",
+            local_addresses=["10.165.0.42"],
+            capabilities=capabilities,
+        )
+        rejected = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": plan["plan_digest"], "request_id": "lvs-standalone-request-02"},
+        )
+        self.assertEqual(409, rejected.status_code, rejected.text)
+        self.assertIn("local address", rejected.text)
+
     def test_lvs_apply_rejects_overlapping_node_operations(self):
         enrolled = self.enroll("lvs-overlap")
         self.report_lvs(enrolled)
@@ -2712,6 +2917,7 @@ class ServerTestCase(unittest.TestCase):
         )
         self.assertEqual(201, valid.status_code, valid.text)
         group = valid.json()["plan"]["diff"]["ha_group"]
+        self.assertEqual("vrrp", group["mode"])
         self.assertEqual("10.165.0.40", group["vip"])
         self.assertEqual(40, group["virtual_router_id"])
         self.assertEqual("BACKUP", group["roles"][backup["agent_id"]])

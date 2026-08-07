@@ -301,9 +301,18 @@ function directorGroupFor(node: NodeRecord, service: LvsVirtualService) {
   const isolated = { key: `node|${node.id}`, known: true }
   const keepalived = asRecord(node.facts.keepalived)
   if (!keepalived) return isolated
-  const vip = normalizedAddress(keepalived.vip)
   const summary = asRecord(keepalived.config_summary)
   const instances = Array.isArray(summary?.instances) ? summary.instances : []
+  if (keepalived.mode === 'standalone') {
+    return {
+      ...isolated,
+      known: summary?.summary_complete === true
+        && summary.truncated !== true
+        && Number(summary.instance_count) === 0
+        && instances.length === 0,
+    }
+  }
+  const vip = normalizedAddress(keepalived.vip)
   if (!vip || summary?.summary_complete !== true || summary.truncated === true) {
     return { ...isolated, known: false }
   }

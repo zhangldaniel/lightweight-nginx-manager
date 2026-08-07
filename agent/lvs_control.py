@@ -758,10 +758,10 @@ def read_config_graph(main_config: Path, maximum_file_bytes: int) -> List[Tuple[
             resolved = candidate.resolve(strict=True)
             if not _resolved_inside(resolved, root):
                 raise LvsControlError("Keepalived include leaves the configured directory", "path_rejected", "inventory")
-            if resolved in seen:
-                return
             if resolved in active:
                 raise LvsControlError("Keepalived include graph contains a cycle", "lvs_config_unsupported", "inventory")
+            if resolved in seen:
+                return
             status = resolved.stat()
             if not stat.S_ISREG(status.st_mode):
                 raise LvsControlError("Keepalived include is not a regular file", "path_rejected", "inventory")
@@ -799,6 +799,15 @@ def read_config_graph(main_config: Path, maximum_file_bytes: int) -> List[Tuple[
 
     visit(main_config, 0)
     return sorted(seen.items(), key=lambda item: str(item[0]))
+
+
+def _graph_mode(graph: Sequence[Tuple[Path, bytes]]) -> str:
+    """Classify a complete, safely loaded Keepalived graph."""
+    for _path, data in graph:
+        for token, _start, _end in _lex(data.decode("utf-8", errors="replace")):
+            if token.lower() == "vrrp_instance":
+                return "vrrp"
+    return "standalone"
 
 
 def graph_hash(graph: Sequence[Tuple[Path, bytes]], root: Path) -> str:
@@ -1198,6 +1207,103 @@ class LvsControlModule:
                 stage,
             )
 
+    def _configured_mode(self) -> str:
+        configured = getattr(self.settings, "lvs_topology", None)
+        if configured in {"standalone", "vrrp"}:
+            return str(configured)
+        return "vrrp" if getattr(self.settings, "keepalived_vip", None) else "standalone"
+
+    def _assert_expected_topology(
+        self,
+        payload: Dict[str, Any],
+        graph: Sequence[Tuple[Path, bytes]],
+        stage: str = "precheck",
+    ) -> None:
+        configured_mode = self._configured_mode()
+        expected_mode = payload.get("expected_mode")
+        expected_topology = payload.get("expected_topology")
+        expected_role = payload.get("expected_role")
+        expected_vip = payload.get("expected_vip")
+
+        if expected_mode is not None and expected_mode not in {"standalone", "vrrp"}:
+            raise LvsControlError("expected_mode is invalid", "invalid_lvs_intent", stage)
+        if expected_mode is not None and expected_mode != configured_mode:
+            raise LvsControlError(
+                "expected_mode does not match the configured LVS topology",
+                "invalid_lvs_intent",
+                stage,
+            )
+
+        if configured_mode == "standalone":
+            if expected_mode != "standalone":
+                raise LvsControlError(
+                    "standalone LVS requires expected_mode=standalone",
+                    "invalid_lvs_intent",
+                    stage,
+                )
+            if not isinstance(expected_topology, dict) or set(expected_topology) != {"mode"} or expected_topology.get("mode") != "standalone":
+                raise LvsControlError(
+                    "standalone LVS requires an exact expected_topology snapshot",
+                    "invalid_lvs_intent",
+                    stage,
+                )
+            if expected_role != "STANDALONE":
+                raise LvsControlError(
+                    "standalone LVS requires expected_role=STANDALONE",
+                    "invalid_lvs_intent",
+                    stage,
+                )
+            if expected_vip is not None:
+                raise LvsControlError(
+                    "standalone LVS must not include expected_vip",
+                    "invalid_lvs_intent",
+                    stage,
+                )
+            if _graph_mode(graph) != "standalone":
+                raise LvsControlError(
+                    "Keepalived topology changed after planning",
+                    "concurrent_change",
+                    stage,
+                )
+            if not self._service_active():
+                raise LvsControlError(
+                    "Keepalived service state changed after planning",
+                    "concurrent_change",
+                    stage,
+                )
+            intent = payload.get("intent")
+            target = intent.get("target") if isinstance(intent, dict) else None
+            target_address = target.get("address") if isinstance(target, dict) else None
+            try:
+                normalized_target = str(ipaddress.ip_address(str(target_address)))
+            except ValueError as exc:
+                raise LvsControlError(
+                    "standalone LVS target address is invalid",
+                    "invalid_lvs_intent",
+                    stage,
+                ) from exc
+            if normalized_target not in self._local_ip_addresses():
+                raise LvsControlError(
+                    "standalone LVS target is no longer a local address",
+                    "concurrent_change",
+                    stage,
+                )
+            return
+
+        if expected_topology is not None:
+            raise LvsControlError(
+                "expected_topology is only supported for standalone LVS",
+                "invalid_lvs_intent",
+                stage,
+            )
+        if _graph_mode(graph) != "vrrp":
+            raise LvsControlError(
+                "Keepalived topology changed after planning",
+                "concurrent_change",
+                stage,
+            )
+        self._assert_expected_ha(payload, stage)
+
     def _verify_restored_runtime(self, manifest: Dict[str, Any], stage: str) -> None:
         target = manifest.get("runtime_target")
         expected = manifest.get("pre_runtime_services")
@@ -1274,6 +1380,7 @@ class LvsControlModule:
         runtime = _read_ipvs_services()
         return {
             "schema_version": SCHEMA_VERSION,
+            "mode": _graph_mode(graph),
             "management_enabled": bool(getattr(self.settings, "lvs_management_enabled", False)),
             "config_hash": graph_hash(graph, self.main_config.parent),
             "managed_file": str(self.managed_file),
@@ -1771,7 +1878,7 @@ class LvsControlModule:
                 payload,
                 {
                     "intent", "expected_config_hash", "plan_digest", "expected_role",
-                    "expected_vip", "adopt_existing",
+                    "expected_vip", "expected_mode", "expected_topology", "adopt_existing",
                 },
                 "LVS payload",
             )
@@ -1911,7 +2018,7 @@ class LvsControlModule:
             payload,
             {
                 "intent", "expected_config_hash", "plan_digest", "expected_role",
-                "expected_vip", "adopt_existing",
+                "expected_vip", "expected_mode", "expected_topology", "adopt_existing",
             },
             "LVS payload",
         )
@@ -1934,7 +2041,7 @@ class LvsControlModule:
                 "concurrent_change",
                 "precheck",
             )
-        self._assert_expected_ha(payload)
+        self._assert_expected_topology(payload, graph)
         runtime_before = _target_runtime_snapshot(
             intent["target"],
             _read_ipvs_services(strict=True),
@@ -1966,7 +2073,7 @@ class LvsControlModule:
             manifest["phase"] = "validating"
             self._write_manifest(transaction_dir, manifest)
             self._validate()
-            self._assert_expected_ha(payload, "verify")
+            self._assert_expected_topology(payload, self._graph(), "verify")
             manifest["phase"] = "reloading"
             manifest["reload_attempted"] = True
             self._write_manifest(transaction_dir, manifest)

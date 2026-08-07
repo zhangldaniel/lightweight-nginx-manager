@@ -24,6 +24,7 @@ function node(id, vip, vrid, members, weight) {
     capabilities: ['ipvs_observer_v1'],
     facts: {
       keepalived: {
+        mode: 'vrrp',
         vip,
         role: id.endsWith('1') ? 'MASTER' : 'BACKUP',
         config_summary: {
@@ -62,6 +63,22 @@ function node(id, vip, vrid, members, weight) {
   }
 }
 
+function standaloneNode(id, localAddress) {
+  const result = node(id, '192.0.2.40', 40, ['192.0.2.43'], 1)
+  result.facts.keepalived = {
+    mode: 'standalone',
+    role: 'STANDALONE',
+    local_addresses: [localAddress],
+    config_summary: {
+      summary_complete: true,
+      truncated: false,
+      instance_count: 0,
+      instances: [],
+    },
+  }
+  return result
+}
+
 const overview = buildLvsOverview([
   node('director-a1', '192.0.2.40', 40, ['192.0.2.43'], 1),
   node('director-a2', '192.0.2.40', 40, ['192.0.2.43'], 1),
@@ -75,4 +92,15 @@ if (overview.groups.some((group) => group.drift || group.missingDirectorCount !=
   throw new Error('an unrelated VRRP group was counted as a missing or drifting Director')
 }
 
-console.log('ipvs VRRP group isolation: ok')
+const standaloneOverview = buildLvsOverview([
+  standaloneNode('standalone-a', '192.0.2.41'),
+  standaloneNode('standalone-b', '192.0.2.42'),
+])
+if (standaloneOverview.groups.length !== 2) {
+  throw new Error('standalone Directors with the same listener were incorrectly merged')
+}
+if (standaloneOverview.groups.some((group) => group.partial || group.drift || group.missingDirectorCount !== 0)) {
+  throw new Error('a complete standalone Director was incorrectly marked partial or drifting')
+}
+
+console.log('ipvs VRRP and standalone Director isolation: ok')

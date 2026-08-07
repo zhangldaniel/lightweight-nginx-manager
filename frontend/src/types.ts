@@ -187,7 +187,7 @@ export interface NodeRecord {
   revoked_at: string | null
 }
 
-export type KeepalivedRole = 'MASTER' | 'BACKUP' | 'FAULT' | 'UNKNOWN'
+export type KeepalivedRole = 'MASTER' | 'BACKUP' | 'STANDALONE' | 'FAULT' | 'UNKNOWN'
 export type KeepalivedJobAction = 'keepalived_inspect' | 'keepalived_validate'
 
 export interface HighAvailabilityNodeRef {

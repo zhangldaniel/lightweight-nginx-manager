@@ -553,6 +553,9 @@ def _safe_keepalived_status(value: Any) -> Optional[Dict[str, Any]]:
         return None
 
     result: Dict[str, Any] = {}
+    mode = value.get("mode")
+    if isinstance(mode, str) and mode.lower() in {"vrrp", "standalone"}:
+        result["mode"] = mode.lower()
     service = value.get("service")
     if isinstance(service, dict):
         safe_service: Dict[str, Any] = {}
@@ -580,7 +583,7 @@ def _safe_keepalived_status(value: Any) -> Optional[Dict[str, Any]]:
             if address is not None
         ]
     role = value.get("role")
-    if isinstance(role, str) and role.upper() in {"MASTER", "BACKUP", "FAULT", "UNKNOWN"}:
+    if isinstance(role, str) and role.upper() in {"MASTER", "BACKUP", "FAULT", "UNKNOWN", "STANDALONE"}:
         result["role"] = role.upper()
     config_path = value.get("config_path")
     if isinstance(config_path, str) and os.path.isabs(config_path):
@@ -659,6 +662,7 @@ def _safe_keepalived_status(value: Any) -> Optional[Dict[str, Any]]:
         )
         result["config_summary"] = {
             "instance_count": len(safe_instances),
+            "vrrp_instance_count": len(safe_instances),
             "instances": safe_instances,
             "summary_complete": summary_complete,
             "truncated": truncated,
@@ -825,6 +829,9 @@ def _safe_lvs_inventory(value: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(value, dict):
         return None
     result: Dict[str, Any] = {"management_enabled": value.get("management_enabled") is True}
+    topology = value.get("topology")
+    if isinstance(topology, dict) and topology.get("mode") in {"vrrp", "standalone"}:
+        result["topology"] = {"mode": topology["mode"]}
     config_hash = value.get("config_hash")
     if isinstance(config_hash, str) and re.fullmatch(r"[a-fA-F0-9]{64}", config_hash):
         result["config_hash"] = config_hash.lower()
@@ -939,6 +946,137 @@ def _validate_lvs_ha_group(
             or summary.get("instance_count") != len(instances)
         )
         return keepalived, None if complete else summary
+
+    selected_statuses = {
+        node_id: node_status(node_id)
+        for node_id in node_ids
+    }
+    selected_modes = {
+        str(keepalived.get("mode") or "vrrp").lower()
+        for keepalived, _summary in selected_statuses.values()
+    }
+    if "standalone" in selected_modes:
+        if selected_modes != {"standalone"}:
+            raise HTTPException(
+                status_code=409,
+                detail="mixed standalone and VRRP LVS nodes cannot share one plan",
+            )
+        if len(node_ids) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="standalone LVS management requires exactly one selected node",
+            )
+        node_id = node_ids[0]
+        keepalived, summary = selected_statuses[node_id]
+        capabilities = observations.get(node_id, {}).get("capabilities")
+        if not isinstance(capabilities, list) or "lvs_standalone_v1" not in capabilities:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "standalone LVS node must advertise lvs_standalone_v1",
+                    "node_ids": [node_id],
+                },
+            )
+        service = keepalived.get("service")
+        if not isinstance(service, dict) or service.get("active") is not True:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "standalone LVS node Keepalived service must be active",
+                    "node_ids": [node_id],
+                },
+            )
+        if summary is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "standalone LVS node must report a complete Keepalived configuration summary",
+                    "node_ids": [node_id],
+                },
+            )
+        if (
+            summary.get("instance_count") != 0
+            or summary.get("vrrp_instance_count") != 0
+            or summary.get("instances") != []
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "standalone LVS node must not contain a VRRP instance",
+                    "node_ids": [node_id],
+                },
+            )
+        if str(keepalived.get("role") or "").upper() != "STANDALONE":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "standalone LVS node role must be STANDALONE",
+                    "node_ids": [node_id],
+                },
+            )
+        if _keepalived_ip(keepalived.get("vip")) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "standalone LVS node must not report a VRRP VIP",
+                    "node_ids": [node_id],
+                },
+            )
+        local_addresses = {
+            normalized
+            for normalized in (
+                _keepalived_ip(item) for item in keepalived.get("local_addresses", [])
+            )
+            if normalized is not None
+        }
+        if target_ip not in local_addresses:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "standalone LVS target must be a local address on the selected node",
+                    "node_ids": [node_id],
+                    "target_address": target_ip,
+                },
+            )
+
+        conflicting_vrrp_nodes: List[str] = []
+        for registered_id, observation in observations.items():
+            registered = _safe_keepalived_status(observation.get("keepalived")) or {}
+            if str(registered.get("mode") or "vrrp").lower() == "standalone":
+                continue
+            registered_summary = registered.get("config_summary")
+            instances = registered_summary.get("instances") if isinstance(registered_summary, dict) else None
+            if not isinstance(instances, list):
+                continue
+            if any(
+                target_ip in {
+                    normalized
+                    for normalized in (
+                        _keepalived_ip(item) for item in instance.get("virtual_ips", [])
+                    )
+                    if normalized is not None
+                }
+                for instance in instances
+                if isinstance(instance, dict)
+            ):
+                conflicting_vrrp_nodes.append(registered_id)
+        if conflicting_vrrp_nodes:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "standalone LVS target belongs to a registered VRRP group",
+                    "node_ids": sorted(conflicting_vrrp_nodes),
+                    "target_address": target_ip,
+                },
+            )
+        return {
+            "mode": "standalone",
+            "vip": None,
+            "virtual_router_id": None,
+            "roles": {node_id: "STANDALONE"},
+            "discovered_node_ids": [node_id],
+            "peer_coverage": {},
+        }
 
     selected_incomplete: List[str] = []
     selected_not_members: List[str] = []
@@ -1170,6 +1308,7 @@ def _validate_lvs_ha_group(
             )
 
     return {
+        "mode": "vrrp",
         "vip": vip,
         "virtual_router_id": virtual_router_id,
         "roles": roles,
@@ -3604,6 +3743,7 @@ def create_app(
                 row["id"]: {
                     "keepalived": json.loads(row["facts_json"] or "{}").get("keepalived"),
                     "labels": json.loads(row["labels_json"] or "{}"),
+                    "capabilities": json.loads(row["capabilities_json"] or "[]"),
                 }
                 for row in all_rows
             }
@@ -3882,6 +4022,7 @@ def create_app(
                 node["id"]: {
                     "keepalived": json.loads(node["facts_json"] or "{}").get("keepalived"),
                     "labels": json.loads(node["labels_json"] or "{}"),
+                    "capabilities": json.loads(node["capabilities_json"] or "[]"),
                 }
                 for node in all_current_rows
             }
@@ -3947,7 +4088,7 @@ def create_app(
                 raise HTTPException(status_code=409, detail="LVS plan adoption-node set is invalid")
             adoption_node_ids = set(raw_adoption_node_ids)
 
-            role_rank = {"BACKUP": 0, "UNKNOWN": 1, "FAULT": 1, "MASTER": 2}
+            role_rank = {"BACKUP": 0, "STANDALONE": 0, "UNKNOWN": 1, "FAULT": 1, "MASTER": 2}
             ordered_nodes = sorted(
                 changed_node_ids,
                 key=lambda item: (role_rank.get(roles.get(item), 1), item),
@@ -3984,7 +4125,11 @@ def create_app(
                 "node_ids": sorted(node_ids),
                 "job_node_ids": ordered_nodes,
                 "selected_node_ids": node_ids,
-                "execution_order": "BACKUP_then_MASTER",
+                "execution_order": (
+                    "STANDALONE"
+                    if current_ha_group["mode"] == "standalone"
+                    else "BACKUP_then_MASTER"
+                ),
             }
             connection.execute(
                 """INSERT INTO operations
@@ -4004,6 +4149,9 @@ def create_app(
                     "expected_vip": current_ha_group["vip"],
                     "adopt_existing": node_id in adoption_node_ids,
                 }
+                if current_ha_group["mode"] == "standalone":
+                    payload["expected_mode"] = "standalone"
+                    payload["expected_topology"] = {"mode": "standalone"}
                 payload_json = _canonical_json(payload)
                 job_id = str(uuid.uuid4())
                 connection.execute(

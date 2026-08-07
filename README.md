@@ -121,12 +121,13 @@ curl -fsS http://localhost:51820/stub_status
 
 ### 纯 LVS 调度节点
 
-只有 Keepalived/IPVS、没有 Nginx 的 Director 使用 `lvs` 模式：
+只有 Keepalived/IPVS、没有 Nginx 的 Director 使用 `lvs` 模式。下面是有 VRRP VIP 的主备组：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
 sudo bash -s -- \
   --profile lvs \
+  --lvs-topology vrrp \
   --server http://192.0.2.20:8443 \
   --node-name lvs-a-01 \
   --node-ip 192.0.2.41 \
@@ -138,6 +139,23 @@ sudo bash -s -- \
 ```
 
 Keepalived 在系统路径时可以删掉 `--keepalived-binary`。`lvs` 模式会自动开启 IPVS 观测，不需要再写 `--enable-lvs-observer`。
+
+没有 VRRP VIP、只有一台 Director 时，使用明确的单机拓扑：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
+sudo bash -s -- \
+  --profile lvs \
+  --lvs-topology standalone \
+  --server http://192.0.2.20:8443 \
+  --node-name lvs-standalone-01 \
+  --node-ip 192.0.2.41 \
+  --keepalived-config /etc/keepalived/keepalived.conf \
+  --keepalived-service keepalived.service \
+  --enable-lvs-management
+```
+
+Standalone 不需要也不允许填写 `--keepalived-vip`。Web 中 Virtual Service 的地址必须已经是这台 Director 的本机地址，例如 `192.0.2.41:443`；平台不会伪造 VIP。这个模式没有主备漂移能力，而且首版要求 Keepalived 配置中不存在 `vrrp_instance`。如果以后增加第二台并使用 VIP，请重新按 `vrrp` 拓扑安装两台 Agent。
 
 启用管理后，Web 可以新增、修改和删除 Virtual Service，调整调度算法、DR/NAT/TUN、会话保持、Pool Member、权重、启停状态和 TCP 健康检查。默认托管文件是 Keepalived 配置目录下的 `nginx-manager.d/50-lvs-managed.conf`，安装器会自动接入并先做配置校验。
 
@@ -169,6 +187,13 @@ sudo bash -s -- --upgrade
 ```
 
 它只更新程序文件。要改节点模式、节点名、目录、日志、Stub Status、Keepalived、LVS 管理或 systemd 权限，仍需重新运行完整安装命令。
+
+首次安装成功时，末尾一定会显示“部署完成”和“去 Web 批准接入”。只看到依赖安装或 HTTP 警告不算完成，可先运行下面两条确认服务是否已经生成：
+
+```bash
+systemctl status nginx-manager-agent nginx-manager-agent-helper
+journalctl -u nginx-manager-agent -n 100 --no-pager
+```
 
 ### 已有身份、改名与重复节点
 

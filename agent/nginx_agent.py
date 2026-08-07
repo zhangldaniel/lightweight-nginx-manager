@@ -679,6 +679,7 @@ class Settings:
         keepalived_config: Optional[str] = None,
         keepalived_service: Optional[str] = None,
         keepalived_vip: Optional[str] = None,
+        lvs_topology: Optional[str] = None,
         ipvs_observer_enabled: bool = False,
         lvs_management_enabled: bool = False,
         lvs_managed_file: Optional[str] = None,
@@ -754,6 +755,11 @@ class Settings:
         self.keepalived_config = keepalived_config
         self.keepalived_service = keepalived_service
         self.keepalived_vip = keepalived_vip
+        self.lvs_topology = (
+            str(lvs_topology).lower()
+            if lvs_topology is not None
+            else ("vrrp" if keepalived_vip else None)
+        )
         self.ipvs_observer_enabled = ipvs_observer_enabled
         self.lvs_management_enabled = lvs_management_enabled
         self.lvs_managed_file = lvs_managed_file
@@ -823,6 +829,7 @@ class Settings:
             keepalived_config=_optional_string(raw.get("keepalived_config")),
             keepalived_service=_optional_string(raw.get("keepalived_service")),
             keepalived_vip=_optional_string(raw.get("keepalived_vip")),
+            lvs_topology=_optional_string(raw.get("lvs_topology")),
             ipvs_observer_enabled=raw.get("ipvs_observer_enabled") is True,
             lvs_management_enabled=raw.get("lvs_management_enabled") is True,
             lvs_managed_file=_optional_string(raw.get("lvs_managed_file")),
@@ -942,15 +949,29 @@ class Settings:
                 raise AgentError("stub_status_url must not contain credentials or a fragment")
             if parsed_stub.hostname.lower() not in {"127.0.0.1", "::1", "localhost"}:
                 raise AgentError("stub_status_url must use a loopback host")
-        keepalived_values = (
-            self.keepalived_config,
-            self.keepalived_service,
-            self.keepalived_vip,
-        )
-        if any(keepalived_values) and not all(keepalived_values):
-            raise AgentError(
-                "keepalived_config, keepalived_service, and keepalived_vip must be configured together"
+        if self.lvs_topology not in {None, "vrrp", "standalone"}:
+            raise AgentError("lvs_topology must be vrrp or standalone")
+        if self.lvs_topology == "standalone":
+            if self.keepalived_vip:
+                raise AgentError("standalone LVS must not configure keepalived_vip")
+            if not self.keepalived_config or not self.keepalived_service:
+                raise AgentError(
+                    "standalone LVS requires keepalived_config and keepalived_service"
+                )
+            if self.node_profile != "lvs":
+                raise AgentError("standalone LVS requires the lvs node_profile")
+        else:
+            keepalived_values = (
+                self.keepalived_config,
+                self.keepalived_service,
+                self.keepalived_vip,
             )
+            if any(keepalived_values) and not all(keepalived_values):
+                raise AgentError(
+                    "keepalived_config, keepalived_service, and keepalived_vip must be configured together"
+                )
+            if all(keepalived_values) and self.lvs_topology is None:
+                self.lvs_topology = "vrrp"
         if self.keepalived_binary and not self.keepalived_enabled():
             raise AgentError("keepalived_binary requires Keepalived integration to be configured")
         if self.keepalived_enabled():
@@ -960,10 +981,11 @@ class Settings:
                 raise AgentError("keepalived_config must be an absolute path")
             if not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", str(self.keepalived_service)):
                 raise AgentError("keepalived_service must be a valid .service unit name")
-            try:
-                self.keepalived_vip = str(ipaddress.ip_address(str(self.keepalived_vip)))
-            except ValueError:
-                raise AgentError("keepalived_vip must be an IP address")
+            if self.lvs_topology == "vrrp":
+                try:
+                    self.keepalived_vip = str(ipaddress.ip_address(str(self.keepalived_vip)))
+                except ValueError:
+                    raise AgentError("keepalived_vip must be an IP address")
         if self.node_profile == "lvs":
             if not self.keepalived_enabled():
                 raise AgentError("lvs node_profile requires Keepalived integration")
@@ -990,7 +1012,11 @@ class Settings:
         return self.node_profile in {"nginx", "hybrid"}
 
     def keepalived_enabled(self) -> bool:
-        return bool(self.keepalived_config and self.keepalived_service and self.keepalived_vip)
+        return bool(
+            self.keepalived_config
+            and self.keepalived_service
+            and self.lvs_topology in {"vrrp", "standalone"}
+        )
 
     def reported_capabilities(self) -> List[str]:
         result = ["inspect"]
@@ -1009,9 +1035,12 @@ class Settings:
             result.append("ipvs_observer_v1")
         if self.lvs_management_enabled:
             result.append("lvs_manage_v1")
+            result.append("lvs_topology_v1")
             # Existing virtual_server blocks are only rewritten through the
             # control plane's explicit takeover acknowledgement workflow.
             result.append("lvs_adopt_v1")
+        if self.lvs_topology == "standalone":
+            result.append("lvs_standalone_v1")
         if self.nginx_enabled() and self.stub_status_url:
             result.append("stub_status_v1")
         server_scheme = urllib.parse.urlparse(self.server_url).scheme
@@ -2502,27 +2531,47 @@ class JobExecutor:
     def _keepalived_inspection(self) -> Dict[str, Any]:
         config_path, config_data = self._keepalived_config_data()
         binary = self._keepalived_executable()
-        vip = str(self.settings.keepalived_vip)
-        local_addresses = self._local_ip_addresses()
-        vip_owned = vip in local_addresses
         service = self._keepalived_service_status()
-        return {
+        config_summary = _keepalived_config_graph_summary(
+            config_path,
+            config_data,
+            Path(self.settings.lvs_managed_file) if self.settings.lvs_managed_file else None,
+            max_total_bytes=self.settings.max_file_bytes,
+            max_file_bytes=self.settings.max_file_bytes,
+        )
+        common = {
             "service": service,
-            "vip": vip,
-            "vip_owned": vip_owned,
-            "role": "FAULT" if not service["active"] else ("MASTER" if vip_owned else "BACKUP"),
-            "local_addresses": sorted(local_addresses)[:64],
             "config_path": str(config_path),
             "keepalived_config_hash": hashlib.sha256(config_data).hexdigest(),
             "keepalived_binary": binary,
             "keepalived_version": self._keepalived_version(binary),
-            "config_summary": _keepalived_config_graph_summary(
-                config_path,
-                config_data,
-                Path(self.settings.lvs_managed_file) if self.settings.lvs_managed_file else None,
-                max_total_bytes=self.settings.max_file_bytes,
-                max_file_bytes=self.settings.max_file_bytes,
-            ),
+            "config_summary": config_summary,
+        }
+        if self.settings.lvs_topology == "standalone":
+            local_addresses = self._local_ip_addresses()
+            topology_valid = bool(
+                config_summary.get("summary_complete") is True
+                and config_summary.get("truncated") is False
+                and config_summary.get("instance_count") == 0
+                and config_summary.get("instances") == []
+            )
+            return {
+                **common,
+                "mode": "standalone",
+                "role": "STANDALONE" if service["active"] and topology_valid else "FAULT",
+                "topology_valid": topology_valid,
+                "local_addresses": sorted(local_addresses)[:64],
+            }
+        vip = str(self.settings.keepalived_vip)
+        local_addresses = self._local_ip_addresses()
+        vip_owned = vip in local_addresses
+        return {
+            **common,
+            "mode": "vrrp",
+            "vip": vip,
+            "vip_owned": vip_owned,
+            "role": "FAULT" if not service["active"] else ("MASTER" if vip_owned else "BACKUP"),
+            "local_addresses": sorted(local_addresses)[:64],
         }
 
     def keepalived_observation(self) -> Dict[str, Any]:
@@ -4751,7 +4800,11 @@ class AgentService:
         if self.settings.keepalived_enabled():
             # The configured VIP is safe to report even when the privileged helper is unavailable.
             # This lets the control plane discover the HA group without inventing node addresses.
-            observation["facts"]["keepalived"] = {"vip": self.settings.keepalived_vip}
+            observation["facts"]["keepalived"] = (
+                {"mode": "standalone", "role": "FAULT"}
+                if self.settings.lvs_topology == "standalone"
+                else {"mode": "vrrp", "vip": self.settings.keepalived_vip}
+            )
             if executor is not None and hasattr(executor, "keepalived_observation"):
                 try:
                     observation["facts"]["keepalived"] = executor.keepalived_observation()
@@ -4835,6 +4888,7 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
             key: raw.get(key)
             for key in (
                 "service",
+                "mode",
                 "vip",
                 "vip_owned",
                 "role",
@@ -4844,6 +4898,7 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
                 "keepalived_binary",
                 "keepalived_version",
                 "config_summary",
+                "topology_valid",
             )
         }
     elif action == "keepalived_validate":
@@ -4856,6 +4911,7 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
             key: raw.get(key)
             for key in (
                 "schema_version",
+                "mode",
                 "management_enabled",
                 "config_hash",
                 "managed_file",
