@@ -49,6 +49,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from lvs_control import LvsControlError, LvsControlModule
+
 try:  # Linux process-wide file locking; tests can still run on non-Linux hosts.
     import fcntl  # type: ignore
 except ImportError:  # pragma: no cover - Windows development only
@@ -67,8 +69,11 @@ KEEPALIVED_CAPABILITIES = (
     "keepalived_inspect",
     "keepalived_validate",
 )
-CAPABILITIES = (
-    "inspect",
+LVS_MANAGEMENT_ACTIONS = (
+    "lvs_inventory",
+    "lvs_apply",
+)
+NGINX_CAPABILITIES = (
     "nginx_test",
     "nginx_reload",
     "config_inventory",
@@ -79,7 +84,10 @@ CAPABILITIES = (
     "config_move",
     "config_delete",
     "certificate_apply",
-) + KEEPALIVED_CAPABILITIES
+)
+CAPABILITIES = (
+    ("inspect",) + NGINX_CAPABILITIES + KEEPALIVED_CAPABILITIES + LVS_MANAGEMENT_ACTIONS
+)
 INVENTORY_MAX_FILES = 200
 INVENTORY_MAX_FILE_BYTES = 256 * 1024
 INVENTORY_MAX_TOTAL_BYTES = 1024 * 1024
@@ -96,6 +104,9 @@ NGINX_TOKEN_RE = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{};]|[^\s{}
 KEEPALIVED_TOKEN_RE = re.compile(
     r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[{}\n]|[^\s{}\n]+'''
 )
+KEEPALIVED_SUMMARY_MAX_FILES = 16
+KEEPALIVED_SUMMARY_MAX_DEPTH = 4
+KEEPALIVED_SUMMARY_MAX_TOTAL_BYTES = 4 * 1024 * 1024
 IPVS_TABLE_PATH = "/proc/net/ip_vs"
 IPVS_STATS_PATH = "/proc/net/ip_vs_stats"
 IPVS_MAX_BYTES = 1024 * 1024
@@ -346,6 +357,22 @@ FAILURE_CODES = {
     "keepalived_config_test_failed",
     "keepalived_script_security_required",
     "keepalived_validation_unavailable",
+    "keepalived_reload_failed",
+    "invalid_lvs_intent",
+    "unsupported_protocol",
+    "unsupported_monitor",
+    "unsupported_scheduler",
+    "unsupported_forwarding",
+    "duplicate_member",
+    "duplicate_virtual_service",
+    "lvs_takeover_required",
+    "last_enabled_member",
+    "lvs_config_unsupported",
+    "lvs_inventory_incomplete",
+    "lvs_operation_failed",
+    "lvs_profile_required",
+    "ipvs_observation_unavailable",
+    "ipvs_reconcile_timeout",
     "nginx_config_test_failed",
     "nginx_reload_failed",
     "health_check_failed",
@@ -360,6 +387,12 @@ FAILURE_STAGES = {
     "agent",
     "precheck",
     "prepare",
+    "compile",
+    "inventory",
+    "validate",
+    "verify",
+    "apply",
+    "rollback",
     "write",
     "nginx_test",
     "reload",
@@ -647,6 +680,9 @@ class Settings:
         keepalived_service: Optional[str] = None,
         keepalived_vip: Optional[str] = None,
         ipvs_observer_enabled: bool = False,
+        lvs_management_enabled: bool = False,
+        lvs_managed_file: Optional[str] = None,
+        node_profile: str = "nginx",
     ):
         self.server_url = server_url
         self.node_name = node_name
@@ -663,8 +699,9 @@ class Settings:
         self.openssl_binary = openssl_binary
         self.nginx_config = nginx_config
         self.nginx_root = nginx_root
+        self.node_profile = node_profile
         legacy_config_roots = (
-            ["/etc/nginx/nginx-manager.d"]
+            ([] if node_profile == "lvs" else ["/etc/nginx/nginx-manager.d"])
             if allowed_config_roots is None
             else list(allowed_config_roots)
         )
@@ -692,7 +729,7 @@ class Settings:
         self.allow_main_config_edit = allow_main_config_edit
         self.verify_config_entries_loaded = verify_config_entries_loaded
         self.allowed_certificate_roots = (
-            ["/etc/nginx/ssl/nginx-manager"]
+            ([] if node_profile == "lvs" else ["/etc/nginx/ssl/nginx-manager"])
             if allowed_certificate_roots is None
             else list(allowed_certificate_roots)
         )
@@ -718,6 +755,8 @@ class Settings:
         self.keepalived_service = keepalived_service
         self.keepalived_vip = keepalived_vip
         self.ipvs_observer_enabled = ipvs_observer_enabled
+        self.lvs_management_enabled = lvs_management_enabled
+        self.lvs_managed_file = lvs_managed_file
         self._keepalived_validate_capability: Optional[bool] = None
 
     @classmethod
@@ -738,6 +777,7 @@ class Settings:
                 "timeout": raw.get("health_timeout", 5),
                 "attempts": raw.get("health_attempts", 3),
             }
+        node_profile = str(raw.get("node_profile", "nginx")).lower()
         nginx_root = str(raw.get("nginx_root", "/etc/nginx"))
         settings = cls(
             server_url=str(raw.get("server_url", "")).rstrip("/"),
@@ -756,13 +796,15 @@ class Settings:
             nginx_config=str(raw.get("nginx_config", "/etc/nginx/nginx.conf")),
             nginx_root=nginx_root,
             allowed_config_roots=[str(item) for item in raw.get(
-                "allowed_config_roots", [os.path.join(nginx_root, "nginx-manager.d")]
+                "allowed_config_roots",
+                [] if node_profile == "lvs" else [os.path.join(nginx_root, "nginx-manager.d")],
             )],
             config_entries=raw.get("config_entries"),
             allow_main_config_edit=bool(raw.get("allow_main_config_edit", False)),
             verify_config_entries_loaded=bool(raw.get("verify_config_entries_loaded", False)),
             allowed_certificate_roots=[str(item) for item in raw.get(
-                "allowed_certificate_roots", [os.path.join(nginx_root, "ssl", "nginx-manager")]
+                "allowed_certificate_roots",
+                [] if node_profile == "lvs" else [os.path.join(nginx_root, "ssl", "nginx-manager")],
             )],
             state_dir=str(raw.get("state_dir", "/var/lib/nginx-manager-agent")),
             helper_state_dir=str(raw.get("helper_state_dir", "/var/lib/nginx-manager-agent-helper")),
@@ -782,6 +824,9 @@ class Settings:
             keepalived_service=_optional_string(raw.get("keepalived_service")),
             keepalived_vip=_optional_string(raw.get("keepalived_vip")),
             ipvs_observer_enabled=raw.get("ipvs_observer_enabled") is True,
+            lvs_management_enabled=raw.get("lvs_management_enabled") is True,
+            lvs_managed_file=_optional_string(raw.get("lvs_managed_file")),
+            node_profile=node_profile,
         )
         settings.validate()
         return settings
@@ -800,11 +845,16 @@ class Settings:
             raise AgentError("tls_skip_verify and ca_file cannot be used together")
         if not self.node_name:
             raise AgentError("node_name is required")
-        if not os.path.isabs(self.nginx_binary) or not os.path.isabs(self.openssl_binary):
-            raise AgentError("nginx_binary and openssl_binary must be absolute paths")
-        if not os.path.isabs(self.nginx_config) or not os.path.isabs(self.nginx_root):
-            raise AgentError("nginx_config and nginx_root must be absolute paths")
-        if not isinstance(self.config_entries, list) or not self.config_entries or len(self.config_entries) > 32:
+        if self.node_profile not in {"nginx", "lvs", "hybrid"}:
+            raise AgentError("node_profile must be nginx, lvs, or hybrid")
+        if self.nginx_enabled():
+            if not os.path.isabs(self.nginx_binary) or not os.path.isabs(self.openssl_binary):
+                raise AgentError("nginx_binary and openssl_binary must be absolute paths")
+            if not os.path.isabs(self.nginx_config) or not os.path.isabs(self.nginx_root):
+                raise AgentError("nginx_config and nginx_root must be absolute paths")
+        if not isinstance(self.config_entries, list) or len(self.config_entries) > 32:
+            raise AgentError("config_entries must be a list with at most 32 entries")
+        if self.nginx_enabled() and not self.config_entries:
             raise AgentError("config_entries must contain between 1 and 32 entries")
         seen_entries = set()
         seen_entry_ids = set()
@@ -856,6 +906,8 @@ class Settings:
             ("allowed_config_roots", self.allowed_config_roots),
             ("allowed_certificate_roots", self.allowed_certificate_roots),
         ):
+            if not self.nginx_enabled() and not roots:
+                continue
             if not roots or any(not os.path.isabs(path) for path in roots):
                 raise AgentError("{} must contain absolute paths".format(name))
             nginx_root = Path(self.nginx_root).resolve()
@@ -912,12 +964,38 @@ class Settings:
                 self.keepalived_vip = str(ipaddress.ip_address(str(self.keepalived_vip)))
             except ValueError:
                 raise AgentError("keepalived_vip must be an IP address")
+        if self.node_profile == "lvs":
+            if not self.keepalived_enabled():
+                raise AgentError("lvs node_profile requires Keepalived integration")
+            if not self.ipvs_observer_enabled:
+                raise AgentError("lvs node_profile requires ipvs_observer_enabled")
+        if self.lvs_management_enabled:
+            if self.node_profile not in {"lvs", "hybrid"}:
+                raise AgentError("LVS management requires the lvs or hybrid node_profile")
+            if not self.keepalived_enabled():
+                raise AgentError("LVS management requires Keepalived integration")
+            if not self.ipvs_observer_enabled:
+                raise AgentError("LVS management requires ipvs_observer_enabled")
+            if not self.lvs_managed_file or not os.path.isabs(self.lvs_managed_file):
+                raise AgentError("lvs_managed_file must be an absolute path")
+            managed_file = Path(self.lvs_managed_file).resolve()
+            keepalived_root = Path(str(self.keepalived_config)).resolve().parent
+            if managed_file == Path(str(self.keepalived_config)).resolve() or not _is_relative_to(
+                managed_file, keepalived_root
+            ):
+                raise AgentError("lvs_managed_file must be inside the Keepalived configuration directory")
+            self.lvs_managed_file = str(managed_file)
+
+    def nginx_enabled(self) -> bool:
+        return self.node_profile in {"nginx", "hybrid"}
 
     def keepalived_enabled(self) -> bool:
         return bool(self.keepalived_config and self.keepalived_service and self.keepalived_vip)
 
     def reported_capabilities(self) -> List[str]:
-        result = [item for item in CAPABILITIES if item not in KEEPALIVED_CAPABILITIES]
+        result = ["inspect"]
+        if self.nginx_enabled():
+            result.extend(NGINX_CAPABILITIES)
         if self.keepalived_enabled():
             result.append("keepalived_inspect")
             if self._keepalived_validate_capability is None:
@@ -929,10 +1007,17 @@ class Settings:
         result.append("metrics_v1")
         if self.ipvs_observer_enabled:
             result.append("ipvs_observer_v1")
-        if self.stub_status_url:
+        if self.lvs_management_enabled:
+            result.append("lvs_manage_v1")
+            # Existing virtual_server blocks are only rewritten through the
+            # control plane's explicit takeover acknowledgement workflow.
+            result.append("lvs_adopt_v1")
+        if self.nginx_enabled() and self.stub_status_url:
             result.append("stub_status_v1")
         server_scheme = urllib.parse.urlparse(self.server_url).scheme
-        if self.allowed_log_roots and (server_scheme == "https" or self.allow_plaintext_log_stream):
+        if self.nginx_enabled() and self.allowed_log_roots and (
+            server_scheme == "https" or self.allow_plaintext_log_stream
+        ):
             result.append("log_stream_v1")
         return result
 
@@ -1167,11 +1252,27 @@ def _keepalived_instance_summary(name: str, tokens: List[str]) -> Dict[str, Any]
     return values
 
 
-def _keepalived_config_summary(data: bytes) -> Dict[str, Any]:
+def _keepalived_summary_parts(data: bytes) -> Tuple[List[Dict[str, Any]], List[str], bool]:
     text = _strip_keepalived_comments(data.decode("utf-8", errors="replace"))
     tokens = KEEPALIVED_TOKEN_RE.findall(text.replace("\r\n", "\n").replace("\r", "\n"))
-    include_directives = {"include", "includer", "includem", "includew", "includeb", "includea"}
-    summary_complete = not any(token.lower() in include_directives for token in tokens)
+    includes: List[str] = []
+    for raw_line in text.splitlines():
+        matched = re.match(
+            r"^\s*(include|includer|includem|includew|includeb|includea)\b(.*)$",
+            raw_line,
+            re.IGNORECASE,
+        )
+        if matched is None:
+            continue
+        argument = matched.group(2).strip()
+        value = re.fullmatch(
+            r'''("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;]+)\s*;?''',
+            argument,
+        )
+        if value is None:
+            includes.append("")
+            continue
+        includes.append(value.group(1).strip("'\""))
     instances: List[Dict[str, Any]] = []
     index = 0
     while index < len(tokens) and len(instances) < 32:
@@ -1187,14 +1288,170 @@ def _keepalived_config_summary(data: bytes) -> Dict[str, Any]:
         block, index = _keepalived_block(tokens, opening)
         name = raw_name if re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", raw_name) else "unknown"
         instances.append(_keepalived_instance_summary(name, block))
-    return {
+    truncated = len(instances) >= 32 or any(
+        len(instance.get("virtual_ips", [])) >= 64 or len(instance.get("unicast_peers", [])) >= 64
+        for instance in instances
+    )
+    return instances, includes, truncated
+
+
+def _keepalived_summary_result(
+    instances: List[Dict[str, Any]],
+    complete: bool,
+    truncated: bool,
+    reasons: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    result = {
         "instance_count": len(instances),
         "instances": instances,
-        "summary_complete": summary_complete and len(instances) < 32 and all(
-            len(instance.get("virtual_ips", [])) < 64 and len(instance.get("unicast_peers", [])) < 64
-            for instance in instances
-        ),
-        "truncated": len(instances) >= 32,
+        "summary_complete": bool(complete and not truncated),
+        "truncated": bool(truncated),
+    }
+    if reasons:
+        result["incomplete_reasons"] = list(dict.fromkeys(reasons))
+    return result
+
+
+def _keepalived_config_summary(data: bytes) -> Dict[str, Any]:
+    instances, includes, truncated = _keepalived_summary_parts(data)
+    reasons = ["include_unsupported"] if includes else []
+    return _keepalived_summary_result(instances, not includes, truncated, reasons)
+
+
+def _keepalived_config_graph_summary(
+    main_path: Path,
+    main_data: bytes,
+    managed_path: Optional[Path] = None,
+    max_files: int = KEEPALIVED_SUMMARY_MAX_FILES,
+    max_total_bytes: int = KEEPALIVED_SUMMARY_MAX_TOTAL_BYTES,
+    max_depth: int = KEEPALIVED_SUMMARY_MAX_DEPTH,
+    max_file_bytes: int = KEEPALIVED_SUMMARY_MAX_TOTAL_BYTES,
+) -> Dict[str, Any]:
+    """Summarize exact, root-contained Keepalived includes without expanding globs."""
+    main = Path(main_path).resolve()
+    root = main.parent
+    instances: List[Dict[str, Any]] = []
+    reasons: List[str] = []
+    visited = set()
+    active = set()
+    total_bytes = 0
+    truncated = False
+    expected_managed: Optional[Path] = None
+
+    def mark(reason: str, limited: bool = False) -> None:
+        nonlocal truncated
+        if reason not in reasons:
+            reasons.append(reason)
+        if limited:
+            truncated = True
+
+    if managed_path is not None:
+        configured_managed = Path(managed_path)
+        try:
+            resolved_managed = configured_managed.resolve()
+        except OSError:
+            resolved_managed = configured_managed.absolute()
+        if resolved_managed == main or not _is_relative_to(resolved_managed, root):
+            mark("managed_path_rejected")
+        else:
+            expected_managed = resolved_managed
+
+    def read_include(candidate: Path) -> Optional[Tuple[Path, bytes]]:
+        try:
+            if candidate.is_symlink():
+                mark("include_symlink_rejected")
+                return None
+            resolved = candidate.resolve(strict=True)
+            if not _is_relative_to(resolved, root):
+                mark("include_path_rejected")
+                return None
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(str(resolved), flags)
+            try:
+                status = os.fstat(descriptor)
+                if not stat.S_ISREG(status.st_mode):
+                    mark("include_not_regular")
+                    return None
+                if status.st_size > max_file_bytes:
+                    mark("include_byte_limit", True)
+                    return None
+                with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                    data = handle.read(max_file_bytes + 1)
+                if len(data) > max_file_bytes:
+                    mark("include_byte_limit", True)
+                    return None
+                return resolved, data
+            finally:
+                os.close(descriptor)
+        except FileNotFoundError:
+            mark("include_missing")
+        except PermissionError:
+            mark("include_unreadable")
+        except OSError:
+            mark("include_unreadable")
+        return None
+
+    def visit(path: Path, data: Optional[bytes], depth: int) -> None:
+        nonlocal total_bytes, truncated
+        if depth > max_depth:
+            mark("include_depth_limit", True)
+            return
+        try:
+            resolved = Path(path).resolve()
+        except OSError:
+            mark("include_path_rejected")
+            return
+        if resolved in active:
+            mark("include_cycle")
+            return
+        if resolved in visited:
+            mark("include_duplicate")
+            return
+        if len(visited) >= max_files:
+            mark("include_file_limit", True)
+            return
+        if data is None:
+            loaded = read_include(path)
+            if loaded is None:
+                return
+            resolved, data = loaded
+        if len(data) > max_file_bytes or total_bytes + len(data) > max_total_bytes:
+            mark("include_byte_limit", True)
+            return
+        visited.add(resolved)
+        active.add(resolved)
+        total_bytes += len(data)
+        try:
+            file_instances, include_values, file_truncated = _keepalived_summary_parts(data)
+        except ActionError:
+            mark("include_parse_error")
+            active.remove(resolved)
+            return
+        remaining = max(0, 32 - len(instances))
+        instances.extend(file_instances[:remaining])
+        if file_truncated or len(file_instances) > remaining:
+            truncated = True
+        for raw_value in include_values:
+            if not raw_value or len(raw_value) > 1024 or "\x00" in raw_value:
+                mark("include_invalid")
+                continue
+            if any(character in raw_value for character in "*?["):
+                mark("include_glob_unsupported")
+                continue
+            raw_path = Path(raw_value)
+            if ".." in raw_path.parts:
+                mark("include_path_rejected")
+                continue
+            candidate = raw_path if raw_path.is_absolute() else resolved.parent / raw_path
+            visit(candidate, None, depth + 1)
+        active.remove(resolved)
+
+    visit(main, main_data, 0)
+    if expected_managed is not None and expected_managed not in visited:
+        mark("managed_include_missing")
+    return {
+        **_keepalived_summary_result(instances, not reasons, truncated, reasons),
+        "files_read": len(visited),
     }
 
 
@@ -1386,13 +1643,19 @@ class JobStore:
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         return self.records.get(job_id)
 
-    def begin(self, job_id: str, action: str) -> None:
-        self.records[job_id] = {"action": action, "state": "running", "started_at": utc_now()}
-        self._save()
-
-    def complete(self, job_id: str, action: str, response: Dict[str, Any]) -> None:
+    def begin(self, job_id: str, action: str, payload_sha256: str) -> None:
         self.records[job_id] = {
             "action": action,
+            "payload_sha256": payload_sha256,
+            "state": "running",
+            "started_at": utc_now(),
+        }
+        self._save()
+
+    def complete(self, job_id: str, action: str, payload_sha256: str, response: Dict[str, Any]) -> None:
+        self.records[job_id] = {
+            "action": action,
+            "payload_sha256": payload_sha256,
             "state": "complete",
             "finished_at": utc_now(),
             "response": response,
@@ -1498,6 +1761,7 @@ class JobExecutor:
         # Recovery material is privileged state and must never live in the
         # unprivileged network Agent's writable state directory.
         self._transaction_dir = Path(settings.helper_state_dir) / "transactions"
+        self._lvs_control = LvsControlModule(settings) if settings.lvs_management_enabled else None
 
     def _log_path(self, value: Any) -> Path:
         if not isinstance(value, str) or not value or not os.path.isabs(value) or not value.lower().endswith(".log"):
@@ -1653,31 +1917,56 @@ class JobExecutor:
         payload = job.get("payload", {})
         if not job_id or len(job_id) > 200:
             return self._response(job_id or "unknown", action, "failed", error="invalid job id")
-        if action not in CAPABILITIES or (
-            action in KEEPALIVED_CAPABILITIES and not self.settings.keepalived_enabled()
-        ):
+        allowed_action = (
+            action == "inspect"
+            or (action in NGINX_CAPABILITIES and self.settings.nginx_enabled())
+            or (action in KEEPALIVED_CAPABILITIES and self.settings.keepalived_enabled())
+            or (action in LVS_MANAGEMENT_ACTIONS and self.settings.lvs_management_enabled)
+        )
+        if not allowed_action:
             return self._response(job_id, action, "failed", error="action is not allowed")
         if not isinstance(payload, dict):
             return self._response(job_id, action, "failed", error="payload must be an object")
+        try:
+            payload_sha256 = hashlib.sha256(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        except (TypeError, ValueError):
+            return self._response(job_id, action, "failed", error="payload must contain JSON values only")
 
         existing = self.store.get(job_id)
         if existing:
             if existing.get("action") != action:
                 return self._response(job_id, action, "failed", error="job id was already used for a different action")
+            if existing.get("payload_sha256") != payload_sha256:
+                return self._response(job_id, action, "failed", error="job id was already used with a different payload")
             if existing.get("state") == "complete" and isinstance(existing.get("response"), dict):
                 return existing["response"]
+            if action == "lvs_apply" and self._lvs_control is not None:
+                with self._global_lock():
+                    committed = self._lvs_control.committed_result(payload, job_id)
+                if committed is not None:
+                    response = self._response(
+                        job_id,
+                        action,
+                        "succeeded",
+                        result=committed,
+                        started_at=str(existing.get("started_at") or utc_now()),
+                    )
+                    self.store.complete(job_id, action, payload_sha256, response)
+                    return response
             interrupted = self._response(
                 job_id,
                 action,
                 "failed",
                 error="previous execution was interrupted; action was not replayed; inspect the node and issue a new job",
             )
-            self.store.complete(job_id, action, interrupted)
+            self.store.complete(job_id, action, payload_sha256, interrupted)
             return interrupted
 
         # The control plane owns queue expiry. Comparing its UTC deadline with
         # the Agent's local clock would reject valid leases when node clocks skew.
-        self.store.begin(job_id, action)
+        self.store.begin(job_id, action, payload_sha256)
         started = utc_now()
         try:
             with self._global_lock():
@@ -1708,7 +1997,7 @@ class JobExecutor:
                 failure_code="internal_error",
                 failure_stage="agent",
             )
-        self.store.complete(job_id, action, response)
+        self.store.complete(job_id, action, payload_sha256, response)
         return response
 
     @contextlib.contextmanager
@@ -2227,7 +2516,13 @@ class JobExecutor:
             "keepalived_config_hash": hashlib.sha256(config_data).hexdigest(),
             "keepalived_binary": binary,
             "keepalived_version": self._keepalived_version(binary),
-            "config_summary": _keepalived_config_summary(config_data),
+            "config_summary": _keepalived_config_graph_summary(
+                config_path,
+                config_data,
+                Path(self.settings.lvs_managed_file) if self.settings.lvs_managed_file else None,
+                max_total_bytes=self.settings.max_file_bytes,
+                max_file_bytes=self.settings.max_file_bytes,
+            ),
         }
 
     def keepalived_observation(self) -> Dict[str, Any]:
@@ -2358,27 +2653,62 @@ class JobExecutor:
             "keepalived_version": version,
         }
 
-    def _action_inspect(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
-        nginx: Dict[str, Any]
+    @staticmethod
+    def _lvs_error(error: LvsControlError) -> ActionError:
+        rollback_status = None
+        if error.rolled_back:
+            rollback_status = "restored"
+        elif error.failure_code == "rollback_failed":
+            rollback_status = "unverified"
+        return ActionError(
+            str(error),
+            failure_code=error.failure_code,
+            failure_stage=error.failure_stage,
+            rollback_status=rollback_status,
+        )
+
+    def lvs_observation(self) -> Dict[str, Any]:
+        if self._lvs_control is None:
+            raise ActionError("LVS management is disabled", failure_code="lvs_profile_required")
         try:
-            nginx = self._run([self.settings.nginx_binary, "-v"])
-        except AgentError as exc:
-            nginx = {"error": str(exc)}
-        configured_path = Path(self.settings.nginx_config)
-        if configured_path.is_symlink():
-            raise ActionError("configured nginx main file must not be a symbolic link")
-        config_path = configured_path.resolve()
-        config_hash = _file_sha256(config_path) if config_path.is_file() else None
-        return {
+            return self._lvs_control.observe()
+        except LvsControlError as exc:
+            raise self._lvs_error(exc)
+
+    def _action_lvs_inventory(self, payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
+        if payload:
+            raise ActionError("lvs_inventory payload must be empty")
+        return self.lvs_observation()
+
+    def _action_lvs_apply(self, payload: Dict[str, Any], job_id: str) -> Dict[str, Any]:
+        if self._lvs_control is None:
+            raise ActionError("LVS management is disabled", failure_code="lvs_profile_required")
+        try:
+            return self._lvs_control.apply(payload, job_id)
+        except LvsControlError as exc:
+            raise self._lvs_error(exc)
+
+    def _action_inspect(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
             "agent_version": VERSION,
             "hostname": socket.gethostname(),
             "platform": platform.platform(),
             "python": platform.python_version(),
-            "nginx": nginx,
-            "nginx_config": str(config_path),
-            "config_sha256": config_hash,
             "capabilities": self.settings.reported_capabilities(),
         }
+        if not self.settings.nginx_enabled():
+            return result
+        try:
+            result["nginx"] = self._run([self.settings.nginx_binary, "-v"])
+        except AgentError as exc:
+            result["nginx"] = {"error": str(exc)}
+        configured_path = Path(self.settings.nginx_config)
+        if configured_path.is_symlink():
+            raise ActionError("configured nginx main file must not be a symbolic link")
+        config_path = configured_path.resolve()
+        result["nginx_config"] = str(config_path)
+        result["config_sha256"] = _file_sha256(config_path) if config_path.is_file() else None
+        return result
 
     def _action_nginx_test(self, _payload: Dict[str, Any], _job_id: str) -> Dict[str, Any]:
         return self._nginx_test()
@@ -3291,6 +3621,11 @@ class JobExecutor:
             )
             self._recover_manifest(manifest_path, verify_after=True, loaded_manifest=manifest)
             recovered += 1
+        if self._lvs_control is not None:
+            try:
+                recovered += self._lvs_control.recover()
+            except LvsControlError as exc:
+                raise self._lvs_error(exc)
         return recovered
 
     def _load_manifest(self, path: Path) -> Dict[str, Any]:
@@ -3691,6 +4026,22 @@ class HelperClient:
             raise AgentError("privileged helper returned an invalid IPVS observation")
         return observation
 
+    def lvs_observation(self) -> Dict[str, Any]:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(self.settings.helper_timeout)
+        try:
+            connection.connect(self.settings.helper_socket)
+            _send_frame(connection, {"lvs_observation": True}, self.settings.helper_max_request_bytes)
+            response = _recv_frame(connection, self.settings.helper_max_request_bytes)
+        except (OSError, AgentError) as exc:
+            raise AgentError("privileged helper unavailable: {}".format(exc))
+        finally:
+            connection.close()
+        observation = response.get("lvs_observation")
+        if not isinstance(observation, dict):
+            raise AgentError("privileged helper returned an invalid LVS observation")
+        return observation
+
 
 class HelperServer:
     def __init__(self, settings: Settings, executor: JobExecutor, socket_path: str, allowed_uid: int,
@@ -3764,6 +4115,13 @@ class HelperServer:
                 _send_frame(
                     connection,
                     {"ipvs_observation": self.executor.ipvs_observation()},
+                    self.settings.helper_max_request_bytes,
+                )
+                return
+            if request.get("lvs_observation") is True:
+                _send_frame(
+                    connection,
+                    {"lvs_observation": self.executor.lvs_observation()},
                     self.settings.helper_max_request_bytes,
                 )
                 return
@@ -4366,14 +4724,15 @@ class AgentService:
         )
 
     def _local_observation(self, executor: Optional[Any] = None) -> Dict[str, Any]:
-        log_files = _discover_log_files(self.settings)
-        if executor is not None and hasattr(executor, "log_inventory"):
-            try:
-                log_files = executor.log_inventory()
-            except AgentError as exc:
-                LOG.warning("cannot refresh privileged log inventory: %s", exc)
-        observation: Dict[str, Any] = {
-            "facts": {
+        facts: Dict[str, Any] = {}
+        if self.settings.nginx_enabled():
+            log_files = _discover_log_files(self.settings)
+            if executor is not None and hasattr(executor, "log_inventory"):
+                try:
+                    log_files = executor.log_inventory()
+                except AgentError as exc:
+                    LOG.warning("cannot refresh privileged log inventory: %s", exc)
+            facts.update({
                 "nginx_root": self.settings.nginx_root,
                 "managed_config_root": self.settings.allowed_config_roots[0],
                 "config_entries": list(self.settings.config_entries),
@@ -4387,8 +4746,8 @@ class AgentService:
                     "https" if urllib.parse.urlparse(self.settings.server_url).scheme == "https"
                     else ("http_authorized" if self.settings.allow_plaintext_log_stream else "http_blocked")
                 ),
-            }
-        }
+            })
+        observation: Dict[str, Any] = {"facts": facts}
         if self.settings.keepalived_enabled():
             # The configured VIP is safe to report even when the privileged helper is unavailable.
             # This lets the control plane discover the HA group without inventing node addresses.
@@ -4409,29 +4768,41 @@ class AgentService:
                     observation["facts"]["ipvs"] = executor.ipvs_observation()
                 except AgentError:
                     LOG.warning("cannot refresh privileged IPVS observation")
+        if self.settings.lvs_management_enabled:
+            observation["facts"]["lvs"] = {
+                "management_enabled": True,
+                "available": False,
+                "reason": "helper_unavailable",
+            }
+            if executor is not None and hasattr(executor, "lvs_observation"):
+                try:
+                    observation["facts"]["lvs"] = executor.lvs_observation()
+                except AgentError:
+                    LOG.warning("cannot refresh privileged LVS observation")
         observation["metrics"] = self.metrics_collector.collect()
-        try:
-            completed = subprocess.run(
-                [self.settings.nginx_binary, "-v"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=min(self.settings.command_timeout, 5.0),
-                check=False,
-                shell=False,
-            )
-            version_text = (completed.stderr or completed.stdout).decode("utf-8", errors="replace").strip()
-            matched = re.search(r"nginx version:\s*(?:nginx/)?([^\s]+)", version_text, re.IGNORECASE)
-            if completed.returncode == 0 and matched:
-                observation["nginx_version"] = matched.group(1)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        try:
-            config = Path(self.settings.nginx_config)
-            if config.is_file() and not config.is_symlink():
-                observation["config_hash"] = _file_sha256(config)
-        except OSError:
-            pass
+        if self.settings.nginx_enabled():
+            try:
+                completed = subprocess.run(
+                    [self.settings.nginx_binary, "-v"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=min(self.settings.command_timeout, 5.0),
+                    check=False,
+                    shell=False,
+                )
+                version_text = (completed.stderr or completed.stdout).decode("utf-8", errors="replace").strip()
+                matched = re.search(r"nginx version:\s*(?:nginx/)?([^\s]+)", version_text, re.IGNORECASE)
+                if completed.returncode == 0 and matched:
+                    observation["nginx_version"] = matched.group(1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            try:
+                config = Path(self.settings.nginx_config)
+                if config.is_file() and not config.is_symlink():
+                    observation["config_hash"] = _file_sha256(config)
+            except OSError:
+                pass
         return observation
 
 
@@ -4479,6 +4850,34 @@ def _to_server_result(local: Dict[str, Any]) -> Dict[str, Any]:
         details = {
             key: raw.get(key)
             for key in ("valid", "source", "config_path", "keepalived_config_hash", "keepalived_version")
+        }
+    elif action == "lvs_inventory":
+        details = {
+            key: raw.get(key)
+            for key in (
+                "schema_version",
+                "management_enabled",
+                "config_hash",
+                "managed_file",
+                "services",
+                "runtime_services",
+                "service_count",
+                "runtime_service_count",
+                "partial",
+            )
+        }
+    elif action == "lvs_apply":
+        details = {
+            key: raw.get(key)
+            for key in (
+                "applied",
+                "rolled_back",
+                "plan_digest",
+                "config_hash",
+                "target",
+                "intent_kind",
+                "service_count",
+            )
         }
     elif action == "nginx_test":
         details = {"syntax_ok": succeeded}

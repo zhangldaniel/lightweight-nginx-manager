@@ -7,6 +7,36 @@ const port = Number(process.env.QA_PORT || 4179)
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const index = await readFile(resolve(projectRoot, 'dist/index.html'))
 const now = new Date().toISOString()
+const managedLvsService = {
+  name: 'web-production-443',
+  listener: { address: '192.0.2.110', port: 443, protocol: 'TCP' },
+  scheduler: 'wrr',
+  forwarding: 'DR',
+  delay_loop: 6,
+  persistence_seconds: 300,
+  members: [
+    { address: '192.0.2.108', port: 8443, weight: 100, enabled: true, monitor: null },
+    { address: '192.0.2.111', port: 8443, weight: 100, enabled: true, monitor: null },
+  ],
+  origin: 'managed',
+  editable: true,
+  unsupported_directives: [],
+}
+const existingLvsService = {
+  name: 'dns-production-53',
+  listener: { address: '192.0.2.110', port: 53, protocol: 'UDP' },
+  scheduler: 'rr',
+  forwarding: 'NAT',
+  delay_loop: 6,
+  persistence_seconds: null,
+  members: [
+    { address: '192.0.2.108', port: 53, weight: 100, enabled: true, monitor: null },
+    { address: '192.0.2.111', port: 53, weight: 1, enabled: false, monitor: null },
+  ],
+  origin: 'existing',
+  editable: true,
+  unsupported_directives: [],
+}
 const nodes = [
   {
     id: 'node-sh-01',
@@ -28,6 +58,7 @@ const nodes = [
       'keepalived_inspect',
       'keepalived_validate',
       'ipvs_observer_v1',
+      'lvs_manage_v1',
     ],
     facts: {
       nginx_config: '/apps/nginx/conf/nginx.conf',
@@ -58,6 +89,11 @@ const nodes = [
             virtual_ips: ['192.0.2.110'],
           }],
         },
+      },
+      lvs: {
+        management_enabled: true,
+        config_hash: '31'.repeat(32),
+        services: [managedLvsService, existingLvsService],
       },
       ipvs: {
         available: true,
@@ -152,6 +188,7 @@ const nodes = [
       'keepalived_inspect',
       'keepalived_validate',
       'ipvs_observer_v1',
+      'lvs_manage_v1',
     ],
     facts: {
       nginx_config: '/apps/nginx/conf/nginx.conf',
@@ -179,6 +216,11 @@ const nodes = [
             virtual_ips: ['192.0.2.110'],
           }],
         },
+      },
+      lvs: {
+        management_enabled: true,
+        config_hash: '32'.repeat(32),
+        services: [managedLvsService, existingLvsService],
       },
       ipvs: {
         available: true,
@@ -650,7 +692,17 @@ function send(response, body, status = 200, contentType = 'application/json; cha
   response.end(contentType.startsWith('application/json') ? JSON.stringify(body) : body)
 }
 
-export const qaServer = createServer((request, response) => {
+async function readJson(request) {
+  const chunks = []
+  for await (const chunk of request) chunks.push(chunk)
+  if (!chunks.length) return {}
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+const lvsPlans = new Map()
+const lvsOperations = new Map()
+
+export const qaServer = createServer(async (request, response) => {
   const requestUrl = new URL(request.url || '/', `http://127.0.0.1:${port}`)
   const path = requestUrl.pathname
   if (path === '/logout-preview') {
@@ -676,6 +728,81 @@ export const qaServer = createServer((request, response) => {
   }
   if (path === '/api/v1/admin/ui-state') return send(response, { revision: 1, state })
   if (path === '/api/v1/admin/nodes') return send(response, { items: nodes })
+  if (path === '/api/v1/admin/lvs/plans' && request.method === 'POST') {
+    const body = await readJson(request)
+    const intent = body.intent || {}
+    const target = intent.target || {}
+    const sameListener = managedLvsService.listener.address === target.address &&
+      managedLvsService.listener.port === target.port &&
+      managedLvsService.listener.protocol === target.protocol
+    const before = sameListener ? managedLvsService : null
+    const after = intent.kind === 'upsert_service' ? intent.service : null
+    const plan = {
+      id: `plan-${Date.now()}`,
+      plan_digest: 'ab'.repeat(32),
+      node_ids: body.node_ids || [],
+      intent,
+      diff: {
+        action: intent.kind,
+        listener: target,
+        before,
+        after,
+        changed: JSON.stringify(before) !== JSON.stringify(after),
+      },
+      expected_config_hashes: Object.fromEntries((body.node_ids || []).map((id) => [id, '31'.repeat(32)])),
+      created_at: now,
+      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      consumed_at: null,
+      operation_id: null,
+    }
+    lvsPlans.set(plan.id, plan)
+    return send(response, { plan }, 201)
+  }
+  const lvsApply = path.match(/^\/api\/v1\/admin\/lvs\/plans\/([^/]+)\/apply$/)
+  if (lvsApply && request.method === 'POST') {
+    const body = await readJson(request)
+    const planId = decodeURIComponent(lvsApply[1])
+    const plan = lvsPlans.get(planId)
+    if (!plan) return send(response, { detail: 'LVS plan not found' }, 404)
+    if (body.plan_digest !== plan.plan_digest) return send(response, { detail: 'LVS plan digest mismatch' }, 409)
+    const operation = {
+      id: body.request_id,
+      site_id: `lvs:${plan.intent.target.address}:${plan.intent.target.port}/${plan.intent.target.protocol.toLowerCase()}`,
+      kind: 'publish',
+      status: 'queued',
+      base_version: 0,
+      candidate_revision_id: null,
+      created_by: 'admin',
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      execution_mode: 'serial',
+      metadata: { plan_id: planId, execution_order: 'BACKUP_then_MASTER' },
+    }
+    const jobs = plan.node_ids.map((nodeId, sequenceNo) => ({
+      id: `${body.request_id}-${sequenceNo}`,
+      batch_id: body.request_id,
+      operation_id: body.request_id,
+      node_id: nodeId,
+      node_name: nodes.find((node) => node.id === nodeId)?.node_name || nodeId,
+      action: 'lvs_apply',
+      status: 'succeeded',
+      sequence_no: sequenceNo,
+      created_at: now,
+      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      claimed_at: now,
+      completed_at: now,
+      created_by: 'admin',
+      result: { failure_stage: null, rolled_back: false },
+    }))
+    lvsOperations.set(operation.id, { operation: { ...operation, status: 'succeeded' }, jobs })
+    return send(response, { operation, jobs, idempotent: false }, 201)
+  }
+  const operationDetail = path.match(/^\/api\/v1\/admin\/operations\/([^/]+)$/)
+  if (operationDetail) {
+    const item = lvsOperations.get(decodeURIComponent(operationDetail[1]))
+    return item ? send(response, item) : send(response, { detail: 'operation not found' }, 404)
+  }
   if (path === '/api/v1/admin/jobs') {
     const action = requestUrl.searchParams.get('action')
     const items = action ? recordJobs.filter((job) => job.action === action) : recordJobs

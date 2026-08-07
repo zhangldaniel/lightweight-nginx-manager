@@ -3,6 +3,9 @@ import type {
   EnrollmentRecord,
   JobRecord,
   KeepalivedJobAction,
+  LvsApplyResult,
+  LvsIntent,
+  LvsPlan,
   MonitoringItem,
   NodeRecord,
   OperationRecord,
@@ -68,6 +71,43 @@ export function jsonBody(value: unknown) {
   return JSON.stringify(value)
 }
 
+function normalizedLvsPlan(value: Record<string, unknown>): LvsPlan {
+  const id = String(value.plan_id || value.id || '')
+  const planDigest = String(value.plan_digest || '')
+  if (!id || !planDigest) throw new Error('控制端返回的 LVS 变更计划不完整')
+  return {
+    ...value,
+    id,
+    plan_id: id,
+    plan_digest: planDigest,
+    diff: value.diff ?? [],
+    warnings: Array.isArray(value.warnings)
+      ? value.warnings.map((item) => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object') {
+          const record = item as Record<string, unknown>
+          return String(record.message || record.summary || record.code || '控制端返回一条发布警告')
+        }
+        return String(item)
+      })
+      : [],
+    expires_at: typeof value.expires_at === 'string' ? value.expires_at : null,
+  }
+}
+
+function normalizedLvsApplyResult(value: Record<string, unknown>): LvsApplyResult {
+  const operation = value.operation && typeof value.operation === 'object'
+    ? value.operation as unknown as OperationRecord
+    : value.no_changes === true
+      ? null
+      : value as unknown as OperationRecord
+  return {
+    ...value,
+    operation,
+    jobs: Array.isArray(value.jobs) ? value.jobs as JobRecord[] : [],
+  }
+}
+
 export const api = {
   session: () => request<Session>('/api/v1/auth/session'),
   login: (username: string, password: string) =>
@@ -125,6 +165,26 @@ export const api = {
     ])
     return { items: [...inspections.items, ...validations.items] }
   },
+  createLvsPlan: async (nodeIds: string[], intent: LvsIntent, adoptExisting = false) => {
+    const response = await request<Record<string, unknown>>('/api/v1/admin/lvs/plans', {
+      method: 'POST',
+      body: jsonBody({ node_ids: nodeIds, intent, adopt_existing: adoptExisting }),
+    })
+    const plan = response.plan && typeof response.plan === 'object'
+      ? response.plan as Record<string, unknown>
+      : response
+    return normalizedLvsPlan(plan)
+  },
+  applyLvsPlan: async (planId: string, planDigest: string, requestId: string) =>
+    normalizedLvsApplyResult(
+      await request<Record<string, unknown>>(
+        `/api/v1/admin/lvs/plans/${encodeURIComponent(planId)}/apply`,
+        {
+          method: 'POST',
+          body: jsonBody({ plan_digest: planDigest, request_id: requestId }),
+        },
+      ),
+    ),
   createOperation: (body: Record<string, unknown>) =>
     request<{
       operation: OperationRecord

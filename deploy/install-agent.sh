@@ -15,17 +15,21 @@ HELPER_SERVICE="/etc/systemd/system/${APP_NAME}-helper.service"
 RECOVERY_SERVICE="/etc/systemd/system/${APP_NAME}-recover.service"
 NGINX_SERVICE="nginx.service"
 NGINX_DROPIN=""
+NODE_PROFILE="nginx"
 KEEPALIVED_BINARY=""
 KEEPALIVED_CONFIG=""
 KEEPALIVED_SERVICE=""
 KEEPALIVED_VIP=""
 ENABLE_LVS_OBSERVER="0"
+ENABLE_LVS_MANAGEMENT="0"
+LVS_MANAGED_FILE=""
 DEFAULT_KEEPALIVED_CONFIG="/etc/keepalived/keepalived.conf"
 DEFAULT_KEEPALIVED_SERVICE="keepalived.service"
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PACKAGE_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
 AGENT_SOURCE="${PACKAGE_DIR}/agent/nginx_agent.py"
+LVS_CONTROL_SOURCE="${PACKAGE_DIR}/agent/lvs_control.py"
 
 SERVER_URL=""
 NODE_NAME="$(hostname -s 2>/dev/null || hostname)"
@@ -94,6 +98,7 @@ usage() {
   --server <URL>       控制端地址，例如 http://192.0.2.20:8443（必填）
   --node-name <名称>   节点名称，默认当前短主机名
   --node-ip <地址>     本机展示 IP；等价于标签 ha_ip=<地址>
+  --profile <类型>     节点类型：nginx、lvs 或 hybrid；默认 nginx
   --labels <键值>      逗号分隔标签；多网卡高可用节点可填写 ha_ip=192.0.2.11
   --ca-file <路径>     自签控制端 CA；公共 CA 证书不需要
   --insecure-skip-tls-verify 不复制 CA，仍使用 HTTPS 但不校验控制端身份（仅可信内网）
@@ -114,6 +119,8 @@ usage() {
   --keepalived-service <单元> Keepalived systemd 单元，默认 keepalived.service
   --keepalived-vip <地址> 本节点组的 Keepalived VIP，例如 10.165.0.110
   --enable-lvs-observer 只读观测宿主机 IPVS 表；不执行 ipvsadm，也不修改转发规则
+  --enable-lvs-management 允许 Web 使用结构化对象新增、替换或删除 LVS 虚拟服务
+  --managed-lvs-file <路径> LVS 专用 Keepalived 片段，默认 <keepalived-dir>/nginx-manager.d/50-lvs-managed.conf
   --health-url <URL>   发布后的节点本地健康检查 URL
   --nginx-log-dir <路径> 允许实时查看的 Nginx 日志目录；可重复指定
   --stub-status-url <URL> 本机 Nginx stub_status 地址，例如 http://127.0.0.1:18080/nginx_status
@@ -224,6 +231,7 @@ refuse_unresolved_transactions() {
 
 backup_install_file() {
   local source="$1" name="$2"
+  [[ -n "${source}" ]] || return 0
   if [[ -e "${source}" || -L "${source}" ]]; then
     cp -a -- "${source}" "${INSTALL_BACKUP_DIR}/${name}"
     : >"${INSTALL_BACKUP_DIR}/${name}.present"
@@ -232,6 +240,7 @@ backup_install_file() {
 
 restore_install_file() {
   local target="$1" name="$2" parent_mode="0755"
+  [[ -n "${target}" ]] || return 0
   if [[ -f "${INSTALL_BACKUP_DIR}/${name}.present" ]]; then
     case "${target}" in
       "${ETC_DIR}"/*) parent_mode="0750" ;;
@@ -247,6 +256,7 @@ restore_install_file() {
 
 verify_restored_file() {
   local target="$1" name="$2"
+  [[ -n "${target}" ]] || return 0
   if [[ -f "${INSTALL_BACKUP_DIR}/${name}.present" ]]; then
     [[ -e "${target}" && ! -L "${target}" ]] && cmp -s -- "${INSTALL_BACKUP_DIR}/${name}" "${target}"
   else
@@ -298,10 +308,13 @@ PY
 
 preserve_pending_install() {
   local failed="0" required
+  local -a required_files=(
+    "${APP_DIR}/nginx_agent.py" "${APP_DIR}/lvs_control.py" "${CONFIG_FILE}" "${STATE_DIR}/identity.json"
+    "${AGENT_SERVICE}" "${HELPER_SERVICE}" "${RECOVERY_SERVICE}"
+  )
+  [[ -z "${NGINX_DROPIN}" ]] || required_files+=("${NGINX_DROPIN}")
   log "保留待审批接入申请并启动后台轮询"
-  for required in \
-    "${APP_DIR}/nginx_agent.py" "${CONFIG_FILE}" "${STATE_DIR}/identity.json" \
-    "${AGENT_SERVICE}" "${HELPER_SERVICE}" "${RECOVERY_SERVICE}" "${NGINX_DROPIN}"; do
+  for required in "${required_files[@]}"; do
     [[ -f "${required}" && ! -L "${required}" ]] || failed="1"
   done
   systemctl daemon-reload >/dev/null 2>&1 || failed="1"
@@ -327,6 +340,7 @@ begin_install_transaction() {
   systemctl is-enabled --quiet "${APP_NAME}.service" 2>/dev/null && OLD_AGENT_ENABLED="1" || true
   systemctl is-enabled --quiet "${APP_NAME}-helper.service" 2>/dev/null && OLD_HELPER_ENABLED="1" || true
   backup_install_file "${APP_DIR}/nginx_agent.py" agent.py
+  backup_install_file "${APP_DIR}/lvs_control.py" lvs_control.py
   backup_install_file "${CONFIG_FILE}" config.json
   backup_install_file "${ETC_DIR}/ca.crt" ca.crt
   backup_install_file "${AGENT_SERVICE}" agent.service
@@ -334,6 +348,10 @@ begin_install_transaction() {
   backup_install_file "${RECOVERY_SERVICE}" recovery.service
   backup_install_file "${NGINX_DROPIN}" nginx.dropin
   backup_install_file "${STATE_DIR}/identity.json" identity.json
+  if [[ "${ENABLE_LVS_MANAGEMENT}" == "1" ]]; then
+    backup_install_file "${KEEPALIVED_CONFIG}" keepalived.conf
+    backup_install_file "${LVS_MANAGED_FILE}" lvs-managed.conf
+  fi
   INSTALL_TRANSACTION_ACTIVE="1"
 }
 
@@ -354,6 +372,7 @@ rollback_install() {
   log "安装失败，正在恢复上一版本"
   if [[ "${PRESERVE_NEW_BINARY}" != "1" ]]; then
     restore_install_file "${APP_DIR}/nginx_agent.py" agent.py || failed="1"
+    restore_install_file "${APP_DIR}/lvs_control.py" lvs_control.py || failed="1"
   fi
   if [[ "${PRESERVE_NEW_CONNECTION}" != "1" ]]; then
     restore_install_file "${CONFIG_FILE}" config.json || failed="1"
@@ -369,6 +388,10 @@ rollback_install() {
   if [[ "${MANAGED_INCLUDE_CREATED}" == "1" ]]; then
     rm -f -- "${MANAGED_INCLUDE_FILE}" || failed="1"
     "${NGINX_BINARY}" -t -c "${NGINX_CONFIG}" >/dev/null 2>&1 || failed="1"
+  fi
+  if [[ "${ENABLE_LVS_MANAGEMENT}" == "1" ]]; then
+    restore_install_file "${KEEPALIVED_CONFIG}" keepalived.conf || failed="1"
+    restore_install_file "${LVS_MANAGED_FILE}" lvs-managed.conf || failed="1"
   fi
   systemctl daemon-reload >/dev/null 2>&1 || failed="1"
 
@@ -401,6 +424,7 @@ rollback_install() {
 
   if [[ "${PRESERVE_NEW_BINARY}" != "1" ]]; then
     verify_restored_file "${APP_DIR}/nginx_agent.py" agent.py || failed="1"
+    verify_restored_file "${APP_DIR}/lvs_control.py" lvs_control.py || failed="1"
   fi
   if [[ "${PRESERVE_NEW_CONNECTION}" != "1" ]]; then
     verify_restored_file "${CONFIG_FILE}" config.json || failed="1"
@@ -410,6 +434,10 @@ rollback_install() {
   verify_restored_file "${HELPER_SERVICE}" helper.service || failed="1"
   verify_restored_file "${RECOVERY_SERVICE}" recovery.service || failed="1"
   verify_restored_file "${NGINX_DROPIN}" nginx.dropin || failed="1"
+  if [[ "${ENABLE_LVS_MANAGEMENT}" == "1" ]]; then
+    verify_restored_file "${KEEPALIVED_CONFIG}" keepalived.conf || failed="1"
+    verify_restored_file "${LVS_MANAGED_FILE}" lvs-managed.conf || failed="1"
+  fi
   if [[ "${PRESERVE_NEW_CONNECTION}" != "1" && "${ENROLLMENT_COMPLETED}" != "1" ]]; then
     verify_restored_file "${STATE_DIR}/identity.json" identity.json || failed="1"
   elif [[ ! -s "${STATE_DIR}/identity.json" ]]; then
@@ -643,7 +671,7 @@ recover_existing_transactions() {
   if ! "${PYTHON_BIN}" "${APP_DIR}/nginx_agent.py" --config "${CONFIG_FILE}" recover; then
     echo "错误：现有 Agent 存在无法自动恢复的发布事务；安装尚未修改任何文件" >&2
     echo "请先执行：${PYTHON_BIN} ${APP_DIR}/nginx_agent.py --config ${CONFIG_FILE} recover" >&2
-    exit 1
+    return 1
   fi
 }
 
@@ -869,6 +897,120 @@ PY
     die "找不到 Keepalived 单元 ${KEEPALIVED_SERVICE}"
 }
 
+prepare_lvs_management() {
+  [[ "${ENABLE_LVS_MANAGEMENT}" == "1" ]] || return 0
+  [[ -n "${KEEPALIVED_CONFIG}" && -n "${KEEPALIVED_SERVICE}" ]] || \
+    die "--enable-lvs-management requires Keepalived integration"
+  [[ "${NODE_PROFILE}" == "lvs" || "${NODE_PROFILE}" == "hybrid" ]] || \
+    die "--enable-lvs-management requires --profile lvs or hybrid"
+  [[ -n "${LVS_MANAGED_FILE}" ]] || \
+    LVS_MANAGED_FILE="$(dirname -- "${KEEPALIVED_CONFIG}")/nginx-manager.d/50-lvs-managed.conf"
+  [[ "${LVS_MANAGED_FILE}" = /* && ! "${LVS_MANAGED_FILE}" =~ [[:space:]] ]] || \
+    die "--managed-lvs-file must be an absolute path without whitespace"
+
+  "${PYTHON_BIN}" - "${KEEPALIVED_CONFIG}" "${LVS_MANAGED_FILE}" <<'PY'
+import fnmatch
+import glob
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+main = Path(sys.argv[1]).resolve()
+managed = Path(sys.argv[2]).resolve()
+root = main.parent
+try:
+    managed.relative_to(root)
+except ValueError:
+    raise SystemExit("managed LVS file must remain below the Keepalived configuration directory")
+if managed == main:
+    raise SystemExit("managed LVS file must differ from the Keepalived main configuration")
+
+def include_patterns(path):
+    text = path.read_text(encoding="utf-8", errors="strict")
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].split("!", 1)[0].strip().rstrip(";")
+        match = re.match(r"^(?:include|includer|includem|includew|includeb|includea)\s+([^\s]+)$", line, re.I)
+        if match:
+            value = match.group(1).strip("\"'")
+            yield value if os.path.isabs(value) else str((path.parent / value).resolve())
+
+seen = set()
+covered = False
+queue = [main]
+def path_matches(path, pattern):
+    path_parts = os.path.normpath(path).split(os.sep)
+    pattern_parts = os.path.normpath(pattern).split(os.sep)
+    return len(path_parts) == len(pattern_parts) and all(
+        fnmatch.fnmatchcase(value, expected)
+        for value, expected in zip(path_parts, pattern_parts)
+    )
+
+while queue:
+    current = queue.pop()
+    if current in seen:
+        continue
+    seen.add(current)
+    if current.is_symlink() or not current.is_file():
+        raise SystemExit("Keepalived include graph contains an unsafe path")
+    try:
+        current.relative_to(root)
+    except ValueError:
+        raise SystemExit("Keepalived include leaves the configured directory")
+    for pattern in include_patterns(current):
+        try:
+            Path(os.path.abspath(pattern)).relative_to(root)
+        except ValueError:
+            raise SystemExit("Keepalived include leaves the configured directory")
+        if path_matches(str(managed), pattern):
+            covered = True
+        for name in sorted(glob.glob(pattern)):
+            candidate = Path(name).resolve()
+            if candidate != managed:
+                queue.append(candidate)
+
+if not managed.parent.exists():
+    managed.parent.mkdir(mode=0o750, parents=True)
+if not managed.exists():
+    descriptor = os.open(str(managed), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(descriptor)
+elif managed.is_symlink() or not managed.is_file():
+    raise SystemExit("managed LVS path must be a regular file")
+
+if not covered:
+    status = main.stat()
+    data = main.read_bytes()
+    addition = (b"" if data.endswith(b"\n") else b"\n") + ("include {}\n".format(managed)).encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(prefix="." + main.name + ".", dir=str(main.parent))
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data + addition)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, stat.S_IMODE(status.st_mode))
+        if hasattr(os, "chown"):
+            os.chown(temporary_name, status.st_uid, status.st_gid)
+        os.replace(temporary_name, str(main))
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+PY
+
+  local validation_flag=""
+  if "${KEEPALIVED_BINARY}" --help 2>&1 | grep -q -- '--config-test'; then
+    validation_flag="--config-test"
+  elif "${KEEPALIVED_BINARY}" --help 2>&1 | grep -Eq -- '(^|[[:space:],])-t([[:space:],]|$)'; then
+    validation_flag="-t"
+  else
+    die "configured Keepalived does not support safe configuration validation"
+  fi
+  "${KEEPALIVED_BINARY}" -f "${KEEPALIVED_CONFIG}" "${validation_flag}" >/dev/null 2>&1 || \
+    die "Keepalived configuration validation failed after adding the managed LVS include"
+  log "LVS managed include ready: ${LVS_MANAGED_FILE}"
+}
+
 ensure_identity_user() {
   getent group "${APP_GROUP}" >/dev/null 2>&1 || groupadd --system "${APP_GROUP}"
   if ! id "${APP_USER}" >/dev/null 2>&1; then
@@ -894,10 +1036,11 @@ write_config() {
   printf -v log_dirs_text '%s\n' "${NGINX_LOG_DIRS[@]+"${NGINX_LOG_DIRS[@]}"}"
   printf -v config_dirs_text '%s\n' "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}"
   printf -v stream_dirs_text '%s\n' "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}"
-  "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${LABELS}" \
+  "${PYTHON_BIN}" - "${CONFIG_FILE}" "${SERVER_URL}" "${NODE_NAME}" "${NODE_PROFILE}" "${LABELS}" \
     "${ca_target}" "${TLS_SKIP_VERIFY}" "${ALLOW_INSECURE_HTTP}" "${POLL_SECONDS}" "${NGINX_BINARY}" "$(command -v openssl)" "${NGINX_CONFIG}" "${NGINX_ROOT}" \
     "${config_dirs_text}" "${stream_dirs_text}" "${ALLOW_MAIN_CONFIG_EDIT}" "${MANAGED_CERT_DIR}" "${STATE_DIR}" "${HELPER_STATE_DIR}" "${HEALTH_URL}" "${log_dirs_text}" "${STUB_STATUS_URL}" "${ALLOW_PLAINTEXT_LOG_STREAM}" \
-    "${KEEPALIVED_BINARY}" "${KEEPALIVED_CONFIG}" "${KEEPALIVED_SERVICE}" "${KEEPALIVED_VIP}" "${ENABLE_LVS_OBSERVER}" <<'PY'
+    "${KEEPALIVED_BINARY}" "${KEEPALIVED_CONFIG}" "${KEEPALIVED_SERVICE}" "${KEEPALIVED_VIP}" "${ENABLE_LVS_OBSERVER}" \
+    "${ENABLE_LVS_MANAGEMENT}" "${LVS_MANAGED_FILE}" <<'PY'
 import hashlib
 import json
 import os
@@ -906,11 +1049,12 @@ import sys
 from urllib.parse import urlparse
 
 (
-    config_path, server_url, node_name, raw_labels, ca_file,
+    config_path, server_url, node_name, node_profile, raw_labels, ca_file,
     tls_skip_verify, allow_insecure_http, poll_seconds, nginx_binary, openssl_binary, nginx_config, nginx_root,
     raw_config_dirs, raw_stream_dirs, allow_main_config_edit, managed_cert_dir, state_dir, helper_state_dir, health_url,
     raw_log_dirs, stub_status_url, allow_plaintext_log_stream,
     keepalived_binary, keepalived_config, keepalived_service, keepalived_vip, enable_lvs_observer,
+    enable_lvs_management, lvs_managed_file,
 ) = sys.argv[1:]
 
 labels = {}
@@ -963,6 +1107,7 @@ for context, suffix, raw_directories in (
 value = {
     "server_url": server_url.rstrip("/"),
     "node_name": node_name,
+    "node_profile": node_profile,
     "hostname": socket.gethostname(),
     "labels": labels,
     "ca_file": ca_file or None,
@@ -999,7 +1144,26 @@ value = {
     "keepalived_service": keepalived_service or None,
     "keepalived_vip": keepalived_vip or None,
     "ipvs_observer_enabled": enable_lvs_observer == "1",
+    "lvs_management_enabled": enable_lvs_management == "1",
+    "lvs_managed_file": lvs_managed_file or None,
 }
+
+if node_profile == "lvs":
+    value.update({
+        "nginx_binary": "",
+        "openssl_binary": "",
+        "nginx_config": "",
+        "nginx_root": "",
+        "allowed_config_roots": [],
+        "config_entries": [],
+        "allow_main_config_edit": False,
+        "verify_config_entries_loaded": False,
+        "allowed_certificate_roots": [],
+        "health_check": None,
+        "allowed_log_roots": [],
+        "stub_status_url": None,
+        "allow_plaintext_log_stream": False,
+    })
 
 temporary = config_path + ".tmp"
 with open(temporary, "w", encoding="utf-8") as handle:
@@ -1015,19 +1179,32 @@ PY
 }
 
 write_services() {
-  local python_path systemd_version protect_system write_access_key
+  local python_path systemd_version protect_system write_access_key recovery_before helper_write_paths
   local modern_hardening="" runtime_preserve="" nginx_write_paths="" managed_write_paths="" directory
   python_path="$(command -v "${PYTHON_BIN}")"
+  recovery_before="${NGINX_SERVICE}"
+  if [[ "${NODE_PROFILE}" == "lvs" ]]; then
+    recovery_before="${KEEPALIVED_SERVICE}"
+  elif [[ "${ENABLE_LVS_MANAGEMENT}" == "1" ]]; then
+    recovery_before="${NGINX_SERVICE} ${KEEPALIVED_SERVICE}"
+  fi
   systemd_version="$(systemctl --version 2>/dev/null | awk 'NR == 1 {print $2}')"
   [[ "${systemd_version}" =~ ^[0-9]+$ ]] || die "无法识别 systemd 版本"
-  [[ ! -d /var/log/nginx ]] || nginx_write_paths+=" /var/log/nginx"
-  [[ ! -d /var/cache/nginx ]] || nginx_write_paths+=" /var/cache/nginx"
-  for directory in \
-    "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
-    "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}"; do
-    [[ " ${managed_write_paths} " == *" ${directory} "* ]] || managed_write_paths+=" ${directory}"
-  done
-  [[ "${ALLOW_MAIN_CONFIG_EDIT}" != "1" ]] || managed_write_paths+=" ${NGINX_CONFIG}"
+  if [[ "${NODE_PROFILE}" != "lvs" ]]; then
+    [[ ! -d /var/log/nginx ]] || nginx_write_paths+=" /var/log/nginx"
+    [[ ! -d /var/cache/nginx ]] || nginx_write_paths+=" /var/cache/nginx"
+    for directory in \
+      "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
+      "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}"; do
+      [[ " ${managed_write_paths} " == *" ${directory} "* ]] || managed_write_paths+=" ${directory}"
+    done
+    [[ "${ALLOW_MAIN_CONFIG_EDIT}" != "1" ]] || managed_write_paths+=" ${NGINX_CONFIG}"
+    managed_write_paths+=" ${MANAGED_CERT_DIR}"
+  fi
+  if [[ "${ENABLE_LVS_MANAGEMENT}" == "1" ]]; then
+    managed_write_paths+=" $(dirname -- "${KEEPALIVED_CONFIG}") ${LVS_MANAGED_FILE}"
+  fi
+  helper_write_paths="${managed_write_paths} ${HELPER_STATE_DIR}"
   if (( systemd_version >= 232 )); then
     protect_system="strict"
     write_access_key="ReadWritePaths"
@@ -1045,9 +1222,9 @@ write_services() {
   fi
   cat >"${RECOVERY_SERVICE}" <<EOF
 [Unit]
-Description=Recover interrupted Nginx Manager publications before Nginx starts
+Description=Recover interrupted Nginx Manager publications before the managed service starts
 After=local-fs.target
-Before=${NGINX_SERVICE} ${APP_NAME}-helper.service
+Before=${recovery_before} ${APP_NAME}-helper.service
 
 [Service]
 Type=oneshot
@@ -1062,7 +1239,7 @@ ProtectHome=true
 ${modern_hardening}
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL CAP_NET_BIND_SERVICE
-${write_access_key}=${managed_write_paths} ${MANAGED_CERT_DIR} ${HELPER_STATE_DIR}${nginx_write_paths}
+${write_access_key}=${helper_write_paths}${nginx_write_paths}
 UMask=0077
 EOF
 
@@ -1088,7 +1265,7 @@ ProtectHome=true
 ${modern_hardening}
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL CAP_NET_BIND_SERVICE
-${write_access_key}=${managed_write_paths} ${MANAGED_CERT_DIR} ${HELPER_STATE_DIR} /run/${APP_NAME}${nginx_write_paths}
+${write_access_key}=${helper_write_paths} /run/${APP_NAME}${nginx_write_paths}
 RuntimeDirectory=${APP_NAME}
 RuntimeDirectoryMode=0750
 ${runtime_preserve}
@@ -1126,12 +1303,14 @@ UMask=0077
 WantedBy=multi-user.target
 EOF
 
-  install -d -m 0755 -o root -g root "$(dirname -- "${NGINX_DROPIN}")"
-  cat >"${NGINX_DROPIN}" <<EOF
+  if [[ "${NODE_PROFILE}" != "lvs" ]]; then
+    install -d -m 0755 -o root -g root "$(dirname -- "${NGINX_DROPIN}")"
+    cat >"${NGINX_DROPIN}" <<EOF
 [Unit]
 Requires=${APP_NAME}-recover.service
 After=${APP_NAME}-recover.service
 EOF
+  fi
 
   systemd-analyze verify "${RECOVERY_SERVICE}" "${HELPER_SERVICE}" "${AGENT_SERVICE}" >/dev/null
   systemctl daemon-reload
@@ -1143,8 +1322,9 @@ run_as_agent() {
 }
 
 upgrade_agent_binary() {
-  local backup temporary helper_was_active="0" agent_was_active="0" failed="0"
+  local backup backup_lvs temporary helper_was_active="0" agent_was_active="0" failed="0" lvs_was_present="0"
   [[ -f "${AGENT_SOURCE}" && ! -L "${AGENT_SOURCE}" ]] || die "找不到新版本 agent/nginx_agent.py"
+  [[ -f "${LVS_CONTROL_SOURCE}" && ! -L "${LVS_CONTROL_SOURCE}" ]] || die "cannot find agent/lvs_control.py"
   [[ -f "${APP_DIR}/nginx_agent.py" && ! -L "${APP_DIR}/nginx_agent.py" ]] || \
     die "尚未安装 Agent；首次安装不能使用 --upgrade"
   [[ -f "${CONFIG_FILE}" && ! -L "${CONFIG_FILE}" ]] || \
@@ -1154,16 +1334,34 @@ upgrade_agent_binary() {
   id "${APP_USER}" >/dev/null 2>&1 || die "找不到现有 Agent 系统用户"
 
   install_base_dependencies
-  recover_existing_transactions
+  systemctl is-active --quiet "${APP_NAME}-helper.service" && helper_was_active="1" || true
+  systemctl is-active --quiet "${APP_NAME}.service" && agent_was_active="1" || true
+  systemctl stop "${APP_NAME}.service" "${APP_NAME}-helper.service" >/dev/null 2>&1 || true
+  if ! recover_existing_transactions; then
+    [[ "${helper_was_active}" == "1" ]] && systemctl start "${APP_NAME}-helper.service" >/dev/null 2>&1 || true
+    [[ "${agent_was_active}" == "1" ]] && systemctl start "${APP_NAME}.service" >/dev/null 2>&1 || true
+    return 1
+  fi
+  backup_lvs="$(mktemp "${APP_DIR}/.lvs_control.py.backup.XXXXXX")"
+  if [[ -f "${APP_DIR}/lvs_control.py" && ! -L "${APP_DIR}/lvs_control.py" ]]; then
+    cp -a -- "${APP_DIR}/lvs_control.py" "${backup_lvs}"
+    lvs_was_present="1"
+  fi
+  install -m 0755 -o root -g root "${LVS_CONTROL_SOURCE}" "${APP_DIR}/lvs_control.py"
   temporary="$(mktemp "${APP_DIR}/.nginx_agent.py.upgrade.XXXXXX")"
   install -m 0755 -o root -g root "${AGENT_SOURCE}" "${temporary}"
   if ! run_as_agent "${PYTHON_BIN}" "${temporary}" --config "${CONFIG_FILE}" validate-config; then
     rm -f -- "${temporary}"
+    if [[ "${lvs_was_present}" == "1" ]]; then
+      install -m 0755 -o root -g root "${backup_lvs}" "${APP_DIR}/lvs_control.py"
+    else
+      rm -f -- "${APP_DIR}/lvs_control.py"
+    fi
+    rm -f -- "${backup_lvs}"
+    [[ "${helper_was_active}" == "1" ]] && systemctl start "${APP_NAME}-helper.service" >/dev/null 2>&1 || true
+    [[ "${agent_was_active}" == "1" ]] && systemctl start "${APP_NAME}.service" >/dev/null 2>&1 || true
     die "新版本 Agent 无法读取现有配置，尚未替换程序"
   fi
-  systemctl is-active --quiet "${APP_NAME}-helper.service" && helper_was_active="1" || true
-  systemctl is-active --quiet "${APP_NAME}.service" && agent_was_active="1" || true
-
   backup="$(mktemp "${APP_DIR}/.nginx_agent.py.backup.XXXXXX")"
   cp -a -- "${APP_DIR}/nginx_agent.py" "${backup}"
   mv -f -- "${temporary}" "${APP_DIR}/nginx_agent.py"
@@ -1188,18 +1386,23 @@ upgrade_agent_binary() {
     temporary="$(mktemp "${APP_DIR}/.nginx_agent.py.rollback.XXXXXX")"
     install -m 0755 -o root -g root "${backup}" "${temporary}"
     mv -f -- "${temporary}" "${APP_DIR}/nginx_agent.py"
+    if [[ "${lvs_was_present}" == "1" ]]; then
+      install -m 0755 -o root -g root "${backup_lvs}" "${APP_DIR}/lvs_control.py"
+    else
+      rm -f -- "${APP_DIR}/lvs_control.py"
+    fi
     [[ "${helper_was_active}" != "1" ]] || systemctl restart "${APP_NAME}-helper.service" >/dev/null 2>&1 || rollback_failed="1"
     [[ "${agent_was_active}" != "1" ]] || systemctl restart "${APP_NAME}.service" >/dev/null 2>&1 || rollback_failed="1"
     sleep 2
     [[ "${helper_was_active}" != "1" ]] || systemctl is-active --quiet "${APP_NAME}-helper.service" || rollback_failed="1"
     [[ "${agent_was_active}" != "1" ]] || systemctl is-active --quiet "${APP_NAME}.service" || rollback_failed="1"
-    rm -f -- "${backup}"
+    rm -f -- "${backup}" "${backup_lvs}"
     [[ "${rollback_failed}" == "0" ]] || \
       die "Agent 程序已恢复，但旧服务未恢复运行；请检查 journalctl -u ${APP_NAME} -u ${APP_NAME}-helper"
     die "Agent 升级失败，已恢复上一版本"
   fi
 
-  rm -f -- "${backup}"
+  rm -f -- "${backup}" "${backup_lvs}"
   log "Agent 程序升级完成；现有配置、身份和 systemd 设置均已保留"
   echo "服务状态：systemctl status ${APP_NAME} ${APP_NAME}-helper"
 }
@@ -1234,6 +1437,7 @@ while [[ $# -gt 0 ]]; do
     --server) [[ $# -ge 2 ]] || die "--server 缺少值"; SERVER_URL="$2"; shift 2 ;;
     --node-name) [[ $# -ge 2 ]] || die "--node-name 缺少值"; NODE_NAME="$2"; shift 2 ;;
     --node-ip) [[ $# -ge 2 ]] || die "--node-ip 缺少值"; NODE_IP="$2"; shift 2 ;;
+    --profile) [[ $# -ge 2 ]] || die "--profile 缺少值"; NODE_PROFILE="$2"; shift 2 ;;
     --labels) [[ $# -ge 2 ]] || die "--labels 缺少值"; LABELS="$2"; shift 2 ;;
     --ca-file) [[ $# -ge 2 ]] || die "--ca-file 缺少值"; CA_SOURCE="$2"; shift 2 ;;
     --insecure-skip-tls-verify) TLS_SKIP_VERIFY="1"; shift ;;
@@ -1254,6 +1458,8 @@ while [[ $# -gt 0 ]]; do
     --keepalived-service) [[ $# -ge 2 ]] || die "--keepalived-service 缺少值"; KEEPALIVED_SERVICE="$2"; shift 2 ;;
     --keepalived-vip) [[ $# -ge 2 ]] || die "--keepalived-vip 缺少值"; KEEPALIVED_VIP="$2"; shift 2 ;;
     --enable-lvs-observer) ENABLE_LVS_OBSERVER="1"; shift ;;
+    --enable-lvs-management) ENABLE_LVS_MANAGEMENT="1"; shift ;;
+    --managed-lvs-file) [[ $# -ge 2 ]] || die "--managed-lvs-file requires a value"; LVS_MANAGED_FILE="$2"; shift 2 ;;
     --health-url) [[ $# -ge 2 ]] || die "--health-url 缺少值"; HEALTH_URL="$2"; shift 2 ;;
     --nginx-log-dir) [[ $# -ge 2 ]] || die "--nginx-log-dir 缺少值"; NGINX_LOG_DIRS+=("$2"); shift 2 ;;
     --stub-status-url) [[ $# -ge 2 ]] || die "--stub-status-url 缺少值"; STUB_STATUS_URL="$2"; shift 2 ;;
@@ -1277,56 +1483,92 @@ if [[ "${UPGRADE_MODE}" == "1" ]]; then
   exit 0
 fi
 
-apply_nginx_prefix_defaults
+[[ "${NODE_PROFILE}" =~ ^(nginx|lvs|hybrid)$ ]] || die "--profile must be nginx, lvs, or hybrid"
+if [[ "${NODE_PROFILE}" == "lvs" || "${ENABLE_LVS_MANAGEMENT}" == "1" ]]; then
+  ENABLE_LVS_OBSERVER="1"
+fi
+if [[ "${NODE_PROFILE}" != "lvs" ]]; then
+  apply_nginx_prefix_defaults
+fi
 [[ -n "${SERVER_URL}" ]] || { usage; die "必须指定 --server"; }
 [[ -n "${NODE_NAME}" && "${NODE_NAME}" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "节点名称只允许字母、数字、点、下划线和短横线"
 [[ "${TLS_SKIP_VERIFY}" != "1" || -z "${CA_SOURCE}" ]] || die "--ca-file 与 --insecure-skip-tls-verify 不能同时使用"
-[[ "${MANAGED_CONFIG_ALREADY_INCLUDED}" != "1" || -z "${MANAGED_INCLUDE_FILE}" ]] || die "--managed-config-already-included 不能与 --managed-include-file 同时使用"
-[[ "${NGINX_ROOT}" = /* && "${NGINX_CONFIG}" = /* ]] || die "Nginx 路径必须是绝对路径"
-for optional_path in \
-  "${NGINX_BINARY}" \
-  "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
-  "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}" \
-  "${MANAGED_CERT_DIR}" \
-  "${MANAGED_INCLUDE_FILE}"; do
-  [[ -z "${optional_path}" || "${optional_path}" = /* ]] || die "自定义 Nginx 路径必须是绝对路径：${optional_path}"
-done
-for nginx_path in \
-  "${NGINX_ROOT}" \
-  "${NGINX_CONFIG}" \
-  "${NGINX_BINARY}" \
-  "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
-  "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}" \
-  "${MANAGED_CERT_DIR}" \
-  "${MANAGED_INCLUDE_FILE}"; do
-  [[ ! "${nginx_path}" =~ [[:space:]] ]] || die "Nginx 路径不能包含空白字符：${nginx_path}"
-done
-[[ "${NGINX_SERVICE}" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || die "--nginx-service 必须是合法的 .service 单元名"
-NGINX_DROPIN="/etc/systemd/system/${NGINX_SERVICE}.d/nginx-manager-agent-recovery.conf"
+if [[ "${NODE_PROFILE}" != "lvs" ]]; then
+  [[ "${MANAGED_CONFIG_ALREADY_INCLUDED}" != "1" || -z "${MANAGED_INCLUDE_FILE}" ]] || die "--managed-config-already-included 不能与 --managed-include-file 同时使用"
+  [[ "${NGINX_ROOT}" = /* && "${NGINX_CONFIG}" = /* ]] || die "Nginx 路径必须是绝对路径"
+  for optional_path in \
+    "${NGINX_BINARY}" \
+    "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
+    "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}" \
+    "${MANAGED_CERT_DIR}" \
+    "${MANAGED_INCLUDE_FILE}"; do
+    [[ -z "${optional_path}" || "${optional_path}" = /* ]] || die "自定义 Nginx 路径必须是绝对路径：${optional_path}"
+  done
+  for nginx_path in \
+    "${NGINX_ROOT}" \
+    "${NGINX_CONFIG}" \
+    "${NGINX_BINARY}" \
+    "${MANAGED_CONFIG_DIRS[@]+"${MANAGED_CONFIG_DIRS[@]}"}" \
+    "${MANAGED_STREAM_DIRS[@]+"${MANAGED_STREAM_DIRS[@]}"}" \
+    "${MANAGED_CERT_DIR}" \
+    "${MANAGED_INCLUDE_FILE}"; do
+    [[ ! "${nginx_path}" =~ [[:space:]] ]] || die "Nginx 路径不能包含空白字符：${nginx_path}"
+  done
+  [[ "${NGINX_SERVICE}" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || die "--nginx-service 必须是合法的 .service 单元名"
+  NGINX_DROPIN="/etc/systemd/system/${NGINX_SERVICE}.d/nginx-manager-agent-recovery.conf"
+fi
 
 install_base_dependencies
 apply_node_ip_label
 validate_server_url
 validate_existing_identity_binding
-install_nginx_if_requested
+if [[ "${NODE_PROFILE}" != "lvs" ]]; then
+  install_nginx_if_requested
+fi
 prepare_keepalived_options
-prepare_monitoring_options
-systemctl cat "${NGINX_SERVICE}" >/dev/null 2>&1 || die "找不到 ${NGINX_SERVICE}；无法建立 Nginx 启动前恢复屏障"
-[[ -x "${NGINX_BINARY}" ]] || die "Nginx 二进制不可执行"
-[[ -f "${NGINX_CONFIG}" ]] || die "找不到 Nginx 主配置 ${NGINX_CONFIG}"
-"${NGINX_BINARY}" -t -c "${NGINX_CONFIG}" || die "现有 Nginx 配置校验失败，Agent 未安装"
+if [[ "${NODE_PROFILE}" == "lvs" ]]; then
+  [[ -n "${KEEPALIVED_CONFIG}" && -n "${KEEPALIVED_SERVICE}" && -n "${KEEPALIVED_VIP}" ]] || \
+    die "--profile lvs requires Keepalived integration"
+else
+  prepare_monitoring_options
+  systemctl cat "${NGINX_SERVICE}" >/dev/null 2>&1 || die "找不到 ${NGINX_SERVICE}；无法建立 Nginx 启动前恢复屏障"
+  [[ -x "${NGINX_BINARY}" ]] || die "Nginx 二进制不可执行"
+  [[ -f "${NGINX_CONFIG}" ]] || die "找不到 Nginx 主配置 ${NGINX_CONFIG}"
+  "${NGINX_BINARY}" -t -c "${NGINX_CONFIG}" || die "现有 Nginx 配置校验失败，Agent 未安装"
+fi
 [[ -f "${AGENT_SOURCE}" ]] || die "找不到 agent/nginx_agent.py，请从完整发布包内运行"
+[[ -f "${LVS_CONTROL_SOURCE}" && ! -L "${LVS_CONTROL_SOURCE}" ]] || die "cannot find agent/lvs_control.py"
+if [[ "${ENABLE_LVS_MANAGEMENT}" == "1" ]]; then
+  [[ "${NODE_PROFILE}" == "lvs" || "${NODE_PROFILE}" == "hybrid" ]] || \
+    die "--enable-lvs-management requires --profile lvs or hybrid"
+  [[ -n "${KEEPALIVED_CONFIG}" ]] || die "--enable-lvs-management requires Keepalived integration"
+  [[ -n "${LVS_MANAGED_FILE}" ]] || \
+    LVS_MANAGED_FILE="$(dirname -- "${KEEPALIVED_CONFIG}")/nginx-manager.d/50-lvs-managed.conf"
+fi
 
 ensure_identity_user
-recover_existing_transactions
-begin_install_transaction
-prepare_managed_directories
+# Stop the network poller and privileged helper before taking the rollback
+# snapshot.  Otherwise a job may commit between the snapshot and replacement,
+# and an installer rollback could silently overwrite that committed change.
+systemctl is-active --quiet "${APP_NAME}.service" && OLD_AGENT_ACTIVE="1" || true
+systemctl is-active --quiet "${APP_NAME}-helper.service" && OLD_HELPER_ACTIVE="1" || true
 systemctl stop "${APP_NAME}.service" "${APP_NAME}-helper.service" >/dev/null 2>&1 || true
+if ! recover_existing_transactions; then
+  [[ "${OLD_HELPER_ACTIVE}" == "1" ]] && systemctl start "${APP_NAME}-helper.service" >/dev/null 2>&1 || true
+  [[ "${OLD_AGENT_ACTIVE}" == "1" ]] && systemctl start "${APP_NAME}.service" >/dev/null 2>&1 || true
+  exit 1
+fi
+begin_install_transaction
+prepare_lvs_management
+if [[ "${NODE_PROFILE}" != "lvs" ]]; then
+  prepare_managed_directories
+fi
 install -d -m 0755 -o root -g root "${APP_DIR}"
 install -d -m 0750 -o root -g "${APP_GROUP}" "${ETC_DIR}"
 install -d -m 0700 -o "${APP_USER}" -g "${APP_GROUP}" "${STATE_DIR}"
 install -d -m 0700 -o root -g root "${HELPER_STATE_DIR}"
 install -m 0755 -o root -g root "${AGENT_SOURCE}" "${APP_DIR}/nginx_agent.py"
+install -m 0755 -o root -g root "${LVS_CONTROL_SOURCE}" "${APP_DIR}/lvs_control.py"
 write_config
 run_as_agent "${PYTHON_BIN}" "${APP_DIR}/nginx_agent.py" --config "${CONFIG_FILE}" validate-config
 write_services

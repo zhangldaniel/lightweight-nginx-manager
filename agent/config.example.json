@@ -1,5 +1,6 @@
 {
   "server_url": "http://192.0.2.20:8443",
+  "node_profile": "nginx",
   "node_name": "edge-a-01",
   "hostname": "edge-a-01.example.test",
   "labels": {
@@ -21,6 +22,8 @@
   "keepalived_service": null,
   "keepalived_vip": null,
   "ipvs_observer_enabled": false,
+  "lvs_management_enabled": false,
+  "lvs_managed_file": null,
   "allowed_config_roots": [
     "/etc/nginx/conf.d",
     "/etc/nginx/stream.d"

@@ -20,7 +20,7 @@
 - 导入现有配置，替换节点原路径中的证书
 - 查看实时日志、宿主机状态和 Nginx Stub Status
 - 查看 Keepalived 主备角色、VIP 归属和双机架构
-- 只读查看 Linux LVS/IPVS 的虚拟服务、后端成员和连接统计
+- 像轻量 F5 一样管理 LVS Virtual Service、后端池、权重和健康检查
 - 发布前执行真实 `nginx -t`，失败时恢复原文件
 - 支持本地账号、LDAP/AD、操作记录和版本回滚
 
@@ -119,17 +119,45 @@ curl -fsS http://localhost:51820/stub_status
 
 配置里用了 `vrrp_script` 时，先确认检查脚本及其父目录不能被非 root 用户写入，再在 `global_defs` 中显式加入 `script_user root` 和 `enable_script_security`。否则 Keepalived 服务可能仍在运行，但“校验配置”会按安全问题报错；平台不会替你忽略或自动改写这项策略。
 
-### LVS / IPVS 只读观测（可选）
+### 纯 LVS 调度节点
 
-只有运行 Linux IPVS 的调度节点才需要加：
+只有 Keepalived/IPVS、没有 Nginx 的 Director 使用 `lvs` 模式：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
+sudo bash -s -- \
+  --profile lvs \
+  --server http://192.0.2.20:8443 \
+  --node-name lvs-a-01 \
+  --node-ip 192.0.2.41 \
+  --keepalived-vip 192.0.2.40 \
+  --keepalived-config /etc/keepalived/keepalived.conf \
+  --keepalived-service keepalived.service \
+  --keepalived-binary /apps/keepalived/sbin/keepalived \
+  --enable-lvs-management
+```
+
+Keepalived 在系统路径时可以删掉 `--keepalived-binary`。`lvs` 模式会自动开启 IPVS 观测，不需要再写 `--enable-lvs-observer`。
+
+启用管理后，Web 可以新增、修改和删除 Virtual Service，调整调度算法、DR/NAT/TUN、会话保持、Pool Member、权重、启停状态和 TCP 健康检查。默认托管文件是 Keepalived 配置目录下的 `nginx-manager.d/50-lvs-managed.conf`，安装器会自动接入并先做配置校验。
+
+这是面向常用四层流量调度的“轻量 F5”工作台，不是 F5 全功能替代品。现阶段不管理 SSL 卸载、iRule、DNS/GTM 或任意 Keepalived 指令；接管已有服务和删除服务仅管理员可以操作。
+
+同一个 VRRP 组里的 Director 都要安装 Agent，并分别填写本机 `--node-ip` 和共同的 `--keepalived-vip`。控制端会核对 VIP、VRID、MASTER/BACKUP 角色、已登记成员和 unicast peer；漏选一台、角色异常或摘要不完整时不会生成发布计划。
+
+每次发布都先生成可确认的逐节点差异，再按 BACKUP 到 MASTER 串行执行；Agent 会校验 Keepalived、reload、核对 `/proc/net/ip_vs`，失败则恢复本机原文件。Web 不会下发 Shell、`ipvsadm` 命令、任意文件路径或原始 Keepalived 文本。
+
+跨 Director 发布不是分布式事务。如果前一台成功、后一台失败，页面会保留失败阶段和回滚状态；下一次计划允许只修复未收敛的目标 Virtual Service，但其他配置存在漂移时仍会拒绝发布。
+
+已有 `virtual_server` 只有在指令都受支持时才能接管；不认识的高级指令会让该服务保持只读。接管会把目标块从原文件迁入平台托管文件，并规范化块内格式；块内注释可能变化，但 VRRP、认证和其他配置块不会被改写。正式接管前先核对 Web 给出的逐节点差异。
+
+只想观察、不允许 Web 修改时，不写 `--enable-lvs-management`，改用：
 
 ```bash
 --enable-lvs-observer
 ```
 
-Agent 只读取 `/proc/net/ip_vs` 和 `/proc/net/ip_vs_stats`，用于展示 Virtual Service、后端成员、权重、转发方式和连接统计；不会执行 `ipvsadm`，也不会新增、删除或修改转发规则。
-
-这个开关与 Keepalived 相互独立。仅用 Keepalived 给 Nginx 做 VIP 主备，不代表节点已经启用 LVS；如果 `/proc/net/ip_vs` 不存在，页面会显示“IPVS 未加载”，安装器不会替你加载内核模块。
+如果 `/proc/net/ip_vs` 不存在，页面会显示“IPVS 未加载”；安装器不会替你加载内核模块。
 
 ### 已装 Agent：只升级程序
 
@@ -140,7 +168,7 @@ curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-mana
 sudo bash -s -- --upgrade
 ```
 
-它只更新程序文件。要改节点名、目录、日志、Stub Status、Keepalived、LVS 观测或 systemd 权限，仍需重新运行完整安装命令。
+它只更新程序文件。要改节点模式、节点名、目录、日志、Stub Status、Keepalived、LVS 管理或 systemd 权限，仍需重新运行完整安装命令。
 
 ### 已有身份、改名与重复节点
 

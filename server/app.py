@@ -35,6 +35,11 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import Literal
 
+if __package__:
+    from .lvs_models import LvsIntent, LvsListener, LvsPlanApplyRequest, LvsPlanRequest, LvsService
+else:
+    from lvs_models import LvsIntent, LvsListener, LvsPlanApplyRequest, LvsPlanRequest, LvsService
+
 
 ActionName = Literal[
     "inspect",
@@ -50,6 +55,8 @@ ActionName = Literal[
     "certificate_apply",
     "keepalived_inspect",
     "keepalived_validate",
+    "lvs_inventory",
+    "lvs_apply",
 ]
 
 JOB_ACTIONS = {
@@ -66,6 +73,8 @@ JOB_ACTIONS = {
     "certificate_apply",
     "keepalived_inspect",
     "keepalived_validate",
+    "lvs_inventory",
+    "lvs_apply",
 }
 TERMINAL_JOB_STATES = {"succeeded", "failed", "expired"}
 ACTIVE_JOB_STATES = {"queued", "running"}
@@ -83,6 +92,7 @@ FAILURE_CODES = {
     "keepalived_config_test_failed",
     "keepalived_script_security_required",
     "keepalived_validation_unavailable",
+    "keepalived_reload_failed",
     "nginx_config_test_failed",
     "nginx_reload_failed",
     "health_check_failed",
@@ -91,6 +101,22 @@ FAILURE_CODES = {
     "internal_error",
     "publish_failed",
     "job_failed",
+    "dependency_failed",
+    "invalid_lvs_intent",
+    "unsupported_protocol",
+    "unsupported_monitor",
+    "unsupported_scheduler",
+    "unsupported_forwarding",
+    "duplicate_member",
+    "duplicate_virtual_service",
+    "lvs_takeover_required",
+    "last_enabled_member",
+    "lvs_config_unsupported",
+    "lvs_inventory_incomplete",
+    "lvs_profile_required",
+    "ipvs_observation_unavailable",
+    "ipvs_reconcile_timeout",
+    "lvs_operation_failed",
 }
 FAILURE_STAGES = {
     "queue",
@@ -103,6 +129,12 @@ FAILURE_STAGES = {
     "health_check",
     "recovery",
     "unknown",
+    "compile",
+    "inventory",
+    "validate",
+    "verify",
+    "rollback",
+    "apply",
 }
 ROLLBACK_STATUSES = {"restored", "unverified"}
 NGINX_ERROR_CODES = {
@@ -788,6 +820,364 @@ def _safe_ipvs_status(value: Any) -> Optional[Dict[str, Any]]:
     return result
 
 
+def _safe_lvs_inventory(value: Any) -> Optional[Dict[str, Any]]:
+    """Bound the declarative LVS inventory and drop all config/auth text."""
+    if not isinstance(value, dict):
+        return None
+    result: Dict[str, Any] = {"management_enabled": value.get("management_enabled") is True}
+    config_hash = value.get("config_hash")
+    if isinstance(config_hash, str) and re.fullmatch(r"[a-fA-F0-9]{64}", config_hash):
+        result["config_hash"] = config_hash.lower()
+    services: List[Dict[str, Any]] = []
+    raw_services = value.get("services")
+    rejected = 0
+    total_members = 0
+    if isinstance(raw_services, list):
+        for raw in raw_services[:256]:
+            if not isinstance(raw, dict):
+                rejected += 1
+                continue
+            semantic = {
+                key: raw.get(key)
+                for key in (
+                    "name", "listener", "scheduler", "forwarding", "delay_loop",
+                    "persistence_seconds", "members",
+                )
+                if key in raw
+            }
+            try:
+                service = LvsService.model_validate(semantic)
+            except Exception:
+                rejected += 1
+                continue
+            if total_members + len(service.members) > 1024:
+                rejected += 1
+                continue
+            total_members += len(service.members)
+            cleaned = service.model_dump(mode="json", exclude_none=True)
+            origin = raw.get("origin")
+            if isinstance(origin, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", origin):
+                cleaned["origin"] = origin
+            cleaned["editable"] = raw.get("editable") is True
+            unsupported = raw.get("unsupported_directives")
+            if isinstance(unsupported, list):
+                cleaned["unsupported_directives"] = [
+                    item[:80]
+                    for item in unsupported[:32]
+                    if isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", item)
+                ]
+            services.append(cleaned)
+    result["services"] = services
+    result["service_count"] = len(services)
+    result["member_count"] = total_members
+    result["partial"] = rejected > 0 or (isinstance(raw_services, list) and len(raw_services) > 256)
+    return result
+
+
+def _lvs_semantic_services(inventory: Dict[str, Any]) -> List[Dict[str, Any]]:
+    fields = {
+        "name", "listener", "scheduler", "forwarding", "delay_loop",
+        "persistence_seconds", "members",
+    }
+    services = [
+        {key: value for key, value in service.items() if key in fields}
+        for service in inventory.get("services", [])
+        if isinstance(service, dict)
+    ]
+    for service in services:
+        members = service.get("members")
+        if isinstance(members, list):
+            service["members"] = sorted(
+                members,
+                key=lambda item: (str(item.get("address", "")), int(item.get("port", 0))),
+            )
+    return sorted(
+        services,
+        key=lambda item: (
+            str((item.get("listener") or {}).get("address", "")),
+            int((item.get("listener") or {}).get("port", 0)),
+            str((item.get("listener") or {}).get("protocol", "")),
+        ),
+    )
+
+
+def _keepalived_ip(value: Any) -> Optional[str]:
+    """Return only the address portion of a Keepalived VIP or interface value."""
+    if not isinstance(value, str):
+        return None
+    try:
+        candidate = value.strip()
+        if "/" in candidate:
+            return str(ipaddress.ip_interface(candidate).ip)
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
+
+def _validate_lvs_ha_group(
+    observations: Dict[str, Dict[str, Any]],
+    node_ids: List[str],
+    target_address: str,
+) -> Dict[str, Any]:
+    """Discover and bind the complete registered Keepalived VIP/VRID group."""
+    target_ip = _keepalived_ip(target_address)
+    if target_ip is None:
+        raise HTTPException(status_code=409, detail="LVS target address is invalid")
+
+    selected_ids = set(node_ids)
+
+    def node_status(node_id: str) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        observation = observations.get(node_id) or {}
+        keepalived = _safe_keepalived_status(observation.get("keepalived")) or {}
+        summary = keepalived.get("config_summary")
+        instances = summary.get("instances") if isinstance(summary, dict) else None
+        complete = (
+            not isinstance(summary, dict)
+            or summary.get("summary_complete") is not True
+            or summary.get("truncated") is True
+            or not isinstance(instances, list)
+            or summary.get("instance_count") != len(instances)
+        )
+        return keepalived, None if complete else summary
+
+    selected_incomplete: List[str] = []
+    selected_not_members: List[str] = []
+    selected_identities: Dict[str, Dict[str, Any]] = {}
+    for node_id in node_ids:
+        keepalived, summary = node_status(node_id)
+        vip = _keepalived_ip(keepalived.get("vip"))
+        role = str(keepalived.get("role") or "UNKNOWN").upper()
+        if summary is None or vip is None or role not in {"MASTER", "BACKUP"}:
+            selected_incomplete.append(node_id)
+            continue
+
+        matching: List[Dict[str, Any]] = []
+        for instance in summary["instances"]:
+            if not isinstance(instance, dict):
+                continue
+            virtual_router_id = instance.get("virtual_router_id")
+            virtual_ips = instance.get("virtual_ips")
+            normalized_vips = {
+                normalized
+                for normalized in (
+                    _keepalived_ip(item) for item in virtual_ips
+                )
+                if normalized is not None
+            } if isinstance(virtual_ips, list) else set()
+            if (
+                target_ip in normalized_vips
+                and vip in normalized_vips
+                and isinstance(virtual_router_id, int)
+                and not isinstance(virtual_router_id, bool)
+                and 1 <= virtual_router_id <= 255
+            ):
+                matching.append(instance)
+        if len(matching) != 1:
+            selected_not_members.append(node_id)
+            continue
+        selected_identities[node_id] = {
+            "vip": vip,
+            "virtual_router_id": matching[0]["virtual_router_id"],
+        }
+
+    if selected_incomplete:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "LVS nodes must report a complete Keepalived configuration summary",
+                "node_ids": sorted(selected_incomplete),
+            },
+        )
+    if selected_not_members:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "target LVS address is not uniquely assigned to the node Keepalived VIP/VRID group",
+                "node_ids": sorted(selected_not_members),
+            },
+        )
+
+    group_keys = {
+        (identity["vip"], identity["virtual_router_id"])
+        for identity in selected_identities.values()
+    }
+    if len(group_keys) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "selected LVS nodes are not in the same Keepalived VIP/VRID group",
+                "groups": selected_identities,
+            },
+        )
+    vip, virtual_router_id = next(iter(group_keys))
+
+    ambiguous: List[str] = []
+    discovered: Dict[str, Dict[str, Any]] = {}
+    for node_id, observation in observations.items():
+        keepalived, summary = node_status(node_id)
+        configured_vip = _keepalived_ip(keepalived.get("vip"))
+        if configured_vip != vip:
+            continue
+        if summary is None:
+            if node_id not in selected_ids:
+                ambiguous.append(node_id)
+            continue
+        group_instances: List[Dict[str, Any]] = []
+        for instance in summary["instances"]:
+            if not isinstance(instance, dict):
+                continue
+            instance_vips = {
+                normalized
+                for normalized in (
+                    _keepalived_ip(item) for item in instance.get("virtual_ips", [])
+                )
+                if normalized is not None
+            }
+            if instance.get("virtual_router_id") == virtual_router_id and vip in instance_vips:
+                group_instances.append(instance)
+        if len(group_instances) > 1:
+            ambiguous.append(node_id)
+            continue
+        if len(group_instances) == 1:
+            discovered[node_id] = {
+                "keepalived": keepalived,
+                "instance": group_instances[0],
+                "labels": observation.get("labels") if isinstance(observation.get("labels"), dict) else {},
+            }
+
+    if ambiguous:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "registered Agent membership in the Keepalived group is ambiguous",
+                "node_ids": sorted(ambiguous),
+            },
+        )
+
+    discovered_ids = set(discovered)
+    if selected_ids != discovered_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "all discovered Keepalived group members must be selected",
+                "selected_node_ids": sorted(selected_ids),
+                "discovered_node_ids": sorted(discovered_ids),
+                "missing_node_ids": sorted(discovered_ids - selected_ids),
+                "unexpected_node_ids": sorted(selected_ids - discovered_ids),
+            },
+        )
+
+    roles: Dict[str, str] = {}
+    node_addresses: Dict[str, set[str]] = {}
+    peer_hints: set[str] = set()
+    target_missing: List[str] = []
+    for node_id, member in discovered.items():
+        keepalived = member["keepalived"]
+        instance = member["instance"]
+        role = str(keepalived.get("role") or "UNKNOWN").upper()
+        if role not in {"MASTER", "BACKUP"}:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "LVS group member role must be MASTER or BACKUP",
+                    "node_ids": [node_id],
+                },
+            )
+        roles[node_id] = role
+
+        instance_vips = {
+            normalized
+            for normalized in (
+                _keepalived_ip(item) for item in instance.get("virtual_ips", [])
+            )
+            if normalized is not None
+        }
+        if target_ip not in instance_vips:
+            target_missing.append(node_id)
+
+        addresses: set[str] = set()
+        labels = member["labels"]
+        label_ip = _keepalived_ip(labels.get("ha_ip"))
+        if label_ip is not None:
+            addresses.add(label_ip)
+        source_ip = _keepalived_ip(instance.get("unicast_src_ip"))
+        if source_ip is not None:
+            addresses.add(source_ip)
+        for item in keepalived.get("local_addresses", []):
+            local_ip = _keepalived_ip(item)
+            if local_ip is not None:
+                addresses.add(local_ip)
+        node_addresses[node_id] = addresses
+        for item in instance.get("unicast_peers", []):
+            peer_ip = _keepalived_ip(item)
+            if peer_ip is not None:
+                peer_hints.add(peer_ip)
+
+    if target_missing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "target LVS address is missing from a discovered Keepalived group member",
+                "node_ids": sorted(target_missing),
+            },
+        )
+
+    peer_coverage = {
+        peer: sorted(
+            node_id for node_id, addresses in node_addresses.items() if peer in addresses
+        )
+        for peer in sorted(peer_hints)
+    }
+    unresolved_peers = [peer for peer, covered_by in peer_coverage.items() if not covered_by]
+    if unresolved_peers:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Keepalived unicast peers are not represented by discovered Agents",
+                "unresolved_peers": unresolved_peers,
+            },
+        )
+    ambiguous_peers = {
+        peer: covered_by for peer, covered_by in peer_coverage.items() if len(covered_by) > 1
+    }
+    if ambiguous_peers:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Keepalived unicast peer identity is shared by multiple Agents",
+                "peer_coverage": ambiguous_peers,
+            },
+        )
+    if len(discovered_ids) == 1 and peer_hints:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "standalone LVS management requires no Keepalived peer hints",
+                "peer_hints": sorted(peer_hints),
+            },
+        )
+
+    if len(node_ids) > 1:
+        masters = [node_id for node_id, role in roles.items() if role == "MASTER"]
+        backups = [node_id for node_id, role in roles.items() if role == "BACKUP"]
+        if len(masters) != 1 or len(backups) != len(node_ids) - 1:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "LVS HA group must have exactly one MASTER and all remaining nodes BACKUP",
+                    "roles": roles,
+                },
+            )
+
+    return {
+        "vip": vip,
+        "virtual_router_id": virtual_router_id,
+        "roles": roles,
+        "discovered_node_ids": sorted(discovered_ids),
+        "peer_coverage": peer_coverage,
+    }
+
+
 def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
     """Keep operational facts, never command output or arbitrary error strings."""
     result: Dict[str, Any] = {}
@@ -889,6 +1279,40 @@ def _safe_result_metadata(request: "JobResultRequest") -> Dict[str, Any]:
             result["keepalived_config_hash"] = config_hash.lower()
         if isinstance(version, str):
             result["keepalived_version"] = version[:160]
+    elif request.action == "lvs_inventory":
+        inventory = _safe_lvs_inventory((request.details or {}).get("lvs", request.details))
+        if inventory is not None:
+            result["lvs"] = inventory
+    elif request.action == "lvs_apply":
+        config_hash = (request.details or {}).get("config_hash")
+        new_config_hash = (request.details or {}).get("new_config_hash")
+        previous_hash = (request.details or {}).get("previous_config_hash")
+        if isinstance(config_hash, str) and re.fullmatch(r"[a-fA-F0-9]{64}", config_hash):
+            result["config_hash"] = config_hash.lower()
+        if isinstance(previous_hash, str) and re.fullmatch(r"[a-fA-F0-9]{64}", previous_hash):
+            result["previous_config_hash"] = previous_hash.lower()
+        if isinstance(new_config_hash, str) and re.fullmatch(r"[a-fA-F0-9]{64}", new_config_hash):
+            result["new_config_hash"] = new_config_hash.lower()
+        for key in ("verified", "rolled_back"):
+            if isinstance((request.details or {}).get(key), bool):
+                result[key] = (request.details or {})[key]
+        applied = (request.details or {}).get("applied")
+        if isinstance(applied, bool):
+            result["applied"] = applied
+        plan_digest = (request.details or {}).get("plan_digest")
+        if isinstance(plan_digest, str) and re.fullmatch(r"[a-fA-F0-9]{64}", plan_digest):
+            result["plan_digest"] = plan_digest.lower()
+        target = (request.details or {}).get("target")
+        try:
+            result["target"] = LvsListener.model_validate(target).model_dump(mode="json")
+        except Exception:
+            pass
+        intent_kind = (request.details or {}).get("intent_kind")
+        if intent_kind in {"upsert_service", "delete_service"}:
+            result["intent_kind"] = intent_kind
+        service_count = (request.details or {}).get("service_count")
+        if isinstance(service_count, int) and not isinstance(service_count, bool) and 0 <= service_count <= 256:
+            result["service_count"] = service_count
 
     nested_scalar_keys = {
         "sha256",
@@ -1385,7 +1809,7 @@ class HeartbeatRequest(BaseModel):
             "nginx_root", "managed_config_root", "managed_certificate_root", "nginx_config",
             "config_entries", "main_config_editable",
             "log_roots", "log_files", "stub_status_url", "log_stream_transport",
-            "keepalived", "ipvs",
+            "keepalived", "ipvs", "lvs",
         }
         result: Dict[str, Any] = {}
         for key, item in value.items():
@@ -1427,6 +1851,10 @@ class HeartbeatRequest(BaseModel):
                 ipvs = _safe_ipvs_status(item)
                 if ipvs is not None:
                     result[key] = ipvs
+            elif key == "lvs":
+                lvs = _safe_lvs_inventory(item)
+                if lvs is not None:
+                    result[key] = lvs
             elif key in {"log_roots", "log_files"}:
                 if not isinstance(item, list):
                     continue
@@ -1650,7 +2078,8 @@ class Database:
                     claimed_at INTEGER,
                     completed_at INTEGER,
                     result_meta_json TEXT,
-                    result_sha256 TEXT
+                    result_sha256 TEXT,
+                    sequence_no INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE INDEX IF NOT EXISTS jobs_claim_idx
@@ -1707,12 +2136,31 @@ class Database:
                     completed_at INTEGER,
                     reconciled_at INTEGER,
                     reconciled_by TEXT,
+                    execution_mode TEXT NOT NULL DEFAULT 'parallel',
                     metadata_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE INDEX IF NOT EXISTS operations_list_idx
                     ON operations(updated_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS operations_site_idx
                     ON operations(site_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS lvs_plans (
+                    id TEXT PRIMARY KEY,
+                    plan_digest TEXT NOT NULL,
+                    node_ids_json TEXT NOT NULL,
+                    intent_json TEXT NOT NULL,
+                    diff_json TEXT NOT NULL,
+                    expected_hashes_json TEXT NOT NULL,
+                    roles_json TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    consumed_at INTEGER,
+                    apply_request_id TEXT UNIQUE,
+                    operation_id TEXT
+                );
+                CREATE INDEX IF NOT EXISTS lvs_plans_expiry_idx
+                    ON lvs_plans(expires_at, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS resources (
                     kind TEXT NOT NULL,
@@ -1812,6 +2260,7 @@ class Database:
                 "lease_expires_at": "INTEGER",
                 "attempt_count": "INTEGER NOT NULL DEFAULT 0",
                 "created_by": "TEXT",
+                "sequence_no": "INTEGER NOT NULL DEFAULT 0",
             }
             for column, definition in job_migrations.items():
                 if column not in existing_job_columns:
@@ -1836,6 +2285,7 @@ class Database:
                 "reconciliation_status": "TEXT NOT NULL DEFAULT 'legacy'",
                 "reconciled_at": "INTEGER",
                 "reconciled_by": "TEXT",
+                "execution_mode": "TEXT NOT NULL DEFAULT 'parallel'",
             }
             for column, definition in operation_migrations.items():
                 if column not in existing_operation_columns:
@@ -1918,7 +2368,9 @@ class Database:
             None,
             {"count": len(rows)},
         )
-        for operation_id in {row["operation_id"] for row in rows if row["operation_id"]}:
+        operation_ids = {row["operation_id"] for row in rows if row["operation_id"]}
+        _expire_blocked_serial_jobs(connection, operation_ids, now)
+        for operation_id in operation_ids:
             _refresh_operation(connection, operation_id, now)
         return len(rows)
 
@@ -2067,6 +2519,7 @@ def _job_public(row: sqlite3.Row) -> Dict[str, Any]:
         "lease_expires_at": _utc_iso(row["lease_expires_at"] if "lease_expires_at" in row.keys() else None),
         "attempt_count": int(row["attempt_count"] or 0) if "attempt_count" in row.keys() else 0,
         "created_by": row["created_by"] if "created_by" in row.keys() else None,
+        "sequence_no": int(row["sequence_no"] or 0) if "sequence_no" in row.keys() else 0,
         "completed_at": _utc_iso(row["completed_at"]),
         "result": result_meta,
         "result_sha256": row["result_sha256"],
@@ -2091,7 +2544,26 @@ def _operation_public(row: sqlite3.Row) -> Dict[str, Any]:
         "completed_at": _utc_iso(row["completed_at"]),
         "reconciled_at": _utc_iso(row["reconciled_at"] if "reconciled_at" in row.keys() else None),
         "reconciled_by": row["reconciled_by"] if "reconciled_by" in row.keys() else None,
+        "execution_mode": row["execution_mode"] if "execution_mode" in row.keys() else "parallel",
         "metadata": metadata,
+    }
+
+
+def _lvs_plan_public(row: sqlite3.Row) -> Dict[str, Any]:
+    diff = json.loads(row["diff_json"])
+    return {
+        "id": row["id"],
+        "plan_digest": row["plan_digest"],
+        "node_ids": json.loads(row["node_ids_json"]),
+        "intent": json.loads(row["intent_json"]),
+        "diff": diff,
+        "warnings": diff.get("warnings", []) if isinstance(diff, dict) else [],
+        "expected_config_hashes": json.loads(row["expected_hashes_json"]),
+        "created_by": row["created_by"],
+        "created_at": _utc_iso(row["created_at"]),
+        "expires_at": _utc_iso(row["expires_at"]),
+        "consumed_at": _utc_iso(row["consumed_at"]),
+        "operation_id": row["operation_id"],
     }
 
 
@@ -2109,6 +2581,45 @@ def _revision_public(row: sqlite3.Row, include_snapshot: bool = False) -> Dict[s
     if include_snapshot:
         result["snapshot"] = json.loads(row["snapshot_json"])
     return result
+
+
+def _expire_blocked_serial_jobs(
+    connection: sqlite3.Connection,
+    operation_ids: Any,
+    now: int,
+) -> int:
+    operation_ids = [item for item in operation_ids if item]
+    if not operation_ids:
+        return 0
+    placeholders = ",".join("?" for _ in operation_ids)
+    rows = connection.execute(
+        "SELECT j.id, j.operation_id FROM jobs j JOIN operations o ON o.id = j.operation_id "
+        "WHERE j.operation_id IN (" + placeholders + ") AND o.execution_mode = 'serial' "
+        "AND j.status IN ('queued', 'expired') "
+        "AND COALESCE(j.result_meta_json, '') NOT LIKE '%dependency_failed%' AND EXISTS ("
+        "SELECT 1 FROM jobs earlier WHERE earlier.operation_id = j.operation_id "
+        "AND earlier.sequence_no < j.sequence_no AND earlier.status IN ('failed', 'expired'))",
+        operation_ids,
+    ).fetchall()
+    if not rows:
+        return 0
+    redacted = _canonical_json({"redacted": True, "reason": "dependency_failed"})
+    result = _canonical_json({"failure_code": "dependency_failed", "failure_stage": "queue"})
+    connection.executemany(
+        "UPDATE jobs SET status = 'expired', completed_at = ?, payload_json = ?, result_meta_json = ? "
+        "WHERE id = ? AND status IN ('queued', 'expired')",
+        [(now, redacted, result, row["id"]) for row in rows],
+    )
+    Database.audit(
+        connection,
+        "system",
+        None,
+        "serial_jobs_dependency_failed",
+        "operation",
+        None,
+        {"count": len(rows), "operation_ids": sorted(set(operation_ids))[:100]},
+    )
+    return len(rows)
 
 
 def _refresh_operation(connection: sqlite3.Connection, operation_id: Optional[str], now: int) -> None:
@@ -2865,6 +3376,19 @@ def create_app(
                    WHERE node_id = ?
                      AND expires_at > ?
                      AND (status = 'queued' OR (status = 'running' AND COALESCE(lease_expires_at, 0) <= ?))
+                     AND (
+                       operation_id IS NULL
+                       OR NOT EXISTS (
+                         SELECT 1 FROM operations serial_op
+                         WHERE serial_op.id = jobs.operation_id AND serial_op.execution_mode = 'serial'
+                       )
+                       OR NOT EXISTS (
+                         SELECT 1 FROM jobs earlier
+                         WHERE earlier.operation_id = jobs.operation_id
+                           AND earlier.sequence_no < jobs.sequence_no
+                           AND earlier.status <> 'succeeded'
+                       )
+                     )
                    ORDER BY created_at ASC, id ASC LIMIT ?""",
                 (agent["id"], now, now, request.limit),
             ).fetchall()
@@ -2986,6 +3510,8 @@ def create_app(
                 job_id,
                 {"status": request.status, "result_sha256": result_digest},
             )
+            if request.status in {"failed", "expired"} and row["operation_id"]:
+                _expire_blocked_serial_jobs(connection, [row["operation_id"]], now)
             _refresh_operation(connection, row["operation_id"], now)
         return {"accepted": True, "idempotent": False, "status": request.status}
 
@@ -2995,6 +3521,532 @@ def create_app(
         with database.connection() as connection:
             rows = connection.execute("SELECT * FROM nodes ORDER BY node_name COLLATE NOCASE").fetchall()
         return {"items": [_node_public(row, now, settings.online_after_seconds) for row in rows]}
+
+    @api.post("/api/v1/admin/lvs/plans", status_code=201)
+    def create_lvs_plan(
+        request: LvsPlanRequest,
+        admin: Dict[str, Any] = Depends(require_operator),
+    ) -> Dict[str, Any]:
+        if (request.adopt_existing or request.intent.kind == "delete_service") and admin.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="LVS takeover and deletion require admin role")
+        now = int(time.time())
+        intent = request.intent.model_dump(mode="json", exclude_none=True)
+        target_listener = request.intent.target_listener().model_dump(mode="json")
+        target_key = _canonical_json(target_listener)
+        with database.transaction() as connection:
+            all_rows = connection.execute(
+                "SELECT * FROM nodes WHERE revoked_at IS NULL"
+            ).fetchall()
+            by_id = {row["id"]: row for row in all_rows}
+            missing = [node_id for node_id in request.node_ids if node_id not in by_id]
+            if missing:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"message": "unknown or revoked node ids", "node_ids": missing},
+                )
+            offline: List[str] = []
+            unsupported: List[str] = []
+            adoption_unsupported: List[str] = []
+            inventories: Dict[str, Dict[str, Any]] = {}
+            expected_hashes: Dict[str, str] = {}
+            for node_id in request.node_ids:
+                row = by_id[node_id]
+                last_seen = row["last_seen_at"]
+                if (
+                    last_seen is None
+                    or now - int(last_seen) > settings.online_after_seconds
+                    or row["reported_status"] == "offline"
+                ):
+                    offline.append(node_id)
+                capabilities = set(json.loads(row["capabilities_json"] or "[]"))
+                if "lvs_manage_v1" not in capabilities:
+                    unsupported.append(node_id)
+                if request.adopt_existing and "lvs_adopt_v1" not in capabilities:
+                    adoption_unsupported.append(node_id)
+                facts = json.loads(row["facts_json"] or "{}")
+                inventory = _safe_lvs_inventory(facts.get("lvs"))
+                if inventory is None or not inventory.get("management_enabled"):
+                    unsupported.append(node_id)
+                    continue
+                if inventory.get("partial"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"message": "node reported an incomplete LVS inventory", "node_ids": [node_id]},
+                    )
+                config_hash = inventory.get("config_hash")
+                if not isinstance(config_hash, str):
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"message": "node has no current LVS config hash", "node_ids": [node_id]},
+                    )
+                inventories[node_id] = inventory
+                expected_hashes[node_id] = config_hash
+            if offline:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "LVS nodes must be online", "node_ids": sorted(set(offline))},
+                )
+            if unsupported:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "agent does not support LVS management", "node_ids": sorted(set(unsupported))},
+                )
+            if adoption_unsupported:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "agent does not support explicit LVS takeover",
+                        "node_ids": sorted(set(adoption_unsupported)),
+                    },
+                )
+
+            observations = {
+                row["id"]: {
+                    "keepalived": json.loads(row["facts_json"] or "{}").get("keepalived"),
+                    "labels": json.loads(row["labels_json"] or "{}"),
+                }
+                for row in all_rows
+            }
+            ha_group = _validate_lvs_ha_group(
+                observations,
+                request.node_ids,
+                target_listener["address"],
+            )
+            roles = ha_group["roles"]
+
+            semantic_documents = {
+                node_id: _lvs_semantic_services(inventory)
+                for node_id, inventory in inventories.items()
+            }
+            per_node_before: Dict[str, Optional[Dict[str, Any]]] = {}
+            non_target_documents: Dict[str, List[Dict[str, Any]]] = {}
+            for node_id, document in semantic_documents.items():
+                target_services = [
+                    service
+                    for service in document
+                    if _canonical_json(service.get("listener")) == target_key
+                ]
+                if len(target_services) > 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": "target LVS service is duplicated on a node",
+                            "node_ids": [node_id],
+                        },
+                    )
+                per_node_before[node_id] = target_services[0] if target_services else None
+                non_target_documents[node_id] = [
+                    service
+                    for service in document
+                    if _canonical_json(service.get("listener")) != target_key
+                ]
+            non_target_digests = {
+                _sha256_text(_canonical_json(document))
+                for document in non_target_documents.values()
+            }
+            if len(non_target_digests) != 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "LVS nodes have non-target semantic configuration drift",
+                        "nodes": {
+                            node_id: _sha256_text(_canonical_json(document))
+                            for node_id, document in non_target_documents.items()
+                        },
+                    },
+                )
+            distinct_before = {
+                _canonical_json(service) for service in per_node_before.values()
+            }
+            current = (
+                next(iter(per_node_before.values()))
+                if len(distinct_before) == 1
+                else None
+            )
+            inventory_records = {
+                node_id: next(
+                    (
+                        service for service in inventory.get("services", [])
+                        if _canonical_json(service.get("listener")) == target_key
+                    ),
+                    None,
+                )
+                for node_id, inventory in inventories.items()
+            }
+            read_only_nodes = [
+                node_id
+                for node_id, record in inventory_records.items()
+                if record is not None and not record.get("editable", False)
+            ]
+            if read_only_nodes:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "target LVS service is read-only", "node_ids": read_only_nodes},
+                )
+            after = intent.get("service") if request.intent.kind == "upsert_service" else None
+            warnings: List[Dict[str, str]] = []
+            existing_nodes = [
+                node_id
+                for node_id, record in inventory_records.items()
+                if record is not None and record.get("origin") == "existing"
+            ]
+            if existing_nodes:
+                if request.intent.kind != "upsert_service":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="take over the existing LVS service before deleting it",
+                    )
+                if not request.adopt_existing:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": "explicit LVS takeover acknowledgement is required",
+                            "node_ids": existing_nodes,
+                        },
+                    )
+                warnings.append({
+                    "code": "existing_block_will_be_rewritten",
+                    "message": (
+                        "将重写该 virtual_server 块，块内注释和未建模格式可能变化；"
+                        "VRRP、认证和其他配置块保持不变。"
+                    ),
+                })
+            elif request.adopt_existing:
+                raise HTTPException(status_code=409, detail="no existing LVS service requires takeover")
+            adoption_node_ids = sorted(existing_nodes) if request.adopt_existing else []
+            changed_node_ids = sorted(
+                node_id
+                for node_id, before in per_node_before.items()
+                if before != after or node_id in adoption_node_ids
+            )
+            diff = {
+                "action": request.intent.kind,
+                "listener": target_listener,
+                "before": current,
+                "after": after,
+                "changed": bool(changed_node_ids),
+                "per_node_before": per_node_before,
+                "changed_node_ids": changed_node_ids,
+                "adoption_node_ids": adoption_node_ids,
+                "adoption_confirmed": request.adopt_existing,
+                "ha_group": ha_group,
+                "warnings": warnings,
+            }
+            plan_core = {
+                "node_ids": sorted(request.node_ids),
+                "intent": intent,
+                "diff": diff,
+                "expected_config_hashes": expected_hashes,
+            }
+            plan_digest = _sha256_text(_canonical_json(plan_core))
+            plan_id = str(uuid.uuid4())
+            expires_at = now + request.ttl_seconds
+            connection.execute(
+                """INSERT INTO lvs_plans
+                   (id, plan_digest, node_ids_json, intent_json, diff_json,
+                    expected_hashes_json, roles_json, created_by, created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    plan_id,
+                    plan_digest,
+                    _canonical_json(request.node_ids),
+                    _canonical_json(intent),
+                    _canonical_json(diff),
+                    _canonical_json(expected_hashes),
+                    _canonical_json(roles),
+                    admin["username"],
+                    now,
+                    expires_at,
+                ),
+            )
+            Database.audit(
+                connection,
+                admin["auth_source"],
+                admin["username"],
+                "lvs_plan_created",
+                "lvs_plan",
+                plan_id,
+                {"plan_digest": plan_digest, "node_ids": request.node_ids, "action": request.intent.kind},
+            )
+            row = connection.execute("SELECT * FROM lvs_plans WHERE id = ?", (plan_id,)).fetchone()
+        return {"plan": _lvs_plan_public(row)}
+
+    @api.get("/api/v1/admin/lvs/plans/{plan_id}")
+    def get_lvs_plan(
+        plan_id: str,
+        admin: Dict[str, Any] = Depends(require_session),
+    ) -> Dict[str, Any]:
+        with database.connection() as connection:
+            row = connection.execute("SELECT * FROM lvs_plans WHERE id = ?", (plan_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="LVS plan not found")
+        return {"plan": _lvs_plan_public(row)}
+
+    @api.post("/api/v1/admin/lvs/plans/{plan_id}/apply", status_code=201)
+    def apply_lvs_plan(
+        plan_id: str,
+        request: LvsPlanApplyRequest,
+        admin: Dict[str, Any] = Depends(require_operator),
+    ) -> Dict[str, Any]:
+        now = int(time.time())
+        with database.transaction() as connection:
+            row = connection.execute("SELECT * FROM lvs_plans WHERE id = ?", (plan_id,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="LVS plan not found")
+            request_owner = connection.execute(
+                "SELECT * FROM lvs_plans WHERE apply_request_id = ?", (request.request_id,)
+            ).fetchone()
+            if request_owner is not None and request_owner["id"] != plan_id:
+                raise HTTPException(status_code=409, detail="request id was already used for another LVS plan")
+            if row["plan_digest"] != request.plan_digest:
+                raise HTTPException(status_code=409, detail="LVS plan digest mismatch")
+            diff = json.loads(row["diff_json"])
+            existing_operation = connection.execute(
+                "SELECT id FROM operations WHERE id = ?", (request.request_id,)
+            ).fetchone()
+            if existing_operation is not None and row["operation_id"] != request.request_id:
+                raise HTTPException(status_code=409, detail="request id was already used by another operation")
+            if row["consumed_at"] is not None:
+                if row["apply_request_id"] != request.request_id:
+                    raise HTTPException(status_code=409, detail="LVS plan was already consumed")
+                if row["operation_id"] is None:
+                    if diff.get("changed") is False:
+                        return {
+                            "status": "no_changes",
+                            "no_changes": True,
+                            "operation": None,
+                            "jobs": [],
+                            "idempotent": True,
+                        }
+                    raise HTTPException(status_code=409, detail="consumed LVS plan has no operation")
+                operation = connection.execute(
+                    "SELECT * FROM operations WHERE id = ?", (row["operation_id"],)
+                ).fetchone()
+                jobs = connection.execute(
+                    "SELECT j.*, n.node_name FROM jobs j JOIN nodes n ON n.id = j.node_id "
+                    "WHERE j.operation_id = ? ORDER BY j.sequence_no, j.id",
+                    (row["operation_id"],),
+                ).fetchall()
+                return {
+                    "operation": _operation_public(operation),
+                    "jobs": [_job_public(job) for job in jobs],
+                    "idempotent": True,
+                }
+            if int(row["expires_at"]) <= now:
+                raise HTTPException(status_code=409, detail="LVS plan expired")
+
+            node_ids = json.loads(row["node_ids_json"])
+            expected_hashes = json.loads(row["expected_hashes_json"])
+            roles = json.loads(row["roles_json"])
+            intent = json.loads(row["intent_json"])
+            all_current_rows = connection.execute(
+                "SELECT * FROM nodes WHERE revoked_at IS NULL"
+            ).fetchall()
+            requested_node_ids = set(node_ids)
+            current_rows = [node for node in all_current_rows if node["id"] in requested_node_ids]
+            current_hashes: Dict[str, Optional[str]] = {}
+            takeover_unsupported: List[str] = []
+            for node in current_rows:
+                facts = json.loads(node["facts_json"] or "{}")
+                lvs = _safe_lvs_inventory(facts.get("lvs")) or {}
+                current_hashes[node["id"]] = lvs.get("config_hash")
+                capabilities = set(json.loads(node["capabilities_json"] or "[]"))
+                if diff.get("adoption_confirmed") is True and "lvs_adopt_v1" not in capabilities:
+                    takeover_unsupported.append(node["id"])
+                if (
+                    node["last_seen_at"] is None
+                    or now - int(node["last_seen_at"]) > settings.online_after_seconds
+                    or node["reported_status"] == "offline"
+                    or "lvs_manage_v1" not in capabilities
+                ):
+                    raise HTTPException(status_code=409, detail="LVS node is no longer online and manageable")
+            if len(current_rows) != len(node_ids):
+                raise HTTPException(status_code=409, detail="LVS node is no longer available")
+            if takeover_unsupported:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "LVS node no longer supports explicit takeover",
+                        "node_ids": sorted(takeover_unsupported),
+                    },
+                )
+            stale = [node_id for node_id in node_ids if current_hashes.get(node_id) != expected_hashes.get(node_id)]
+            if stale:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "LVS configuration changed after planning", "node_ids": stale},
+                )
+
+            listener = LvsIntent.model_validate(intent).target_listener()
+            current_observations = {
+                node["id"]: {
+                    "keepalived": json.loads(node["facts_json"] or "{}").get("keepalived"),
+                    "labels": json.loads(node["labels_json"] or "{}"),
+                }
+                for node in all_current_rows
+            }
+            current_ha_group = _validate_lvs_ha_group(
+                current_observations,
+                node_ids,
+                listener.address,
+            )
+            planned_ha_group = diff.get("ha_group")
+            if isinstance(planned_ha_group, dict) and current_ha_group != planned_ha_group:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "LVS HA group changed after planning",
+                        "planned": planned_ha_group,
+                        "current": current_ha_group,
+                    },
+                )
+            roles = current_ha_group["roles"]
+
+            if diff.get("changed") is False:
+                connection.execute(
+                    "UPDATE lvs_plans SET consumed_at = ?, apply_request_id = ? WHERE id = ?",
+                    (now, request.request_id, plan_id),
+                )
+                Database.audit(
+                    connection,
+                    admin["auth_source"],
+                    admin["username"],
+                    "lvs_plan_no_changes",
+                    "lvs_plan",
+                    plan_id,
+                    {"plan_digest": row["plan_digest"], "node_ids": node_ids},
+                )
+                return {
+                    "status": "no_changes",
+                    "no_changes": True,
+                    "operation": None,
+                    "jobs": [],
+                    "idempotent": False,
+                }
+
+            raw_changed_node_ids = diff.get("changed_node_ids")
+            if raw_changed_node_ids is None:
+                changed_node_ids = list(node_ids)
+            elif (
+                isinstance(raw_changed_node_ids, list)
+                and all(isinstance(node_id, str) for node_id in raw_changed_node_ids)
+                and len(set(raw_changed_node_ids)) == len(raw_changed_node_ids)
+                and set(raw_changed_node_ids).issubset(set(node_ids))
+            ):
+                changed_node_ids = list(raw_changed_node_ids)
+            else:
+                raise HTTPException(status_code=409, detail="LVS plan changed-node set is invalid")
+            if not changed_node_ids:
+                raise HTTPException(status_code=409, detail="LVS plan declares changes without target nodes")
+            raw_adoption_node_ids = diff.get("adoption_node_ids", [])
+            if not (
+                isinstance(raw_adoption_node_ids, list)
+                and all(isinstance(node_id, str) for node_id in raw_adoption_node_ids)
+                and set(raw_adoption_node_ids).issubset(set(changed_node_ids))
+            ):
+                raise HTTPException(status_code=409, detail="LVS plan adoption-node set is invalid")
+            adoption_node_ids = set(raw_adoption_node_ids)
+
+            role_rank = {"BACKUP": 0, "UNKNOWN": 1, "FAULT": 1, "MASTER": 2}
+            ordered_nodes = sorted(
+                changed_node_ids,
+                key=lambda item: (role_rank.get(roles.get(item), 1), item),
+            )
+            operation_id = request.request_id
+            site_id = "lvs:{}:{}/{}".format(listener.address, listener.port, listener.protocol.lower())
+            # Lock the complete HA group even when only one divergent Director
+            # needs a repair job. Otherwise another plan could mutate a
+            # currently-converged peer while this rollout is still in flight.
+            requested_nodes = set(node_ids)
+            active_operations = connection.execute(
+                "SELECT id, metadata_json FROM operations "
+                "WHERE site_id LIKE 'lvs:%' AND status IN ('queued', 'running') "
+                "ORDER BY created_at DESC"
+            ).fetchall()
+            for active_operation in active_operations:
+                try:
+                    active_nodes = json.loads(active_operation["metadata_json"] or "{}").get("node_ids", [])
+                except (AttributeError, json.JSONDecodeError):
+                    active_nodes = []
+                overlap = sorted(requested_nodes.intersection(active_nodes))
+                if overlap:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": "LVS nodes already have an active operation",
+                            "operation_id": active_operation["id"],
+                            "node_ids": overlap,
+                        },
+                    )
+            metadata = {
+                "plan_id": plan_id,
+                "plan_digest": row["plan_digest"],
+                "node_ids": sorted(node_ids),
+                "job_node_ids": ordered_nodes,
+                "selected_node_ids": node_ids,
+                "execution_order": "BACKUP_then_MASTER",
+            }
+            connection.execute(
+                """INSERT INTO operations
+                   (id, site_id, kind, status, reconciliation_status, base_version,
+                    created_by, created_at, updated_at, execution_mode, metadata_json)
+                   VALUES (?, ?, 'publish', 'queued', 'legacy', 0, ?, ?, ?, 'serial', ?)""",
+                (operation_id, site_id, admin["username"], now, now, _canonical_json(metadata)),
+            )
+            jobs: List[Dict[str, Any]] = []
+            expires_at = now + settings.max_job_ttl_seconds
+            for sequence_no, node_id in enumerate(ordered_nodes):
+                payload = {
+                    "intent": intent,
+                    "expected_config_hash": expected_hashes[node_id],
+                    "plan_digest": row["plan_digest"],
+                    "expected_role": roles[node_id],
+                    "expected_vip": current_ha_group["vip"],
+                    "adopt_existing": node_id in adoption_node_ids,
+                }
+                payload_json = _canonical_json(payload)
+                job_id = str(uuid.uuid4())
+                connection.execute(
+                    """INSERT INTO jobs
+                       (id, batch_id, operation_id, node_id, action, status, payload_json,
+                        payload_sha256, payload_sensitive, created_at, expires_at, created_by, sequence_no)
+                       VALUES (?, ?, ?, ?, 'lvs_apply', 'queued', ?, ?, 0, ?, ?, ?, ?)""",
+                    (
+                        job_id,
+                        operation_id,
+                        operation_id,
+                        node_id,
+                        payload_json,
+                        _sha256_text(payload_json),
+                        now,
+                        expires_at,
+                        admin["username"],
+                        sequence_no,
+                    ),
+                )
+                jobs.append({
+                    "id": job_id,
+                    "node_id": node_id,
+                    "status": "queued",
+                    "operation_id": operation_id,
+                    "sequence_no": sequence_no,
+                    "expires_at": _utc_iso(expires_at),
+                })
+            connection.execute(
+                "UPDATE lvs_plans SET consumed_at = ?, apply_request_id = ?, operation_id = ? WHERE id = ?",
+                (now, request.request_id, operation_id, plan_id),
+            )
+            Database.audit(
+                connection,
+                admin["auth_source"],
+                admin["username"],
+                "lvs_plan_applied",
+                "operation",
+                operation_id,
+                {"plan_id": plan_id, "plan_digest": row["plan_digest"], "node_ids": ordered_nodes},
+            )
+            operation = connection.execute("SELECT * FROM operations WHERE id = ?", (operation_id,)).fetchone()
+        return {"operation": _operation_public(operation), "jobs": jobs, "idempotent": False}
 
     @api.get("/api/v1/admin/monitoring/summary")
     def monitoring_summary(admin: Dict[str, Any] = Depends(require_session)) -> Dict[str, Any]:
@@ -3258,8 +4310,12 @@ def create_app(
 
     @api.post("/api/v1/admin/jobs", status_code=201)
     def create_jobs(request: AdminJobRequest, admin: Dict[str, Any] = Depends(require_operator)) -> Dict[str, Any]:
+        if request.action == "lvs_apply":
+            raise HTTPException(status_code=400, detail="LVS changes require a server-issued plan")
         if request.action in {"keepalived_inspect", "keepalived_validate"} and request.payload:
             raise HTTPException(status_code=400, detail="Keepalived observation jobs do not accept payload data")
+        if request.action == "lvs_inventory" and request.payload:
+            raise HTTPException(status_code=400, detail="LVS inventory jobs do not accept payload data")
         payload_json = _canonical_json(request.payload)
         payload_bytes = len(payload_json.encode("utf-8"))
         if payload_bytes > settings.max_payload_bytes:
@@ -3285,11 +4341,12 @@ def create_app(
             missing = [node_id for node_id in request.node_ids if node_id not in existing_ids]
             if missing:
                 raise HTTPException(status_code=404, detail={"message": "unknown node ids", "node_ids": missing})
-            if request.action in {"keepalived_inspect", "keepalived_validate"}:
+            if request.action in {"keepalived_inspect", "keepalived_validate", "lvs_inventory"}:
+                required_capability = "lvs_manage_v1" if request.action == "lvs_inventory" else request.action
                 unsupported = [
                     row["id"]
                     for row in existing_rows
-                    if request.action not in set(json.loads(row["capabilities_json"] or "[]"))
+                    if required_capability not in set(json.loads(row["capabilities_json"] or "[]"))
                 ]
                 if unsupported:
                     raise HTTPException(
@@ -3348,6 +4405,8 @@ def create_app(
                 status_code=400,
                 detail="Keepalived observation must use the read-only job endpoint",
             )
+        if any(spec.action in {"lvs_inventory", "lvs_apply"} for spec in request.jobs):
+            raise HTTPException(status_code=400, detail="LVS jobs require the dedicated plan API")
         raw_request = request.model_dump() if hasattr(request, "model_dump") else request.dict()
         reconciliation_protocol = raw_request.pop("reconciliation_protocol", None)
         request_digest = _sha256_text(_canonical_json(raw_request))

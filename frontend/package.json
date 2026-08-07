@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "package:server": "npm run build && node scripts/qa-contract.mjs && node scripts/package-release.mjs",
-    "test": "npm run build && node scripts/qa-contract.mjs && node scripts/qa-certificate-config.mjs && node scripts/qa-operation-recovery.mjs && node scripts/qa-site-deployment-contract.mjs && node scripts/qa-site-operation-state.mjs && node scripts/qa-site-editor.mjs && node scripts/qa-site-detail-contract.mjs && node scripts/qa-template-dirty.mjs && node scripts/qa-live-logs.mjs && node scripts/qa-high-availability.mjs && node scripts/qa-lvs.mjs",
+    "test": "npm run build && node scripts/qa-contract.mjs && node scripts/qa-certificate-config.mjs && node scripts/qa-operation-recovery.mjs && node scripts/qa-site-deployment-contract.mjs && node scripts/qa-site-operation-state.mjs && node scripts/qa-site-editor.mjs && node scripts/qa-site-detail-contract.mjs && node scripts/qa-template-dirty.mjs && node scripts/qa-live-logs.mjs && node scripts/qa-high-availability.mjs && node scripts/qa-lvs.mjs && node scripts/qa-ipvs-groups.mjs",
     "qa:certificate-config": "node scripts/qa-certificate-config.mjs",
     "qa:live-logs": "node scripts/qa-live-logs.mjs",
     "qa:visual": "npm run build && node scripts/qa-capture.mjs",

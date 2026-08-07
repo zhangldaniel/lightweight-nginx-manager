@@ -14,7 +14,9 @@ from fastapi.testclient import TestClient
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1] / "server"
+AGENT_DIR = Path(__file__).resolve().parents[1] / "agent"
 sys.path.insert(0, str(SERVER_DIR))
+sys.path.insert(0, str(AGENT_DIR))
 
 from app import (  # noqa: E402
     LDAPAuthenticationError,
@@ -25,6 +27,7 @@ from app import (  # noqa: E402
     _ldap_role_for_groups,
     create_app,
 )
+from lvs_control import normalize_intent  # noqa: E402
 
 
 class ServerTestCase(unittest.TestCase):
@@ -72,7 +75,7 @@ class ServerTestCase(unittest.TestCase):
     def admin_headers(self):
         return {"X-CSRF-Token": self.csrf}
 
-    def start_enrollment(self, node_name="edge-01", enrollment_id=None, secret=None):
+    def start_enrollment(self, node_name="edge-01", enrollment_id=None, secret=None, labels=None):
         request_id = enrollment_id or str(uuid.uuid4())
         enrollment_secret = secret or secrets.token_urlsafe(32)
         payload = {
@@ -80,7 +83,7 @@ class ServerTestCase(unittest.TestCase):
             "enrollment_secret": enrollment_secret,
             "node_name": node_name,
             "hostname": node_name + ".example.test",
-            "labels": {"region": "test"},
+            "labels": labels if labels is not None else {"region": "test"},
         }
         response = self.client.post("/api/v1/agent/enroll", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
@@ -94,8 +97,8 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
-    def enroll(self, node_name="edge-01"):
-        request, pending = self.start_enrollment(node_name)
+    def enroll(self, node_name="edge-01", labels=None):
+        request, pending = self.start_enrollment(node_name, labels=labels)
         self.assertEqual("pending", pending["status"])
         approved = self.approve(request["enrollment_id"])
         completed = self.client.post("/api/v1/agent/enroll", json=request)
@@ -106,6 +109,68 @@ class ServerTestCase(unittest.TestCase):
             request["enrollment_secret"], request["enrollment_id"], agent_id
         )
         return {"agent_id": agent_id, "machine_credential": credential}
+
+    def report_lvs(
+        self,
+        enrolled,
+        role="BACKUP",
+        config_hash=None,
+        services=None,
+        capabilities=None,
+        vip="10.165.0.40",
+        virtual_router_id=40,
+        virtual_ips=None,
+        summary_complete=True,
+        local_addresses=None,
+        unicast_src_ip=None,
+        unicast_peers=None,
+    ):
+        headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        if virtual_ips is None:
+            virtual_ips = [
+                "10.165.0.40/22",
+                "10.165.0.50/22",
+                "10.165.0.60/22",
+            ]
+        response = self.client.post(
+            "/api/v1/agent/heartbeat",
+            headers=headers,
+            json={
+                "status": "online",
+                "capabilities": capabilities if capabilities is not None else ["lvs_manage_v1", "lvs_adopt_v1"],
+                "facts": {
+                    "keepalived": {
+                        "role": role,
+                        "vip": vip,
+                        "local_addresses": local_addresses or [],
+                        "config_summary": {
+                            "instance_count": 1,
+                            "summary_complete": summary_complete,
+                            "instances": [
+                                {
+                                    "name": "VI_1",
+                                    "configured_state": "MASTER" if role == "MASTER" else "BACKUP",
+                                    "interface": "ens192",
+                                    "virtual_router_id": virtual_router_id,
+                                    "priority": 150 if role == "MASTER" else 100,
+                                    "advert_int": 1,
+                                    "virtual_ips": virtual_ips,
+                                    "unicast_src_ip": unicast_src_ip,
+                                    "unicast_peers": unicast_peers or [],
+                                }
+                            ],
+                        },
+                    },
+                    "lvs": {
+                        "management_enabled": True,
+                        "config_hash": config_hash or ("a" * 64),
+                        "services": services or [],
+                    },
+                },
+            },
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        return headers
 
     def test_web_login_session_cookie_and_csrf(self):
         anonymous = TestClient(self.client.app, base_url="https://testserver")
@@ -263,6 +328,40 @@ class ServerTestCase(unittest.TestCase):
                 json={"revision": 0, "state": {"sites": []}},
             )
             self.assertEqual(saved.status_code, 200, saved.text)
+            lvs_target = {"address": "192.0.2.40", "port": 443, "protocol": "TCP"}
+            lvs_service = {
+                "name": "restricted-service",
+                "listener": lvs_target,
+                "scheduler": "wlc",
+                "forwarding": "DR",
+                "delay_loop": 6,
+                "members": [
+                    {"address": "192.0.2.43", "port": 443, "weight": 1, "enabled": True}
+                ],
+            }
+            takeover = ldap_client.post(
+                "/api/v1/admin/lvs/plans",
+                headers=operator_csrf,
+                json={
+                    "node_ids": ["unresolved-node"],
+                    "adopt_existing": True,
+                    "intent": {
+                        "kind": "upsert_service",
+                        "target": lvs_target,
+                        "service": lvs_service,
+                    },
+                },
+            )
+            self.assertEqual(takeover.status_code, 403, takeover.text)
+            deletion = ldap_client.post(
+                "/api/v1/admin/lvs/plans",
+                headers=operator_csrf,
+                json={
+                    "node_ids": ["unresolved-node"],
+                    "intent": {"kind": "delete_service", "target": lvs_target},
+                },
+            )
+            self.assertEqual(deletion.status_code, 403, deletion.text)
             request, _pending = self.start_enrollment("operator-cannot-approve")
             self.assertEqual(
                 ldap_client.post(
@@ -2166,6 +2265,790 @@ class ServerTestCase(unittest.TestCase):
         self.assertFalse(ipvs["truncated"])
         self.assertNotEqual("forged", ipvs["services"][0]["id"])
         self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(node, ensure_ascii=False))
+
+    @staticmethod
+    def lvs_intent(address="10.165.0.40", member_address="10.165.0.43"):
+        return {
+            "kind": "upsert_service",
+            "target": {"address": address, "port": 443, "protocol": "TCP"},
+            "change_note": "update managed HTTPS service",
+            "service": {
+                "name": "https-vip",
+                "listener": {"address": address, "port": 443, "protocol": "TCP"},
+                "scheduler": "mh",
+                "forwarding": "DR",
+                "delay_loop": 6,
+                "members": [
+                    {
+                        "address": member_address,
+                        "port": 443,
+                        "weight": 1,
+                        "enabled": True,
+                        "monitor": {
+                            "kind": "tcp",
+                            "connect_timeout": 3,
+                            "retries": 3,
+                            "delay_before_retry": 3,
+                            "connect_port": 443,
+                        },
+                    }
+                ],
+            },
+        }
+
+    def test_lvs_plan_models_forbid_command_and_unknown_fields(self):
+        enrolled = self.enroll("lvs-strict")
+        self.report_lvs(enrolled)
+        for malicious in (
+            {"command": "ipvsadm -C"},
+            {"raw_config": "auth_pass MUST-NOT-BE-STORED"},
+            {"script": "/tmp/run-me"},
+        ):
+            intent = self.lvs_intent()
+            intent["service"].update(malicious)
+            response = self.client.post(
+                "/api/v1/admin/lvs/plans",
+                headers=self.admin_headers,
+                json={"node_ids": [enrolled["agent_id"]], "intent": intent},
+            )
+            self.assertEqual(422, response.status_code, response.text)
+        direct_apply = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "action": "lvs_apply", "payload": {}},
+        )
+        self.assertEqual(400, direct_apply.status_code, direct_apply.text)
+
+        renamed = self.lvs_intent()
+        renamed["service"]["listener"]["port"] = 8443
+        rejected_rename = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "intent": renamed},
+        )
+        self.assertEqual(422, rejected_rename.status_code, rejected_rename.text)
+
+        disabled = self.lvs_intent()
+        disabled["service"]["members"][0]["enabled"] = False
+        rejected_disabled = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "intent": disabled},
+        )
+        self.assertEqual(422, rejected_disabled.status_code, rejected_disabled.text)
+
+    def test_lvs_apply_rejects_overlapping_node_operations(self):
+        enrolled = self.enroll("lvs-overlap")
+        self.report_lvs(enrolled)
+
+        first = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "intent": self.lvs_intent()},
+        ).json()["plan"]
+        first_apply = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(first["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": first["plan_digest"], "request_id": "lvs-overlap-request-0001"},
+        )
+        self.assertEqual(201, first_apply.status_code, first_apply.text)
+
+        second = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "intent": self.lvs_intent("10.165.0.50")},
+        ).json()["plan"]
+        second_apply = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(second["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": second["plan_digest"], "request_id": "lvs-overlap-request-0002"},
+        )
+        self.assertEqual(409, second_apply.status_code, second_apply.text)
+        detail = second_apply.json()["detail"]
+        self.assertEqual("LVS nodes already have an active operation", detail["message"])
+        self.assertEqual([enrolled["agent_id"]], detail["node_ids"])
+
+    def test_lvs_unchanged_plan_creates_no_operation_or_jobs(self):
+        enrolled = self.enroll("lvs-no-changes")
+        service = self.lvs_intent()["service"]
+        service["origin"] = "managed"
+        service["editable"] = True
+        agent_headers = self.report_lvs(enrolled, services=[service])
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "intent": self.lvs_intent()},
+        )
+        self.assertEqual(201, planned.status_code, planned.text)
+        plan = planned.json()["plan"]
+        self.assertFalse(plan["diff"]["changed"])
+
+        request = {"plan_digest": plan["plan_digest"], "request_id": "lvs-no-changes-request-01"}
+        applied = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json=request,
+        )
+        self.assertEqual(201, applied.status_code, applied.text)
+        self.assertEqual("no_changes", applied.json()["status"])
+        self.assertTrue(applied.json()["no_changes"])
+        self.assertIsNone(applied.json()["operation"])
+        self.assertEqual([], applied.json()["jobs"])
+        self.assertEqual([], self.client.post("/api/v1/agent/poll", headers=agent_headers, json={}).json()["jobs"])
+        with self.client.app.state.database.connection() as connection:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM operations").fetchone()[0])
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM jobs WHERE action = 'lvs_apply'").fetchone()[0])
+
+        repeated = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json=request,
+        )
+        self.assertEqual(201, repeated.status_code, repeated.text)
+        self.assertEqual("no_changes", repeated.json()["status"])
+        self.assertTrue(repeated.json()["idempotent"])
+
+    def test_lvs_partial_rollout_can_plan_only_the_drifted_target_node(self):
+        backup = self.enroll("lvs-recovery-backup")
+        master = self.enroll("lvs-recovery-master")
+        desired = self.lvs_intent()["service"]
+        desired["origin"] = "managed"
+        desired["editable"] = True
+        stale = json.loads(json.dumps(desired))
+        stale["members"][0]["address"] = "10.165.0.44"
+        shared = self.lvs_intent("10.165.0.50", "10.165.0.46")["service"]
+        shared["origin"] = "managed"
+        shared["editable"] = True
+        backup_headers = self.report_lvs(
+            backup,
+            role="BACKUP",
+            config_hash="b" * 64,
+            services=[desired, shared],
+        )
+        master_headers = self.report_lvs(
+            master,
+            role="MASTER",
+            config_hash="c" * 64,
+            services=[stale, shared],
+        )
+
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [master["agent_id"], backup["agent_id"]],
+                "intent": self.lvs_intent(),
+            },
+        )
+        self.assertEqual(201, planned.status_code, planned.text)
+        plan = planned.json()["plan"]
+        self.assertEqual([master["agent_id"]], plan["diff"]["changed_node_ids"])
+        self.assertEqual(
+            "10.165.0.43",
+            plan["diff"]["per_node_before"][backup["agent_id"]]["members"][0]["address"],
+        )
+        self.assertEqual(
+            "10.165.0.44",
+            plan["diff"]["per_node_before"][master["agent_id"]]["members"][0]["address"],
+        )
+
+        applied = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": plan["plan_digest"], "request_id": "lvs-recovery-request-0001"},
+        )
+        self.assertEqual(201, applied.status_code, applied.text)
+        self.assertEqual([master["agent_id"]], [job["node_id"] for job in applied.json()["jobs"]])
+        self.assertEqual([], self.client.post("/api/v1/agent/poll", headers=backup_headers, json={}).json()["jobs"])
+        master_jobs = self.client.post("/api/v1/agent/poll", headers=master_headers, json={}).json()["jobs"]
+        self.assertEqual(1, len(master_jobs))
+        self.assertEqual("c" * 64, master_jobs[0]["payload"]["expected_config_hash"])
+
+    def test_lvs_partial_takeover_only_migrates_existing_target_nodes(self):
+        backup = self.enroll("lvs-takeover-backup")
+        master = self.enroll("lvs-takeover-master")
+        existing = self.lvs_intent()["service"]
+        existing["origin"] = "existing"
+        existing["editable"] = True
+        managed = json.loads(json.dumps(existing))
+        managed["origin"] = "managed"
+        backup_headers = self.report_lvs(
+            backup,
+            role="BACKUP",
+            config_hash="d" * 64,
+            services=[existing],
+        )
+        master_headers = self.report_lvs(
+            master,
+            role="MASTER",
+            config_hash="e" * 64,
+            services=[managed],
+        )
+
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [master["agent_id"], backup["agent_id"]],
+                "intent": self.lvs_intent(),
+                "adopt_existing": True,
+            },
+        )
+        self.assertEqual(201, planned.status_code, planned.text)
+        plan = planned.json()["plan"]
+        self.assertEqual([backup["agent_id"]], plan["diff"]["changed_node_ids"])
+        self.assertEqual([backup["agent_id"]], plan["diff"]["adoption_node_ids"])
+
+        applied = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": plan["plan_digest"], "request_id": "lvs-partial-takeover-request-01"},
+        )
+        self.assertEqual(201, applied.status_code, applied.text)
+        self.assertEqual([backup["agent_id"]], [job["node_id"] for job in applied.json()["jobs"]])
+        backup_job = self.client.post(
+            "/api/v1/agent/poll", headers=backup_headers, json={}
+        ).json()["jobs"][0]
+        self.assertTrue(backup_job["payload"]["adopt_existing"])
+        self.assertEqual([], self.client.post("/api/v1/agent/poll", headers=master_headers, json={}).json()["jobs"])
+
+    def test_lvs_converged_ha_group_creates_no_operation_or_jobs(self):
+        backup = self.enroll("lvs-converged-backup")
+        master = self.enroll("lvs-converged-master")
+        desired = self.lvs_intent()["service"]
+        desired["origin"] = "managed"
+        desired["editable"] = True
+        backup_headers = self.report_lvs(
+            backup,
+            role="BACKUP",
+            config_hash="2" * 64,
+            services=[desired],
+        )
+        master_headers = self.report_lvs(
+            master,
+            role="MASTER",
+            config_hash="3" * 64,
+            services=[desired],
+        )
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [master["agent_id"], backup["agent_id"]],
+                "intent": self.lvs_intent(),
+            },
+        )
+        self.assertEqual(201, planned.status_code, planned.text)
+        plan = planned.json()["plan"]
+        self.assertFalse(plan["diff"]["changed"])
+        self.assertEqual([], plan["diff"]["changed_node_ids"])
+
+        applied = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": plan["plan_digest"], "request_id": "lvs-converged-request-0001"},
+        )
+        self.assertEqual(201, applied.status_code, applied.text)
+        self.assertEqual("no_changes", applied.json()["status"])
+        self.assertIsNone(applied.json()["operation"])
+        self.assertEqual([], applied.json()["jobs"])
+        self.assertEqual([], self.client.post("/api/v1/agent/poll", headers=backup_headers, json={}).json()["jobs"])
+        self.assertEqual([], self.client.post("/api/v1/agent/poll", headers=master_headers, json={}).json()["jobs"])
+
+    def test_lvs_apply_rechecks_takeover_capability(self):
+        backup = self.enroll("lvs-takeover-capability-backup")
+        master = self.enroll("lvs-takeover-capability-master")
+        existing = self.lvs_intent()["service"]
+        existing["origin"] = "existing"
+        existing["editable"] = True
+        self.report_lvs(backup, role="BACKUP", config_hash="f" * 64, services=[existing])
+        self.report_lvs(master, role="MASTER", config_hash="1" * 64, services=[existing])
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [backup["agent_id"], master["agent_id"]],
+                "intent": self.lvs_intent(),
+                "adopt_existing": True,
+            },
+        ).json()["plan"]
+
+        self.report_lvs(
+            backup,
+            role="BACKUP",
+            config_hash="f" * 64,
+            services=[existing],
+            capabilities=["lvs_manage_v1"],
+        )
+        rejected = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(planned["id"]),
+            headers=self.admin_headers,
+            json={
+                "plan_digest": planned["plan_digest"],
+                "request_id": "lvs-takeover-capability-request-01",
+            },
+        )
+        self.assertEqual(409, rejected.status_code, rejected.text)
+        self.assertEqual(
+            "LVS node no longer supports explicit takeover",
+            rejected.json()["detail"]["message"],
+        )
+        self.assertEqual([backup["agent_id"]], rejected.json()["detail"]["node_ids"])
+
+    def test_lvs_plan_requires_online_capable_nodes_and_non_target_semantic_agreement(self):
+        first = self.enroll("lvs-first")
+        second = self.enroll("lvs-second")
+        request = {
+            "node_ids": [first["agent_id"], second["agent_id"]],
+            "intent": self.lvs_intent(),
+        }
+        offline = self.client.post("/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request)
+        self.assertEqual(409, offline.status_code, offline.text)
+        self.report_lvs(first, capabilities=[])
+        self.report_lvs(second, role="MASTER")
+        unsupported = self.client.post("/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request)
+        self.assertEqual(409, unsupported.status_code, unsupported.text)
+        self.report_lvs(first)
+        service = self.lvs_intent()["service"]
+        service["origin"] = "managed"
+        service["editable"] = True
+        shared = self.lvs_intent("10.165.0.50", "10.165.0.46")["service"]
+        shared["origin"] = "managed"
+        shared["editable"] = True
+        self.report_lvs(first, services=[service, shared])
+        drifted_shared = json.loads(json.dumps(shared))
+        drifted_shared["members"][0]["weight"] = 9
+        self.report_lvs(second, role="MASTER", services=[service, drifted_shared])
+        drift = self.client.post("/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request)
+        self.assertEqual(409, drift.status_code, drift.text)
+        self.assertIn("non-target semantic", drift.text)
+        service["origin"] = "existing"
+        self.report_lvs(first, services=[service])
+        self.report_lvs(second, role="MASTER", services=[service])
+        unacknowledged = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(409, unacknowledged.status_code, unacknowledged.text)
+        self.assertEqual(
+            "explicit LVS takeover acknowledgement is required",
+            unacknowledged.json()["detail"]["message"],
+        )
+        request["adopt_existing"] = True
+        warning_plan = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(201, warning_plan.status_code, warning_plan.text)
+        takeover_plan = warning_plan.json()["plan"]
+        warnings = takeover_plan["warnings"]
+        self.assertEqual("existing_block_will_be_rewritten", warnings[0]["code"])
+        takeover_apply = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(takeover_plan["id"]),
+            headers=self.admin_headers,
+            json={
+                "plan_digest": takeover_plan["plan_digest"],
+                "request_id": "lvs-takeover-request-0001",
+            },
+        )
+        self.assertEqual(201, takeover_apply.status_code, takeover_apply.text)
+        first_headers = {"Authorization": "Bearer " + first["machine_credential"]}
+        takeover_job = self.client.post(
+            "/api/v1/agent/poll", headers=first_headers, json={}
+        ).json()["jobs"][0]
+        self.assertTrue(takeover_job["payload"]["adopt_existing"])
+
+    def test_lvs_plan_requires_complete_matching_keepalived_ha_group(self):
+        backup = self.enroll("lvs-ha-backup")
+        master = self.enroll("lvs-ha-master")
+        request = {
+            "node_ids": [backup["agent_id"], master["agent_id"]],
+            "intent": self.lvs_intent(),
+        }
+
+        self.report_lvs(backup, role="BACKUP", summary_complete=False)
+        self.report_lvs(master, role="MASTER")
+        incomplete = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(409, incomplete.status_code, incomplete.text)
+        self.assertIn("complete Keepalived configuration summary", incomplete.text)
+
+        self.report_lvs(backup, role="BACKUP", virtual_ips=["10.165.0.99/22"])
+        not_member = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(409, not_member.status_code, not_member.text)
+        self.assertIn("not uniquely assigned", not_member.text)
+
+        self.report_lvs(backup, role="BACKUP")
+        self.report_lvs(master, role="BACKUP")
+        no_master = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(409, no_master.status_code, no_master.text)
+        self.assertIn("exactly one MASTER", no_master.text)
+
+        self.report_lvs(master, role="MASTER", virtual_router_id=41)
+        wrong_vrid = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(409, wrong_vrid.status_code, wrong_vrid.text)
+        self.assertIn("same Keepalived VIP/VRID group", wrong_vrid.text)
+
+        self.report_lvs(
+            master,
+            role="MASTER",
+            vip="10.165.0.41",
+            virtual_ips=["10.165.0.40/22", "10.165.0.41/22"],
+        )
+        wrong_vip = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(409, wrong_vip.status_code, wrong_vip.text)
+        self.assertIn("same Keepalived VIP/VRID group", wrong_vip.text)
+
+        self.report_lvs(master, role="MASTER")
+        valid = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(201, valid.status_code, valid.text)
+        group = valid.json()["plan"]["diff"]["ha_group"]
+        self.assertEqual("10.165.0.40", group["vip"])
+        self.assertEqual(40, group["virtual_router_id"])
+        self.assertEqual("BACKUP", group["roles"][backup["agent_id"]])
+        self.assertEqual("MASTER", group["roles"][master["agent_id"]])
+
+    def test_lvs_plan_discovers_all_registered_vrrp_members_and_peer_coverage(self):
+        backup_one = self.enroll("lvs-discovery-backup-1", labels={"ha_ip": "10.165.0.41"})
+        backup_two = self.enroll("lvs-discovery-backup-2", labels={"ha_ip": "10.165.0.42"})
+        master = self.enroll("lvs-discovery-master", labels={"ha_ip": "10.165.0.43"})
+        peers = ["10.165.0.41", "10.165.0.42", "10.165.0.43"]
+        self.report_lvs(
+            backup_one,
+            role="BACKUP",
+            local_addresses=["10.165.0.41"],
+            unicast_src_ip="10.165.0.41",
+            unicast_peers=peers,
+        )
+        self.report_lvs(
+            backup_two,
+            role="BACKUP",
+            local_addresses=["10.165.0.42"],
+            unicast_src_ip="10.165.0.42",
+            unicast_peers=peers,
+        )
+        self.report_lvs(
+            master,
+            role="MASTER",
+            local_addresses=["10.165.0.43"],
+            unicast_src_ip="10.165.0.43",
+            unicast_peers=peers,
+        )
+
+        omitted = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [backup_one["agent_id"], master["agent_id"]],
+                "intent": self.lvs_intent(),
+            },
+        )
+        self.assertEqual(409, omitted.status_code, omitted.text)
+        self.assertEqual(
+            [backup_two["agent_id"]],
+            omitted.json()["detail"]["missing_node_ids"],
+        )
+
+        selected_ids = [backup_one["agent_id"], backup_two["agent_id"], master["agent_id"]]
+        complete = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": selected_ids, "intent": self.lvs_intent()},
+        )
+        self.assertEqual(201, complete.status_code, complete.text)
+        group = complete.json()["plan"]["diff"]["ha_group"]
+        self.assertEqual(sorted(selected_ids), group["discovered_node_ids"])
+        self.assertEqual([backup_one["agent_id"]], group["peer_coverage"]["10.165.0.41"])
+        self.assertEqual([backup_two["agent_id"]], group["peer_coverage"]["10.165.0.42"])
+        self.assertEqual([master["agent_id"]], group["peer_coverage"]["10.165.0.43"])
+
+    def test_lvs_plan_rejects_unresolved_peer_and_ambiguous_registered_member(self):
+        standalone = self.enroll("lvs-unresolved-peer", labels={"ha_ip": "10.165.0.41"})
+        self.report_lvs(
+            standalone,
+            role="MASTER",
+            local_addresses=["10.165.0.41"],
+            unicast_src_ip="10.165.0.41",
+            unicast_peers=["10.165.0.42"],
+        )
+        request = {"node_ids": [standalone["agent_id"]], "intent": self.lvs_intent()}
+        unresolved = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(409, unresolved.status_code, unresolved.text)
+        self.assertEqual(["10.165.0.42"], unresolved.json()["detail"]["unresolved_peers"])
+
+        ambiguous = self.enroll("lvs-ambiguous-member", labels={"ha_ip": "10.165.0.42"})
+        self.report_lvs(standalone, role="MASTER", unicast_peers=[])
+        self.report_lvs(ambiguous, role="BACKUP", summary_complete=False)
+        rejected = self.client.post(
+            "/api/v1/admin/lvs/plans", headers=self.admin_headers, json=request
+        )
+        self.assertEqual(409, rejected.status_code, rejected.text)
+        self.assertEqual(
+            [ambiguous["agent_id"]],
+            rejected.json()["detail"]["node_ids"],
+        )
+        self.assertIn("membership", rejected.json()["detail"]["message"])
+
+    def test_lvs_group_discovery_ignores_unrelated_keepalived_group(self):
+        backup = self.enroll("lvs-related-backup")
+        master = self.enroll("lvs-related-master")
+        unrelated = self.enroll("lvs-unrelated")
+        self.report_lvs(backup, role="BACKUP")
+        self.report_lvs(master, role="MASTER")
+        self.report_lvs(
+            unrelated,
+            role="MASTER",
+            vip="10.165.0.70",
+            virtual_router_id=70,
+            virtual_ips=["10.165.0.70/22"],
+        )
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [backup["agent_id"], master["agent_id"]],
+                "intent": self.lvs_intent(),
+            },
+        )
+        self.assertEqual(201, planned.status_code, planned.text)
+        discovered = planned.json()["plan"]["diff"]["ha_group"]["discovered_node_ids"]
+        self.assertEqual(sorted([backup["agent_id"], master["agent_id"]]), discovered)
+
+    def test_lvs_apply_rejects_registered_group_membership_change_after_plan(self):
+        backup = self.enroll("lvs-group-change-backup")
+        master = self.enroll("lvs-group-change-master")
+        self.report_lvs(backup, role="BACKUP")
+        self.report_lvs(master, role="MASTER")
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [backup["agent_id"], master["agent_id"]],
+                "intent": self.lvs_intent(),
+            },
+        ).json()["plan"]
+
+        late_member = self.enroll("lvs-group-change-late")
+        self.report_lvs(late_member, role="BACKUP")
+        rejected = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(planned["id"]),
+            headers=self.admin_headers,
+            json={
+                "plan_digest": planned["plan_digest"],
+                "request_id": "lvs-group-change-request-01",
+            },
+        )
+        self.assertEqual(409, rejected.status_code, rejected.text)
+        self.assertEqual(
+            [late_member["agent_id"]],
+            rejected.json()["detail"]["missing_node_ids"],
+        )
+
+    def test_lvs_plan_digest_expiry_serial_order_and_dependency_failure(self):
+        backup = self.enroll("lvs-backup")
+        master = self.enroll("lvs-master")
+        backup_headers = self.report_lvs(backup, role="BACKUP")
+        master_headers = self.report_lvs(master, role="MASTER")
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [master["agent_id"], backup["agent_id"]],
+                "intent": self.lvs_intent(),
+                "ttl_seconds": 300,
+            },
+        )
+        self.assertEqual(201, planned.status_code, planned.text)
+        plan = planned.json()["plan"]
+        wrong_digest = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": "f" * 64, "request_id": "lvs-apply-request-0001"},
+        )
+        self.assertEqual(409, wrong_digest.status_code, wrong_digest.text)
+        applied = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": plan["plan_digest"], "request_id": "lvs-apply-request-0001"},
+        )
+        self.assertEqual(201, applied.status_code, applied.text)
+        body = applied.json()
+        self.assertEqual("serial", body["operation"]["execution_mode"])
+        self.assertEqual(backup["agent_id"], body["jobs"][0]["node_id"])
+        self.assertEqual(master["agent_id"], body["jobs"][1]["node_id"])
+        with self.client.app.state.database.connection() as connection:
+            stored_plan = connection.execute(
+                "SELECT expires_at FROM lvs_plans WHERE id = ?", (plan["id"],)
+            ).fetchone()
+            stored_jobs = connection.execute(
+                "SELECT expires_at FROM jobs WHERE operation_id = ? ORDER BY sequence_no",
+                (body["operation"]["id"],),
+            ).fetchall()
+        self.assertTrue(stored_jobs)
+        self.assertTrue(all(job["expires_at"] > stored_plan["expires_at"] for job in stored_jobs))
+        self.assertLessEqual(
+            abs(stored_jobs[0]["expires_at"] - (int(time.time()) + self.settings.max_job_ttl_seconds)),
+            2,
+        )
+        idempotent = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(plan["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": plan["plan_digest"], "request_id": "lvs-apply-request-0001"},
+        )
+        self.assertEqual(201, idempotent.status_code, idempotent.text)
+        self.assertTrue(idempotent.json()["idempotent"])
+
+        blocked = self.client.post("/api/v1/agent/poll", headers=master_headers, json={})
+        self.assertEqual([], blocked.json()["jobs"])
+        first_job = self.client.post("/api/v1/agent/poll", headers=backup_headers, json={}).json()["jobs"][0]
+        payload = first_job["payload"]
+        self.assertEqual(
+            {
+                "intent", "expected_config_hash", "plan_digest", "expected_role", "expected_vip",
+                "adopt_existing",
+            },
+            set(payload),
+        )
+        self.assertEqual("BACKUP", payload["expected_role"])
+        self.assertEqual("10.165.0.40", payload["expected_vip"])
+        self.assertFalse(payload["adopt_existing"])
+        normalized_intent = normalize_intent(payload["intent"])
+        self.assertEqual("upsert_service", normalized_intent["kind"])
+        self.assertEqual("10.165.0.40", normalized_intent["target"]["address"])
+        self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(payload))
+        failed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(first_job["id"]),
+            headers=backup_headers,
+            json={
+                "status": "failed",
+                "action": "lvs_apply",
+                "error": "auth_pass MUST-NOT-BE-STORED",
+                "details": {"failure_code": "publish_failed", "failure_stage": "reload"},
+            },
+        )
+        self.assertEqual(200, failed.status_code, failed.text)
+        jobs = self.client.get(
+            "/api/v1/admin/jobs?ids=" + ",".join(job["id"] for job in body["jobs"]),
+            headers=self.admin_headers,
+        ).json()["items"]
+        by_node = {job["node_id"]: job for job in jobs}
+        self.assertEqual("expired", by_node[master["agent_id"]]["status"])
+        self.assertEqual("dependency_failed", by_node[master["agent_id"]]["result"]["failure_code"])
+        self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(jobs))
+
+        another = self.enroll("lvs-expired")
+        self.report_lvs(
+            another,
+            vip="10.165.0.50",
+            virtual_router_id=50,
+            virtual_ips=["10.165.0.50/22"],
+        )
+        expiring = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={"node_ids": [another["agent_id"]], "intent": self.lvs_intent("10.165.0.50")},
+        ).json()["plan"]
+        with self.client.app.state.database.transaction() as connection:
+            connection.execute("UPDATE lvs_plans SET expires_at = ? WHERE id = ?", (int(time.time()) - 1, expiring["id"]))
+        expired = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(expiring["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": expiring["plan_digest"], "request_id": "lvs-expired-request-001"},
+        )
+        self.assertEqual(409, expired.status_code, expired.text)
+
+    def test_lvs_heartbeat_and_inventory_result_never_store_secrets(self):
+        enrolled = self.enroll("lvs-redaction")
+        headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
+        facts = {
+            "management_enabled": True,
+            "config_hash": "b" * 64,
+            "services": [],
+            "auth_pass": "MUST-NOT-BE-STORED",
+            "raw_config": "MUST-NOT-BE-STORED",
+        }
+        heartbeat = self.client.post(
+            "/api/v1/agent/heartbeat",
+            headers=headers,
+            json={"status": "online", "capabilities": ["lvs_manage_v1"], "facts": {"lvs": facts}},
+        )
+        self.assertEqual(200, heartbeat.status_code, heartbeat.text)
+        node = self.client.get("/api/v1/admin/nodes", headers=self.admin_headers).json()["items"][0]
+        self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(node))
+        created = self.client.post(
+            "/api/v1/admin/jobs",
+            headers=self.admin_headers,
+            json={"node_ids": [enrolled["agent_id"]], "action": "lvs_inventory", "payload": {}},
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        job_id = created.json()["jobs"][0]["id"]
+        self.client.post("/api/v1/agent/poll", headers=headers, json={})
+        result = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(job_id),
+            headers=headers,
+            json={"status": "succeeded", "action": "lvs_inventory", "details": {"lvs": facts}},
+        )
+        self.assertEqual(200, result.status_code, result.text)
+        stored = self.client.get(
+            "/api/v1/admin/jobs?ids=" + job_id, headers=self.admin_headers
+        ).json()["items"][0]
+        self.assertNotIn("MUST-NOT-BE-STORED", json.dumps(stored))
+
+    def test_lvs_serial_apply_releases_master_only_after_backup_succeeds(self):
+        backup = self.enroll("lvs-order-backup")
+        master = self.enroll("lvs-order-master")
+        backup_headers = self.report_lvs(backup, role="BACKUP")
+        master_headers = self.report_lvs(master, role="MASTER")
+        planned = self.client.post(
+            "/api/v1/admin/lvs/plans",
+            headers=self.admin_headers,
+            json={
+                "node_ids": [master["agent_id"], backup["agent_id"]],
+                "intent": self.lvs_intent("10.165.0.60"),
+            },
+        ).json()["plan"]
+        applied = self.client.post(
+            "/api/v1/admin/lvs/plans/{}/apply".format(planned["id"]),
+            headers=self.admin_headers,
+            json={"plan_digest": planned["plan_digest"], "request_id": "lvs-order-request-0001"},
+        )
+        self.assertEqual(201, applied.status_code, applied.text)
+        backup_job = self.client.post(
+            "/api/v1/agent/poll", headers=backup_headers, json={}
+        ).json()["jobs"][0]
+        completed = self.client.post(
+            "/api/v1/agent/jobs/{}/result".format(backup_job["id"]),
+            headers=backup_headers,
+            json={
+                "status": "succeeded",
+                "action": "lvs_apply",
+                "details": {
+                    "applied": True,
+                    "config_hash": "c" * 64,
+                    "plan_digest": planned["plan_digest"],
+                    "target": {"address": "10.165.0.60", "port": 443, "protocol": "TCP"},
+                    "intent_kind": "upsert_service",
+                    "service_count": 1,
+                },
+            },
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+        master_job = self.client.post(
+            "/api/v1/agent/poll", headers=master_headers, json={}
+        ).json()["jobs"]
+        self.assertEqual(1, len(master_job))
+        self.assertEqual("lvs_apply", master_job[0]["action"])
 
     def test_keepalived_validate_accepts_only_existing_config_without_payload(self):
         enrolled = self.enroll("keepalived-validate-node")

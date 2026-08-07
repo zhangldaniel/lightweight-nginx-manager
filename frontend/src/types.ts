@@ -32,6 +32,7 @@ export interface NodeFacts {
   log_files?: string[]
   stub_status_url?: string
   log_stream_transport?: string
+  lvs?: LvsManagementFacts
   ipvs?: LvsObservation
   [key: string]: unknown
 }
@@ -88,6 +89,85 @@ export interface LvsObservation {
   truncated?: boolean
   services?: LvsVirtualService[]
   stats?: LvsStats
+}
+
+export interface LvsListener {
+  address: string
+  port: number
+  protocol: 'TCP' | 'UDP' | 'SCTP'
+}
+
+export interface LvsTcpMonitor {
+  kind: 'tcp'
+  connect_timeout: number
+  retries: number
+  delay_before_retry: number
+  connect_port?: number
+}
+
+export interface LvsManagedMember {
+  address: string
+  port: number
+  weight: number
+  enabled: boolean
+  monitor?: LvsTcpMonitor | null
+}
+
+export interface LvsManagedService {
+  name: string
+  listener: LvsListener
+  scheduler: string
+  forwarding: 'DR' | 'NAT' | 'TUN'
+  delay_loop: number
+  persistence_seconds?: number | null
+  members: LvsManagedMember[]
+  origin?: string
+  editable?: boolean
+  unsupported_directives?: string[]
+}
+
+export interface LvsManagementFacts {
+  management_enabled: boolean
+  config_hash?: string | null
+  services?: LvsManagedService[]
+  reason?: string
+  [key: string]: unknown
+}
+
+export interface LvsUpsertIntent {
+  kind: 'upsert_service'
+  target: LvsListener
+  service: LvsManagedService
+  change_note?: string
+}
+
+export interface LvsDeleteIntent {
+  kind: 'delete_service'
+  target: LvsListener
+  change_note?: string
+}
+
+export type LvsIntent = LvsUpsertIntent | LvsDeleteIntent
+
+export interface LvsPlan {
+  id: string
+  plan_id: string
+  plan_digest: string
+  diff: unknown
+  warnings: string[]
+  expires_at: string | null
+  expected_config_hashes?: Record<string, string>
+  consumed_at?: string | null
+  operation_id?: string | null
+  [key: string]: unknown
+}
+
+export interface LvsApplyResult {
+  status?: string
+  no_changes?: boolean
+  operation: OperationRecord | null
+  jobs: JobRecord[]
+  [key: string]: unknown
 }
 
 export interface NodeRecord {
@@ -206,6 +286,7 @@ export interface JobRecord {
   completed_at: string | null
   created_by: string | null
   result: Record<string, unknown> | null
+  sequence_no?: number
   [key: string]: unknown
 }
 
@@ -220,6 +301,7 @@ export interface OperationRecord {
   created_at: string
   updated_at: string
   completed_at: string | null
+  execution_mode?: string
   metadata: Record<string, unknown>
 }
 

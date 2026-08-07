@@ -360,6 +360,192 @@ vrrp_instance VI_REAL {
         self.assertEqual("VI_REAL", summary["instances"][0]["name"])
         self.assertFalse(summary["summary_complete"])
 
+    def test_keepalived_summary_follows_official_managed_include(self):
+        root = Path(self.temporary.name) / "keepalived-graph"
+        managed = root / "nginx-manager.d" / "50-lvs-managed.conf"
+        managed.parent.mkdir(parents=True)
+        main = root / "keepalived.conf"
+        main.write_text(
+            """vrrp_instance VI_MAIN {
+    state MASTER
+    virtual_router_id 40
+    virtual_ipaddress { 192.0.2.40/24 }
+}
+include %s
+""" % managed,
+            encoding="utf-8",
+        )
+        managed.write_text(
+            """vrrp_instance VI_MANAGED {
+    state BACKUP
+    virtual_router_id 41
+    virtual_ipaddress { 192.0.2.41/24 }
+}
+""",
+            encoding="utf-8",
+        )
+
+        summary = agent._keepalived_config_graph_summary(
+            main,
+            main.read_bytes(),
+            managed,
+        )
+
+        self.assertTrue(summary["summary_complete"])
+        self.assertFalse(summary["truncated"])
+        self.assertEqual(["VI_MAIN", "VI_MANAGED"], [item["name"] for item in summary["instances"]])
+
+    def test_keepalived_summary_rejects_cycle_escape_glob_and_missing_include(self):
+        root = Path(self.temporary.name) / "keepalived-rejected-graph"
+        managed = root / "nginx-manager.d" / "50-lvs-managed.conf"
+        managed.parent.mkdir(parents=True)
+        main = root / "keepalived.conf"
+        outside = root.parent / "outside-keepalived.conf"
+        outside.write_text(
+            "vrrp_instance VI_ESCAPE { state MASTER virtual_ipaddress { 192.0.2.99/24 } }\n",
+            encoding="utf-8",
+        )
+
+        cases = (
+            ("include {}\n".format(managed), "include {}\n".format(main), "include_cycle"),
+            ("include ../outside-keepalived.conf\n", "", "include_path_rejected"),
+            ("include {}\n".format(outside), "", "include_path_rejected"),
+            ("include {}/*.conf\n".format(root), "", "include_glob_unsupported"),
+            ("include missing.conf\n", "", "include_missing"),
+        )
+        for index, (main_text, managed_text, reason) in enumerate(cases):
+            with self.subTest(index=index, reason=reason):
+                main.write_text(main_text, encoding="utf-8")
+                managed.write_text(managed_text, encoding="utf-8")
+                summary = agent._keepalived_config_graph_summary(main, main.read_bytes(), managed)
+                self.assertFalse(summary["summary_complete"])
+                self.assertIn(reason, summary["incomplete_reasons"])
+                self.assertNotIn("VI_ESCAPE", [item["name"] for item in summary["instances"]])
+
+    def test_keepalived_summary_marks_bounded_read_as_truncated(self):
+        root = Path(self.temporary.name) / "keepalived-bounded-graph"
+        managed = root / "nginx-manager.d" / "50-lvs-managed.conf"
+        managed.parent.mkdir(parents=True)
+        main = root / "keepalived.conf"
+        main.write_text("include {}\n".format(managed), encoding="utf-8")
+        managed.write_text(
+            "vrrp_instance VI_LARGE { state BACKUP }\n" + ("# padding\n" * 32),
+            encoding="utf-8",
+        )
+
+        summary = agent._keepalived_config_graph_summary(
+            main,
+            main.read_bytes(),
+            managed,
+            max_total_bytes=len(main.read_bytes()) + 8,
+        )
+
+        self.assertFalse(summary["summary_complete"])
+        self.assertTrue(summary["truncated"])
+        self.assertIn("include_byte_limit", summary["incomplete_reasons"])
+
+    def test_keepalived_summary_requires_configured_managed_file_to_be_loaded(self):
+        root = Path(self.temporary.name) / "keepalived-unloaded-managed"
+        managed = root / "nginx-manager.d" / "50-lvs-managed.conf"
+        managed.parent.mkdir(parents=True)
+        main = root / "keepalived.conf"
+        main.write_text("vrrp_instance VI_1 { state MASTER }\n", encoding="utf-8")
+        managed.write_text("", encoding="utf-8")
+
+        summary = agent._keepalived_config_graph_summary(main, main.read_bytes(), managed)
+
+        self.assertFalse(summary["summary_complete"])
+        self.assertIn("managed_include_missing", summary["incomplete_reasons"])
+
+    def test_keepalived_summary_enforces_file_and_depth_limits(self):
+        root = Path(self.temporary.name) / "keepalived-limit-graph"
+        root.mkdir()
+        main = root / "keepalived.conf"
+        middle = root / "middle.conf"
+        leaf = root / "leaf.conf"
+        main.write_text("include middle.conf\n", encoding="utf-8")
+        middle.write_text("include leaf.conf\n", encoding="utf-8")
+        leaf.write_text("vrrp_instance VI_LEAF { state BACKUP }\n", encoding="utf-8")
+
+        file_limited = agent._keepalived_config_graph_summary(
+            main,
+            main.read_bytes(),
+            max_files=1,
+        )
+        depth_limited = agent._keepalived_config_graph_summary(
+            main,
+            main.read_bytes(),
+            max_depth=1,
+        )
+
+        self.assertTrue(file_limited["truncated"])
+        self.assertIn("include_file_limit", file_limited["incomplete_reasons"])
+        self.assertTrue(depth_limited["truncated"])
+        self.assertIn("include_depth_limit", depth_limited["incomplete_reasons"])
+
+    def test_keepalived_summary_does_not_follow_symlink_include(self):
+        root = Path(self.temporary.name) / "keepalived-symlink-graph"
+        root.mkdir()
+        main = root / "keepalived.conf"
+        outside = root.parent / "outside-symlink-target.conf"
+        link = root / "linked.conf"
+        outside.write_text("vrrp_instance VI_ESCAPE { state MASTER }\n", encoding="utf-8")
+        try:
+            os.symlink(str(outside), str(link))
+        except OSError:
+            self.skipTest("symbolic links are unavailable in this test environment")
+        main.write_text("include linked.conf\n", encoding="utf-8")
+
+        summary = agent._keepalived_config_graph_summary(main, main.read_bytes())
+
+        self.assertFalse(summary["summary_complete"])
+        self.assertIn("include_symlink_rejected", summary["incomplete_reasons"])
+        self.assertNotIn("VI_ESCAPE", [item["name"] for item in summary["instances"]])
+
+    def test_keepalived_heartbeat_summary_is_complete_for_installer_layout(self):
+        root = Path(self.temporary.name) / "keepalived-heartbeat"
+        managed = root / "nginx-manager.d" / "50-lvs-managed.conf"
+        managed.parent.mkdir(parents=True)
+        main = root / "keepalived.conf"
+        main.write_text(
+            """vrrp_instance VI_1 {
+    state MASTER
+    virtual_router_id 40
+    virtual_ipaddress { 192.0.2.40/24 }
+}
+include %s
+""" % managed,
+            encoding="utf-8",
+        )
+        managed.write_text(
+            "virtual_server 192.0.2.40 443 { protocol TCP }\n",
+            encoding="utf-8",
+        )
+        settings = self.keepalived_settings(main)
+        settings.node_profile = "hybrid"
+        settings.ipvs_observer_enabled = True
+        settings.lvs_management_enabled = True
+        settings.lvs_managed_file = str(managed)
+        settings.validate()
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "keepalived-graph-jobs.json"))
+        service_status = {
+            "name": "keepalived.service",
+            "load_state": "loaded",
+            "active_state": "active",
+            "sub_state": "running",
+            "active": True,
+        }
+        with (
+            mock.patch.object(executor, "_keepalived_executable", return_value="/usr/sbin/keepalived"),
+            mock.patch.object(executor, "_keepalived_version", return_value="2.2.8"),
+            mock.patch.object(executor, "_keepalived_service_status", return_value=service_status),
+            mock.patch.object(executor, "_local_ip_addresses", return_value={"192.0.2.40"}),
+        ):
+            observed = executor.keepalived_observation()
+
+        self.assertTrue(observed["config_summary"]["summary_complete"])
+        self.assertEqual("VI_1", observed["config_summary"]["instances"][0]["name"])
+
     def test_ipvs_proc_parser_supports_address_ipv6_fwmark_and_stats(self):
         table = """IP Virtual Server version 1.2.1 (size=4096)
 Prot LocalAddress:Port Scheduler Flags
@@ -1554,11 +1740,22 @@ Conns/s Pkts/s Pkts/s Bytes/s Bytes/s
         self.assertNotIn("private-site", json.dumps(invalid_url))
 
     def test_interrupted_job_is_not_replayed(self):
-        self.store.begin("job-crashed", "nginx_reload")
+        empty_payload_sha = hashlib.sha256(b"{}").hexdigest()
+        self.store.begin("job-crashed", "nginx_reload", empty_payload_sha)
         response = self.executor.execute(self.job("job-crashed", "nginx_reload", {}))
         self.assertEqual("failed", response["status"])
         self.assertIn("not replayed", response["error"])
         self.executor._nginx_test.assert_not_called()
+
+    def test_job_id_cache_rejects_same_action_with_different_payload(self):
+        first = self.executor.execute(self.job("payload-bound", "nginx_reload", {}))
+        self.assertEqual("succeeded", first["status"])
+        second = self.executor.execute(
+            self.job("payload-bound", "nginx_reload", {"different": True})
+        )
+        self.assertEqual("failed", second["status"])
+        self.assertIn("different payload", second["error"])
+        self.assertEqual(1, self.executor._reload_only.call_count)
 
     def test_http_requires_explicit_opt_in(self):
         settings = agent.Settings(
@@ -1847,6 +2044,220 @@ Conns/s Pkts/s Pkts/s Bytes/s Bytes/s
         self.assertIn('IPVS_TABLE_PATH = "/proc/net/ip_vs"', source)
         self.assertIn('IPVS_STATS_PATH = "/proc/net/ip_vs_stats"', source)
         self.assertNotIn("ipvsadm", source)
+
+    def test_lvs_profile_has_no_nginx_capabilities_or_heartbeat_facts(self):
+        keepalived_config = Path(self.temporary.name) / "lvs-keepalived.conf"
+        keepalived_config.write_text(
+            "vrrp_instance VI_1 { virtual_ipaddress { 192.0.2.110 } }\n",
+            encoding="utf-8",
+        )
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="lvs-only",
+            node_profile="lvs",
+            nginx_binary="",
+            openssl_binary="",
+            nginx_config="",
+            nginx_root="",
+            config_entries=[],
+            allowed_certificate_roots=[],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "lvs-helper.sock"),
+            keepalived_config=str(keepalived_config),
+            keepalived_service="keepalived.service",
+            keepalived_vip="192.0.2.110",
+            ipvs_observer_enabled=True,
+        )
+        settings.validate()
+        with mock.patch.object(agent, "_detect_keepalived_validation_support", return_value=True):
+            capabilities = settings.reported_capabilities()
+        self.assertEqual(
+            ["inspect", "keepalived_inspect", "keepalived_validate", "metrics_v1", "ipvs_observer_v1"],
+            capabilities,
+        )
+
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "lvs-only-jobs.json"))
+        denied = executor.execute(self.job("lvs-nginx-test", "nginx_test", {}))
+        self.assertEqual("failed", denied["status"])
+        self.assertEqual("action is not allowed", denied["error"])
+
+        service = agent.AgentService(settings, threading.Event())
+        service.metrics_collector.collect = mock.Mock(return_value={"cpu": {"percent": 1.0}})
+        helper = mock.Mock()
+        helper.keepalived_observation.return_value = {"vip": "192.0.2.110", "role": "MASTER"}
+        helper.ipvs_observation.return_value = {"available": True, "services": []}
+        with mock.patch.object(agent.subprocess, "run") as command:
+            observation = service._local_observation(helper)
+        command.assert_not_called()
+        self.assertEqual("MASTER", observation["facts"]["keepalived"]["role"])
+        self.assertNotIn("nginx_root", observation["facts"])
+        self.assertNotIn("nginx_version", observation)
+        self.assertNotIn("config_hash", observation)
+
+    def test_lvs_profile_requires_keepalived_and_ipvs_observer(self):
+        common = {
+            "server_url": "https://manager.example.test",
+            "node_name": "invalid-lvs",
+            "node_profile": "lvs",
+            "nginx_binary": "",
+            "openssl_binary": "",
+            "nginx_config": "",
+            "nginx_root": "",
+            "config_entries": [],
+            "allowed_certificate_roots": [],
+        }
+        with self.assertRaisesRegex(agent.AgentError, "requires Keepalived integration"):
+            agent.Settings(**common).validate()
+        common.update({
+            "keepalived_config": "/etc/keepalived/keepalived.conf",
+            "keepalived_service": "keepalived.service",
+            "keepalived_vip": "192.0.2.110",
+        })
+        with self.assertRaisesRegex(agent.AgentError, "requires ipvs_observer_enabled"):
+            agent.Settings(**common).validate()
+
+    def test_hybrid_profile_preserves_nginx_and_lvs_capabilities(self):
+        keepalived_config = Path(self.temporary.name) / "hybrid-keepalived.conf"
+        settings = self.keepalived_settings(keepalived_config)
+        settings.node_profile = "hybrid"
+        settings.ipvs_observer_enabled = True
+        settings.validate()
+        with mock.patch.object(agent, "_detect_keepalived_validation_support", return_value=False):
+            capabilities = settings.reported_capabilities()
+        self.assertIn("nginx_test", capabilities)
+        self.assertIn("config_apply", capabilities)
+        self.assertIn("keepalived_inspect", capabilities)
+        self.assertIn("ipvs_observer_v1", capabilities)
+
+    def test_installer_lvs_profile_skips_nginx_setup(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        self.assertIn('NODE_PROFILE="nginx"', installer)
+        self.assertIn('--profile) [[ $# -ge 2 ]]', installer)
+        self.assertIn('if [[ "${NODE_PROFILE}" != "lvs" ]]; then\n  install_nginx_if_requested', installer)
+        self.assertIn('if [[ "${NODE_PROFILE}" != "lvs" ]]; then\n  prepare_managed_directories', installer)
+        self.assertIn('if [[ "${NODE_PROFILE}" == "lvs" || "${ENABLE_LVS_MANAGEMENT}" == "1" ]]; then\n  ENABLE_LVS_OBSERVER="1"', installer)
+        self.assertIn('recovery_before="${KEEPALIVED_SERVICE}"', installer)
+        self.assertIn('"node_profile": node_profile', installer)
+
+    def test_lvs_management_is_explicit_and_uses_structured_helper_actions(self):
+        keepalived_root = Path(self.temporary.name) / "keepalived"
+        keepalived_root.mkdir()
+        keepalived_config = keepalived_root / "keepalived.conf"
+        managed_file = keepalived_root / "nginx-manager.d" / "50-lvs-managed.conf"
+        keepalived_config.write_text("include {}\n".format(managed_file), encoding="utf-8")
+        managed_file.parent.mkdir()
+        managed_file.write_text("", encoding="utf-8")
+        settings = agent.Settings(
+            server_url="https://manager.example.test",
+            node_name="managed-lvs",
+            node_profile="lvs",
+            nginx_binary="",
+            openssl_binary="",
+            nginx_config="",
+            nginx_root="",
+            config_entries=[],
+            allowed_certificate_roots=[],
+            state_dir=str(self.state),
+            helper_state_dir=str(self.helper_state),
+            helper_socket=str(Path(self.temporary.name) / "managed-lvs-helper.sock"),
+            keepalived_config=str(keepalived_config),
+            keepalived_service="keepalived.service",
+            keepalived_vip="192.0.2.110",
+            ipvs_observer_enabled=True,
+            lvs_management_enabled=True,
+            lvs_managed_file=str(managed_file),
+        )
+        settings.validate()
+        self.assertIn("lvs_manage_v1", settings.reported_capabilities())
+        self.assertIn("lvs_adopt_v1", settings.reported_capabilities())
+        executor = agent.JobExecutor(settings, agent.JobStore(self.state / "managed-lvs-jobs.json"))
+        inventory = {"schema_version": 1, "services": [], "runtime_services": []}
+        executor._lvs_control.observe = mock.Mock(return_value=inventory)
+        executor._lvs_control.apply = mock.Mock(return_value={"applied": True})
+        self.assertEqual(
+            "succeeded",
+            executor.execute(self.job("lvs-inventory", "lvs_inventory", {}))["status"],
+        )
+        payload = {
+            "intent": {"kind": "delete_service", "target": {"address": "192.0.2.110", "port": 443, "protocol": "TCP"}},
+            "expected_config_hash": "a" * 64,
+            "plan_digest": "b" * 64,
+        }
+        self.assertEqual(
+            "succeeded",
+            executor.execute(self.job("lvs-apply", "lvs_apply", payload))["status"],
+        )
+        executor._lvs_control.apply.assert_called_once_with(payload, "lvs-apply")
+
+        interrupted_store = agent.JobStore(self.state / "lvs-interrupted-jobs.json")
+        payload_sha = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        interrupted_store.begin("lvs-committed", "lvs_apply", payload_sha)
+        recovered_executor = agent.JobExecutor(settings, interrupted_store)
+        committed = {
+            "applied": True,
+            "rolled_back": False,
+            "plan_digest": "b" * 64,
+            "config_hash": "c" * 64,
+            "target": payload["intent"]["target"],
+            "intent_kind": "delete_service",
+            "service_count": 0,
+        }
+        recovered_executor._lvs_control.committed_result = mock.Mock(return_value=committed)
+        recovered_executor._lvs_control.apply = mock.Mock()
+        recovered = recovered_executor.execute(self.job("lvs-committed", "lvs_apply", payload))
+        self.assertEqual("succeeded", recovered["status"])
+        self.assertEqual(committed, recovered["result"])
+        recovered_executor._lvs_control.apply.assert_not_called()
+        self.assertEqual("complete", interrupted_store.get("lvs-committed")["state"])
+
+        service = agent.AgentService(settings, threading.Event())
+        service.metrics_collector.collect = mock.Mock(return_value={})
+        helper = mock.Mock()
+        helper.keepalived_observation.return_value = {"vip": "192.0.2.110"}
+        helper.ipvs_observation.return_value = {"available": True, "services": []}
+        helper.lvs_observation.return_value = inventory
+        observation = service._local_observation(helper)
+        self.assertEqual(inventory, observation["facts"]["lvs"])
+
+    def test_lvs_management_rejects_nginx_profile_and_external_managed_file(self):
+        common = {
+            "server_url": "https://manager.example.test",
+            "node_name": "invalid-management",
+            "keepalived_config": str(Path(self.temporary.name) / "keepalived.conf"),
+            "keepalived_service": "keepalived.service",
+            "keepalived_vip": "192.0.2.110",
+            "ipvs_observer_enabled": True,
+            "lvs_management_enabled": True,
+            "lvs_managed_file": str(Path(self.temporary.name) / "managed.conf"),
+        }
+        with self.assertRaisesRegex(agent.AgentError, "lvs or hybrid"):
+            agent.Settings(**common).validate()
+        common.update({
+            "node_profile": "lvs",
+            "nginx_binary": "",
+            "openssl_binary": "",
+            "nginx_config": "",
+            "nginx_root": "",
+            "config_entries": [],
+            "allowed_certificate_roots": [],
+            "lvs_managed_file": str(Path(self.temporary.name).parent / "outside.conf"),
+        })
+        with self.assertRaisesRegex(agent.AgentError, "inside the Keepalived"):
+            agent.Settings(**common).validate()
+
+    def test_installer_lvs_management_contract(self):
+        installer = (AGENT_DIR.parent / "deploy" / "install-agent.sh").read_text(encoding="utf-8")
+        self.assertIn('ENABLE_LVS_MANAGEMENT="0"', installer)
+        self.assertIn('--enable-lvs-management) ENABLE_LVS_MANAGEMENT="1"', installer)
+        self.assertIn('--managed-lvs-file)', installer)
+        self.assertIn('"lvs_management_enabled": enable_lvs_management == "1"', installer)
+        self.assertIn('"lvs_managed_file": lvs_managed_file or None', installer)
+        self.assertIn('install -m 0755 -o root -g root "${LVS_CONTROL_SOURCE}" "${APP_DIR}/lvs_control.py"', installer)
+        self.assertIn('managed_write_paths+=" $(dirname -- "${KEEPALIVED_CONFIG}") ${LVS_MANAGED_FILE}"', installer)
+        self.assertNotIn("CAP_NET_ADMIN", installer)
 
     def test_settings_mutable_defaults_are_isolated(self):
         first = agent.Settings("https://manager.example.test", "first")
@@ -2442,7 +2853,12 @@ printf -v empty_logs '%s\n' "${NGINX_LOG_DIRS[@]+"${NGINX_LOG_DIRS[@]}"}"
         self.assertGreaterEqual(installer.count("CAP_NET_BIND_SERVICE"), 2)
         self.assertIn("CAP_NET_BIND_SERVICE", helper)
         self.assertIn("CAP_NET_BIND_SERVICE", recovery)
-        self.assertIn("recover_existing_transactions\nbegin_install_transaction", installer)
+        self.assertIn(
+            'systemctl stop "${APP_NAME}.service" "${APP_NAME}-helper.service"',
+            installer,
+        )
+        self.assertIn("recover_existing_transactions; then", installer)
+        self.assertIn("begin_install_transaction\nprepare_lvs_management", installer)
         self.assertIn('journalctl -u "${APP_NAME}-recover.service"', installer)
 
     def test_agent_uninstaller_preserves_managed_nginx_files(self):
