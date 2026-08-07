@@ -17,6 +17,7 @@
 ## 功能
 
 - 管理多节点 HTTP、Stream 配置和多个配置目录
+- 配置备注可附带截图，随控制端数据一起备份和迁移
 - 导入现有配置，替换节点原路径中的证书
 - 查看实时日志、宿主机状态和 Nginx Stub Status
 - 查看 Keepalived 主备角色、VIP 归属和双机架构
@@ -232,6 +233,16 @@ Agent 会通过 `nginx -T` 确认 Nginx 已加载这些目录。平台只管理�
 ```
 
 主配置仍不能删除。所有发布都会执行 `nginx -t`，校验或 reload 失败时恢复原文件。
+
+## 迁移到容器（可选）
+
+控制端以后想从 systemd 切到 Docker Compose，安装好 Docker 后运行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/migrate-server-to-container.sh | sudo bash
+```
+
+脚本会保留账号、站点、截图和 Agent 身份；容器未通过健康检查时会自动恢复原服务。跨机器迁移和手动回滚见[容器迁移说明](docs/container-migration.md)。
 
 ## 升级与检查
 

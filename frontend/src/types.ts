@@ -317,6 +317,16 @@ export interface SiteRevision {
   snapshot?: SiteRecord
 }
 
+export interface SiteAttachment {
+  id: string
+  site_id: string
+  filename: string
+  content_type: 'image/png' | 'image/jpeg' | 'image/webp' | string
+  size: number
+  created_at: string
+  url: string
+}
+
 export interface EnrollmentRecord {
   id: string
   node_id: string

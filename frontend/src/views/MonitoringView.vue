@@ -46,6 +46,25 @@ const stub = computed<Record<string, unknown>>(
 const nginx = computed<Record<string, unknown>>(
   () => (metrics.value.nginx as Record<string, unknown> | undefined) || {},
 )
+const selectedCapabilities = computed(() => selectedSummary.value?.node.capabilities || [])
+const pureLvsNode = computed(
+  () => selectedCapabilities.value.includes('ipvs_observer_v1') &&
+    !selectedCapabilities.value.includes('nginx_test'),
+)
+const ipvs = computed<Record<string, unknown>>(
+  () => (selectedSummary.value?.node.facts.ipvs as Record<string, unknown> | undefined) || {},
+)
+const ipvsAvailable = computed(() => ipvs.value.available === true)
+const ipvsServices = computed(
+  () => (ipvs.value.services as Array<Record<string, unknown>> | undefined) || [],
+)
+const ipvsActiveConnections = computed(() => {
+  if (!ipvsServices.value.length) return null
+  return ipvsServices.value.reduce((total, service) => {
+    const value = Number(service.active_connections)
+    return total + (Number.isFinite(value) ? value : 0)
+  }, 0)
+})
 const filesystems = computed(
   () => (metrics.value.filesystems as Array<Record<string, unknown>> | undefined) || [],
 )
@@ -62,10 +81,18 @@ const rangeLabel = computed(() => {
   if (rangeSeconds.value === 21600) return '最近 6 小时 · 分钟采样'
   return '最近 24 小时 · 分钟采样'
 })
+const monitoringDescription = computed(() => pureLvsNode.value
+  ? '宿主机资源与 IPVS；页面每 20 秒自动更新。'
+  : '宿主机资源与 Nginx Stub Status；页面每 20 秒自动更新。')
 const healthSummary = computed(() => {
   const reasons = selectedSummary.value?.health.reasons || []
   if (reasons.length) return reasons.join('；')
-  if (selectedSummary.value?.health.status === 'healthy') return '宿主机与 Nginx 指标处于正常范围'
+  if (selectedSummary.value?.health.status === 'healthy') {
+    if (pureLvsNode.value) {
+      return ipvsAvailable.value ? '宿主机指标正常；IPVS 运行表已观测' : '宿主机指标正常；IPVS 暂无观测数据'
+    }
+    return '宿主机与 Nginx 指标处于正常范围'
+  }
   if (selectedSummary.value?.health.status === 'offline') return '节点目前无法连接，请检查 Agent 状态'
   return '当前采样不足，等待 Agent 补充数据'
 })
@@ -103,6 +130,16 @@ function chartTone(path: string, warning: number, critical: number): 'blue' | 'a
 function valueAt(path: string) {
   const value = metric(metrics.value, path, Number.NaN)
   return Number.isFinite(value) ? value : null
+}
+
+function ipvsValue(path: string) {
+  const value = metric(ipvs.value, path, Number.NaN)
+  return Number.isFinite(value) ? value : null
+}
+
+function displayIpvs(path: string, digits = 0, suffix = '') {
+  const value = ipvsValue(path)
+  return value === null ? '—' : `${value.toFixed(digits)}${suffix}`
 }
 
 function display(path: string, digits = 1, suffix = '') {
@@ -230,7 +267,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="page page-monitoring">
-    <PageHeader title="运行监控" description="宿主机资源与 Nginx Stub Status；页面每 20 秒自动更新。">
+    <PageHeader title="运行监控" :description="monitoringDescription">
       <div class="monitor-toolbar" aria-label="监控筛选">
         <label class="monitor-filter">
           <span>观察节点</span>
@@ -328,16 +365,39 @@ onBeforeUnmount(() => {
             aria-label="内存使用率"
           ></progress>
         </article>
-        <article class="monitor-kpi" :data-tone="stubAvailable ? 'healthy' : 'warning'">
-          <header><Activity :size="17" /><span>活跃连接</span></header>
-          <strong>{{ stubAvailable ? display('stub_status.active', 0) : '—' }}</strong>
-          <p>{{ stubAvailable ? 'Nginx Stub Status' : stubReason() }}</p>
-        </article>
-        <article class="monitor-kpi" :data-tone="stubAvailable ? 'info' : 'neutral'">
-          <header><Gauge :size="17" /><span>请求速率</span></header>
-          <strong>{{ stubAvailable ? display('stub_status.requests_per_second', 1, '/s') : '—' }}</strong>
-          <p>{{ stubAvailable ? 'Agent 按采样增量计算' : '没有可用采样' }}</p>
-        </article>
+        <template v-if="pureLvsNode">
+          <article
+            class="monitor-kpi"
+            data-tone="neutral"
+          >
+            <header><Network :size="17" /><span>Virtual Service</span></header>
+            <strong>{{ displayIpvs('service_count') }}</strong>
+            <p v-if="ipvsAvailable && ipvsValue('destination_count') !== null">
+              {{ displayIpvs('destination_count') }} 个 Pool Member
+            </p>
+            <p v-else>{{ ipvsAvailable ? '暂未报告 Virtual Service 数量' : '暂无 IPVS 观测数据' }}</p>
+          </article>
+          <article
+            class="monitor-kpi"
+            :data-tone="ipvsAvailable && ipvsValue('stats.rates.connections_per_second') !== null ? 'info' : 'neutral'"
+          >
+            <header><Gauge :size="17" /><span>IPVS 连接速率</span></header>
+            <strong>{{ displayIpvs('stats.rates.connections_per_second', 0, '/s') }}</strong>
+            <p>{{ ipvsAvailable ? '内核 IPVS 运行表采样' : '暂无 IPVS 观测数据' }}</p>
+          </article>
+        </template>
+        <template v-else>
+          <article class="monitor-kpi" :data-tone="stubAvailable ? 'healthy' : 'warning'">
+            <header><Activity :size="17" /><span>活跃连接</span></header>
+            <strong>{{ stubAvailable ? display('stub_status.active', 0) : '—' }}</strong>
+            <p>{{ stubAvailable ? 'Nginx Stub Status' : stubReason() }}</p>
+          </article>
+          <article class="monitor-kpi" :data-tone="stubAvailable ? 'info' : 'neutral'">
+            <header><Gauge :size="17" /><span>请求速率</span></header>
+            <strong>{{ stubAvailable ? display('stub_status.requests_per_second', 1, '/s') : '—' }}</strong>
+            <p>{{ stubAvailable ? 'Agent 按采样增量计算' : '没有可用采样' }}</p>
+          </article>
+        </template>
       </section>
 
       <section class="monitor-trends">
@@ -383,8 +443,26 @@ onBeforeUnmount(() => {
             :tone="chartTone('cpu.load_per_core', 1, 1.5)"
             :warning="1"
           />
-          <LineChart label="请求速率" :values="series('stub_status.requests_per_second')" suffix="/s" tone="green" />
-          <LineChart label="活跃连接" :values="series('stub_status.active')" tone="green" />
+          <LineChart
+            v-if="!pureLvsNode"
+            label="请求速率"
+            :values="series('stub_status.requests_per_second')"
+            suffix="/s"
+            tone="green"
+          />
+          <LineChart v-if="!pureLvsNode" label="活跃连接" :values="series('stub_status.active')" tone="green" />
+          <LineChart
+            v-if="pureLvsNode"
+            label="网络发送"
+            :values="scaledSeries('network.tx_bytes_per_second', 1024)"
+            suffix=" KB/s"
+          />
+          <LineChart
+            v-if="pureLvsNode"
+            label="磁盘写入"
+            :values="scaledSeries('disk_io.write_bytes_per_second', 1024)"
+            suffix=" KB/s"
+          />
           <LineChart label="网络接收" :values="scaledSeries('network.rx_bytes_per_second', 1024)" suffix=" KB/s" />
         </div>
       </section>
@@ -397,8 +475,12 @@ onBeforeUnmount(() => {
             <p>用于定位资源、进程与磁盘问题的当前采样值</p>
           </div>
           <StatusTag
-            :label="stubAvailable ? 'Stub 可用' : stubConfigured ? 'Stub 异常' : 'Stub 未配置'"
-            :tone="stubAvailable ? 'success' : 'warning'"
+            :label="pureLvsNode
+              ? ipvsAvailable ? 'IPVS 已观测' : 'IPVS 暂无数据'
+              : stubAvailable ? 'Stub 可用' : stubConfigured ? 'Stub 异常' : 'Stub 未配置'"
+            :tone="pureLvsNode
+              ? 'neutral'
+              : stubAvailable ? 'success' : 'warning'"
           />
         </header>
 
@@ -420,7 +502,27 @@ onBeforeUnmount(() => {
             </dl>
           </article>
 
-          <article class="monitor-data-block">
+          <article v-if="pureLvsNode" class="monitor-data-block">
+            <header>
+              <span><Network :size="18" /></span>
+              <div><strong>IPVS 观测</strong><small>内核运行表</small></div>
+            </header>
+            <p class="data-card-note">
+              运行表是观测事实，不代表成员健康。
+            </p>
+            <dl>
+              <div><dt>Virtual Service</dt><dd>{{ displayIpvs('service_count') }}</dd></div>
+              <div><dt>Pool Member</dt><dd>{{ displayIpvs('destination_count') }}</dd></div>
+              <div><dt>活跃连接</dt><dd>{{ ipvsActiveConnections ?? '—' }}</dd></div>
+              <div><dt>连接速率</dt><dd>{{ displayIpvs('stats.rates.connections_per_second', 0, '/s') }}</dd></div>
+              <div><dt>入站包速率</dt><dd>{{ displayIpvs('stats.rates.in_packets_per_second', 0, '/s') }}</dd></div>
+              <div><dt>出站包速率</dt><dd>{{ displayIpvs('stats.rates.out_packets_per_second', 0, '/s') }}</dd></div>
+              <div><dt>数据来源</dt><dd>{{ String(ipvs.source || '—') }}</dd></div>
+              <div><dt>IPVS 版本</dt><dd>{{ String(ipvs.version || '—') }}</dd></div>
+            </dl>
+          </article>
+
+          <article v-else class="monitor-data-block">
             <header>
               <span><Network :size="18" /></span>
               <div><strong>Nginx</strong><small>进程与连接</small></div>

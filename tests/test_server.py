@@ -600,6 +600,45 @@ class ServerTestCase(unittest.TestCase):
             self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM metric_samples").fetchone()[0])
             self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM metric_minutes").fetchone()[0])
 
+    def test_monitoring_health_only_applies_stub_status_to_nginx_nodes(self):
+        lvs = self.enroll("lvs-only")
+        nginx = self.enroll("nginx-with-broken-stub")
+        cases = (
+            (
+                lvs,
+                ["metrics_v1", "keepalived_inspect", "ipvs_observer_v1"],
+                {"configured": False, "available": False, "reason": "not_configured"},
+            ),
+            (
+                nginx,
+                ["metrics_v1", "nginx_test", "stub_status_v1"],
+                {"configured": True, "available": False, "reason": "http_503"},
+            ),
+        )
+        for enrolled, capabilities, stub_status in cases:
+            heartbeat = self.client.post(
+                "/api/v1/agent/heartbeat",
+                headers={"Authorization": "Bearer " + enrolled["machine_credential"]},
+                json={
+                    "status": "online",
+                    "capabilities": capabilities,
+                    "metrics": {
+                        "cpu": {"percent": 12.5, "count": 4, "load_per_core": 0.1},
+                        "memory": {"percent": 30.0},
+                        "stub_status": stub_status,
+                    },
+                },
+            )
+            self.assertEqual(200, heartbeat.status_code, heartbeat.text)
+
+        summary = self.client.get("/api/v1/admin/monitoring/summary")
+        self.assertEqual(200, summary.status_code, summary.text)
+        by_name = {item["node"]["node_name"]: item for item in summary.json()["items"]}
+        self.assertEqual("healthy", by_name["lvs-only"]["health"]["status"])
+        self.assertEqual([], by_name["lvs-only"]["health"]["reasons"])
+        self.assertEqual("warning", by_name["nginx-with-broken-stub"]["health"]["status"])
+        self.assertIn("Stub Status 不可用", by_name["nginx-with-broken-stub"]["health"]["reasons"])
+
     def test_live_log_session_is_allowlisted_in_memory_and_audited_without_content(self):
         enrolled = self.enroll("log-node")
         agent_headers = {"Authorization": "Bearer " + enrolled["machine_credential"]}
@@ -3446,6 +3485,227 @@ class ServerTestCase(unittest.TestCase):
         self.assertNotIn("a.example.test", compact)
         self.assertNotIn("*.example.test", compact)
         self.assertEqual([("certificate", "cert-a"), ("site", "site-a")], [tuple(row) for row in resources])
+
+    def test_site_note_attachments_are_private_audited_and_deletable(self):
+        saved = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 0,
+                "state": {"sites": [{"id": "site-a", "domain": "a.example.test"}], "certificates": []},
+            },
+        )
+        self.assertEqual(200, saved.status_code, saved.text)
+        image = b"\x89PNG\r\n\x1a\n" + b"test-screenshot-payload"
+
+        missing_csrf = self.client.post(
+            "/api/v1/admin/sites/site-a/attachments",
+            headers={"Content-Type": "image/png", "X-Filename": "screen.png"},
+            content=image,
+        )
+        self.assertEqual(403, missing_csrf.status_code, missing_csrf.text)
+        uploaded = self.client.post(
+            "/api/v1/admin/sites/site-a/attachments",
+            headers={
+                **self.admin_headers,
+                "Content-Type": "image/png",
+                "X-Filename": "%E6%88%AA%E5%9B%BE.png",
+            },
+            content=image,
+        )
+        self.assertEqual(201, uploaded.status_code, uploaded.text)
+        metadata = uploaded.json()["attachment"]
+        self.assertEqual("site-a", metadata["site_id"])
+        self.assertEqual("截图.png", metadata["file_name"])
+        self.assertEqual("image/png", metadata["content_type"])
+        self.assertEqual(len(image), metadata["size_bytes"])
+        self.assertEqual(hashlib.sha256(image).hexdigest(), metadata["sha256"])
+        self.assertNotIn("storage_name", metadata)
+
+        listed = self.client.get("/api/v1/admin/sites/site-a/attachments")
+        self.assertEqual(200, listed.status_code, listed.text)
+        self.assertEqual([metadata], listed.json()["items"])
+        self.assertEqual(8, listed.json()["max_items"])
+        self.assertEqual(self.settings.max_attachment_bytes, listed.json()["max_bytes"])
+        content = self.client.get(metadata["content_url"])
+        self.assertEqual(200, content.status_code, content.text)
+        self.assertEqual(image, content.content)
+        self.assertEqual("image/png", content.headers["content-type"])
+        self.assertEqual('"{}"'.format(metadata["sha256"]), content.headers["etag"])
+        self.assertIn("inline;", content.headers["content-disposition"])
+
+        with self.client.app.state.database.connection() as connection:
+            uploaded_audit = connection.execute(
+                "SELECT detail_json FROM audit WHERE event = 'site_attachment_uploaded'"
+            ).fetchone()
+            storage_name = connection.execute(
+                "SELECT storage_name FROM site_attachments WHERE id = ?", (metadata["id"],)
+            ).fetchone()[0]
+        self.assertIsNotNone(uploaded_audit)
+        stored_path = self.client.app.state.attachment_store.path(storage_name)
+        self.assertTrue(stored_path.is_file())
+
+        deleted = self.client.delete(
+            "/api/v1/admin/sites/site-a/attachments/{}".format(metadata["id"]),
+            headers=self.admin_headers,
+        )
+        self.assertEqual(200, deleted.status_code, deleted.text)
+        self.assertFalse(stored_path.exists())
+        self.assertEqual(404, self.client.get(metadata["content_url"]).status_code)
+        with self.client.app.state.database.connection() as connection:
+            deleted_audit = connection.execute(
+                "SELECT detail_json FROM audit WHERE event = 'site_attachment_deleted'"
+            ).fetchone()
+        self.assertIsNotNone(deleted_audit)
+
+    def test_attachment_startup_reconciles_interrupted_delete_trash_with_database(self):
+        saved = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 0,
+                "state": {"sites": [{"id": "site-a"}], "certificates": []},
+            },
+        )
+        self.assertEqual(200, saved.status_code, saved.text)
+        image = b"\x89PNG\r\n\x1a\ninterrupted-delete"
+        uploaded = self.client.post(
+            "/api/v1/admin/sites/site-a/attachments",
+            headers={
+                **self.admin_headers,
+                "Content-Type": "image/png",
+                "X-Filename": "evidence.png",
+            },
+            content=image,
+        )
+        self.assertEqual(201, uploaded.status_code, uploaded.text)
+        metadata = uploaded.json()["attachment"]
+        with self.client.app.state.database.connection() as connection:
+            storage_name = connection.execute(
+                "SELECT storage_name FROM site_attachments WHERE id = ?", (metadata["id"],)
+            ).fetchone()[0]
+
+        stored_path = self.client.app.state.attachment_store.path(storage_name)
+        interrupted_trash = stored_path.with_suffix(".trash")
+        stored_path.replace(interrupted_trash)
+        orphan_trash = stored_path.parent / (str(uuid.uuid4()) + ".trash")
+        orphan_trash.write_bytes(b"orphaned-after-commit")
+        self.assertFalse(stored_path.exists())
+        self.assertTrue(interrupted_trash.exists())
+        self.assertTrue(orphan_trash.exists())
+
+        with TestClient(create_app(self.settings), base_url="https://testserver") as restarted:
+            login = restarted.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "correct-horse-battery-staple"},
+            )
+            self.assertEqual(200, login.status_code, login.text)
+            content = restarted.get(metadata["content_url"])
+            self.assertEqual(200, content.status_code, content.text)
+            self.assertEqual(image, content.content)
+
+        self.assertTrue(stored_path.is_file())
+        self.assertFalse(interrupted_trash.exists())
+        self.assertFalse(orphan_trash.exists())
+
+    def test_site_attachment_upload_rejects_bad_type_magic_name_and_limits(self):
+        saved = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 0,
+                "state": {"sites": [{"id": "site-a"}], "certificates": []},
+            },
+        )
+        self.assertEqual(200, saved.status_code, saved.text)
+        endpoint = "/api/v1/admin/sites/site-a/attachments"
+
+        bad_type = self.client.post(
+            endpoint,
+            headers={**self.admin_headers, "Content-Type": "image/svg+xml", "X-Filename": "screen.svg"},
+            content=b"<svg/>",
+        )
+        self.assertEqual(415, bad_type.status_code, bad_type.text)
+        bad_magic = self.client.post(
+            endpoint,
+            headers={**self.admin_headers, "Content-Type": "image/png", "X-Filename": "screen.png"},
+            content=b"not-a-png",
+        )
+        self.assertEqual(415, bad_magic.status_code, bad_magic.text)
+        traversal = self.client.post(
+            endpoint,
+            headers={**self.admin_headers, "Content-Type": "image/png", "X-Filename": "..%2Fevil.png"},
+            content=b"\x89PNG\r\n\x1a\nvalid",
+        )
+        self.assertEqual(400, traversal.status_code, traversal.text)
+        mismatch = self.client.post(
+            endpoint,
+            headers={**self.admin_headers, "Content-Type": "image/png", "X-Filename": "screen.jpg"},
+            content=b"\x89PNG\r\n\x1a\nvalid",
+        )
+        self.assertEqual(400, mismatch.status_code, mismatch.text)
+        too_large = self.client.post(
+            endpoint,
+            headers={**self.admin_headers, "Content-Type": "image/png", "X-Filename": "screen.png"},
+            content=b"\x89PNG\r\n\x1a\n" + b"x" * self.settings.max_attachment_bytes,
+        )
+        self.assertEqual(413, too_large.status_code, too_large.text)
+        with self.client.app.state.database.connection() as connection:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM site_attachments").fetchone()[0])
+        self.assertEqual([], list(self.client.app.state.attachment_store.root.glob("*.blob")))
+        self.assertEqual(404, self.client.get("/api/v1/admin/sites/missing/attachments").status_code)
+        for index in range(self.settings.max_site_attachments):
+            accepted = self.client.post(
+                endpoint,
+                headers={
+                    **self.admin_headers,
+                    "Content-Type": "image/png",
+                    "X-Filename": "screen-{}.png".format(index),
+                },
+                content=b"\x89PNG\r\n\x1a\n" + bytes([index]),
+            )
+            self.assertEqual(201, accepted.status_code, accepted.text)
+        over_count = self.client.post(
+            endpoint,
+            headers={**self.admin_headers, "Content-Type": "image/png", "X-Filename": "extra.png"},
+            content=b"\x89PNG\r\n\x1a\nextra",
+        )
+        self.assertEqual(409, over_count.status_code, over_count.text)
+
+    def test_removing_site_cascades_attachment_metadata_and_file(self):
+        saved = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={
+                "revision": 0,
+                "state": {"sites": [{"id": "site-a"}], "certificates": []},
+            },
+        )
+        self.assertEqual(200, saved.status_code, saved.text)
+        uploaded = self.client.post(
+            "/api/v1/admin/sites/site-a/attachments",
+            headers={
+                **self.admin_headers,
+                "Content-Type": "image/webp",
+                "X-Filename": "evidence.webp",
+            },
+            content=b"RIFF\x10\x00\x00\x00WEBPtest",
+        )
+        self.assertEqual(201, uploaded.status_code, uploaded.text)
+        with self.client.app.state.database.connection() as connection:
+            storage_name = connection.execute("SELECT storage_name FROM site_attachments").fetchone()[0]
+        stored_path = self.client.app.state.attachment_store.path(storage_name)
+        self.assertTrue(stored_path.exists())
+
+        removed = self.client.put(
+            "/api/v1/admin/ui-state",
+            headers=self.admin_headers,
+            json={"revision": 1, "state": {"sites": [], "certificates": []}},
+        )
+        self.assertEqual(200, removed.status_code, removed.text)
+        with self.client.app.state.database.connection() as connection:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM site_attachments").fetchone()[0])
+        self.assertFalse(stored_path.exists())
 
     def test_installer_uses_password_bootstrap_and_relocatable_uvicorn(self):
         installer = (Path(__file__).resolve().parents[1] / "deploy" / "install-server.sh").read_text(

@@ -92,7 +92,7 @@ function revoke(nodeId: string, nodeName: string) {
             <p>Agent 已主动连接，但尚未获得节点操作权限。</p>
           </div>
         </div>
-        <StatusTag :label="`${store.enrollments.length} 个待处理`" tone="warning" />
+        <StatusTag :label="`${store.enrollments.length} 个待审批`" tone="warning" />
       </div>
       <div class="enrollment-grid">
         <article v-for="item in store.enrollments" :key="item.id" class="enrollment-card">

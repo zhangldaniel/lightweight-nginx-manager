@@ -10,6 +10,7 @@ import type {
   NodeRecord,
   OperationRecord,
   Session,
+  SiteAttachment,
   SiteRevision,
   UiState,
 } from './types'
@@ -106,6 +107,45 @@ function normalizedLvsApplyResult(value: Record<string, unknown>): LvsApplyResul
     operation,
     jobs: Array.isArray(value.jobs) ? value.jobs as JobRecord[] : [],
   }
+}
+
+interface SiteAttachmentPayload {
+  id: string
+  site_id: string
+  file_name: string
+  content_type: string
+  size_bytes: number
+  created_at: string
+  content_url: string
+}
+
+interface SiteAttachmentListPayload {
+  items: SiteAttachmentPayload[]
+  max_items?: number
+  remaining?: number
+  max_bytes?: number
+}
+
+function normalizedSiteAttachment(value: SiteAttachmentPayload): SiteAttachment {
+  return {
+    id: value.id,
+    site_id: value.site_id,
+    filename: value.file_name,
+    content_type: value.content_type,
+    size: value.size_bytes,
+    created_at: value.created_at,
+    url: value.content_url,
+  }
+}
+
+function normalizedNonNegativeInteger(value: unknown, fallback: number) {
+  const number = Number(value)
+  return Number.isInteger(number) && number >= 0 ? number : fallback
+}
+
+function normalizedPositiveInteger(value: unknown, fallback: number) {
+  const number = Number(value)
+  return Number.isInteger(number) && number > 0 ? number : fallback
 }
 
 export const api = {
@@ -226,5 +266,38 @@ export const api = {
   siteRevision: (siteId: string, version: number) =>
     request<SiteRevision>(
       `/api/v1/admin/sites/${encodeURIComponent(siteId)}/revisions/${version}`,
+    ),
+  siteAttachments: async (siteId: string) => {
+    const response = await request<SiteAttachmentListPayload>(
+      `/api/v1/admin/sites/${encodeURIComponent(siteId)}/attachments`,
+    )
+    const items = response.items.map(normalizedSiteAttachment)
+    const maxItems = normalizedPositiveInteger(response.max_items, 8)
+    return {
+      items,
+      maxItems,
+      remaining: Math.min(
+        maxItems,
+        normalizedNonNegativeInteger(response.remaining, Math.max(0, maxItems - items.length)),
+      ),
+      maxBytes: normalizedPositiveInteger(response.max_bytes, 5 * 1024 * 1024),
+    }
+  },
+  uploadSiteAttachment: async (siteId: string, file: File) => {
+    const response = await request<{ attachment: SiteAttachmentPayload }>(
+      `/api/v1/admin/sites/${encodeURIComponent(siteId)}/attachments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type,
+        'X-Filename': encodeURIComponent(file.name || 'screenshot'),
+      },
+      body: file,
+    })
+    return { attachment: normalizedSiteAttachment(response.attachment) }
+  },
+  deleteSiteAttachment: (siteId: string, attachmentId: string) =>
+    request<{ deleted: boolean }>(
+      `/api/v1/admin/sites/${encodeURIComponent(siteId)}/attachments/${encodeURIComponent(attachmentId)}`,
+      { method: 'DELETE' },
     ),
 }

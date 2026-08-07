@@ -49,6 +49,7 @@ const nodes = [
     nginx_version: '1.26.3',
     config_hash: 'aa'.repeat(32),
     capabilities: [
+      'nginx_test',
       'config_apply',
       'config_move',
       'config_delete',
@@ -180,6 +181,7 @@ const nodes = [
     nginx_version: '1.26.3',
     config_hash: 'bb'.repeat(32),
     capabilities: [
+      'nginx_test',
       'config_apply',
       'config_move',
       'config_delete',
@@ -282,6 +284,22 @@ const nodes = [
     revoked_at: null,
   },
 ]
+if (process.env.QA_NAV_ENROLLMENTS === '1') {
+  nodes.push({
+    ...nodes[0],
+    id: 'node-sz-01',
+    node_name: 'it-nginx-sz-01',
+    hostname: 'nginx-sz-01',
+    labels: { region: '深圳', environment: '生产' },
+    config_hash: 'bc'.repeat(32),
+    facts: {
+      ...nodes[0].facts,
+      keepalived: undefined,
+      lvs: undefined,
+      ipvs: undefined,
+    },
+  })
+}
 const certificate = {
   id: 'cert-wildcard',
   domain: '*.int.example.com',
@@ -375,6 +393,27 @@ const state = {
   importedCertificateInventoryJobs: [],
   processedOperationIds: [],
 }
+if (process.env.QA_CERTIFICATE_COPY_SYNC === '1') {
+  certificate.nodePaths['node-bj-01'] = {
+    certificatePath: '/apps/nginx/cert/int.example.com.pem',
+    keyPath: '/apps/nginx/cert/int.example.com.key',
+  }
+  const copiedSite = {
+    ...state.sites[0],
+    id: 'site-api-copy',
+    domain: 'api-copy.int.example.com',
+    config: config.replaceAll('api.int.example.com', 'api-copy.int.example.com'),
+    nodeIds: nodes.map((node) => node.id),
+    note: '从 api.int.example.com 复制',
+    nodeHashes: Object.fromEntries(nodes.map((node) => [node.id, 'ce'.repeat(32)])),
+    nodeConfigPaths: Object.fromEntries(
+      nodes.map((node) => [node.id, '/apps/nginx/conf/conf.d/api-copy.int.example.com.conf']),
+    ),
+    nodeConfigEntryIds: Object.fromEntries(nodes.map((node) => [node.id, 'http-primary'])),
+  }
+  state.sites.unshift(copiedSite)
+  certificate.linkedSiteIds.push(copiedSite.id)
+}
 const monitoring = nodes.map((node, index) => ({
   node,
   sampled_at: now,
@@ -424,6 +463,87 @@ const monitoring = nodes.map((node, index) => ({
   },
 }))
 
+if (process.env.QA_MONITORING_LVS_PROFILE === '1') {
+  const lvsNode = {
+    ...nodes[0],
+    id: 'node-lvs-standalone',
+    node_name: 'it-lvs-standalone',
+    hostname: 'lvs-standalone',
+    labels: { profile: 'lvs', environment: '生产' },
+    nginx_version: null,
+    config_hash: null,
+    capabilities: [
+      'metrics_v1',
+      'keepalived_inspect',
+      'ipvs_observer_v1',
+      'lvs_manage_v1',
+      'lvs_standalone_v1',
+    ],
+    facts: {
+      node_profile: 'lvs',
+      keepalived: {
+        mode: 'standalone',
+        role: 'STANDALONE',
+        service: { active: true, active_state: 'active', sub_state: 'running' },
+      },
+      ipvs: {
+        available: true,
+        source: 'procfs',
+        version: '1.2.1',
+        service_count: 1,
+        destination_count: 2,
+        services: [],
+        stats: {
+          totals: { connections: 4200, in_packets: 12600, out_packets: 12480 },
+          rates: { connections_per_second: 18, in_packets_per_second: 64, out_packets_per_second: 63 },
+        },
+      },
+    },
+  }
+  const nginxNode = {
+    ...nodes[0],
+    id: 'node-nginx-no-stub',
+    node_name: 'it-nginx-no-stub',
+    hostname: 'nginx-no-stub',
+    labels: { profile: 'nginx', environment: '生产' },
+    capabilities: [...new Set([...nodes[0].capabilities, 'nginx_test'])],
+    facts: {
+      ...nodes[0].facts,
+      node_profile: 'nginx',
+      keepalived: undefined,
+      ipvs: undefined,
+      lvs: undefined,
+    },
+  }
+  const baseMetrics = monitoring[0].metrics
+  monitoring.splice(
+    0,
+    monitoring.length,
+    {
+      node: lvsNode,
+      sampled_at: now,
+      health: { status: 'healthy', reasons: [] },
+      metrics: {
+        cpu: { ...baseMetrics.cpu, percent: 18.5, count: 4 },
+        memory: { ...baseMetrics.memory, percent: 32.5, used_bytes: 4_294_967_296 },
+        network: baseMetrics.network,
+        disk_io: baseMetrics.disk_io,
+        filesystems: baseMetrics.filesystems,
+        system: baseMetrics.system,
+      },
+    },
+    {
+      node: nginxNode,
+      sampled_at: now,
+      health: { status: 'warning', reasons: ['Stub Status 不可用'] },
+      metrics: {
+        ...baseMetrics,
+        stub_status: { configured: true, available: false, reason: 'http_503' },
+      },
+    },
+  )
+}
+
 const monitoringHistory = Array.from({ length: 36 }, (_, index) => {
   const phase = index / 35
   const broadWave = Math.sin(phase * Math.PI * 4)
@@ -455,6 +575,9 @@ const monitoringHistory = Array.from({ length: 36 }, (_, index) => {
     },
   }
 })
+if (process.env.QA_MONITORING_LVS_PROFILE === '1') {
+  for (const item of monitoringHistory) delete item.metrics.stub_status
+}
 
 const minutesFromNow = (minutes) => new Date(Date.now() + minutes * 60_000).toISOString()
 const recordJobs = [
@@ -728,6 +851,9 @@ export const qaServer = createServer(async (request, response) => {
   }
   if (path === '/api/v1/admin/ui-state') return send(response, { revision: 1, state })
   if (path === '/api/v1/admin/nodes') return send(response, { items: nodes })
+  if (/^\/api\/v1\/admin\/sites\/[^/]+\/attachments$/.test(path) && request.method === 'GET') {
+    return send(response, { items: [], max_items: 6, remaining: 6, max_bytes: 3 * 1024 * 1024 })
+  }
   if (path === '/api/v1/admin/lvs/plans' && request.method === 'POST') {
     const body = await readJson(request)
     const intent = body.intent || {}
@@ -820,7 +946,41 @@ export const qaServer = createServer(async (request, response) => {
       items: requestUrl.searchParams.has('reconciliation_status') ? [] : recordOperations,
     })
   }
-  if (path === '/api/v1/admin/enrollments') return send(response, { items: [] })
+  if (path === '/api/v1/admin/enrollments') {
+    if (process.env.QA_NAV_ENROLLMENTS === '1') {
+      return send(response, {
+        items: [
+          {
+            id: 'enrollment-pending-01',
+            node_id: 'pending-node-01',
+            node_name: 'it-nginx-pending-01',
+            hostname: 'nginx-pending-01',
+            labels: { region: '上海' },
+            status: 'pending',
+            requested_at: now,
+            updated_at: now,
+            expires_at: now,
+            decided_at: null,
+            decided_by: null,
+          },
+          {
+            id: 'enrollment-pending-02',
+            node_id: 'pending-node-02',
+            node_name: 'it-nginx-pending-02',
+            hostname: 'nginx-pending-02',
+            labels: { region: '北京' },
+            status: 'pending',
+            requested_at: now,
+            updated_at: now,
+            expires_at: now,
+            decided_at: null,
+            decided_by: null,
+          },
+        ],
+      })
+    }
+    return send(response, { items: [] })
+  }
   if (path === '/api/v1/admin/monitoring/summary') {
     return send(response, { items: monitoring, server_time: now })
   }

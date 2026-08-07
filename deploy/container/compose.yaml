@@ -1,0 +1,26 @@
+services:
+  server:
+    image: ${NGINX_MANAGER_IMAGE:-nginx-manager:local}
+    container_name: nginx-manager-server
+    restart: unless-stopped
+    user: "${NGINX_MANAGER_UID:-10001}:${NGINX_MANAGER_GID:-10001}"
+    network_mode: host
+    env_file:
+      - /etc/nginx-manager/server.env
+    environment:
+      NGINX_MANAGER_UI_PATH: /app/ui/index.html
+      NGINX_MANAGER_CONTAINER_BIND: ${NGINX_MANAGER_BIND_ADDRESS:-0.0.0.0}
+      NGINX_MANAGER_CONTAINER_PORT: ${NGINX_MANAGER_PORT:-8443}
+      NGINX_MANAGER_CONTAINER_PROXY_HEADERS: ${NGINX_MANAGER_PROXY_HEADERS:-0}
+      NGINX_MANAGER_CONTAINER_TLS: ${NGINX_MANAGER_TLS:-0}
+    volumes:
+      - /var/lib/nginx-manager:/var/lib/nginx-manager
+      - /etc/nginx-manager:/etc/nginx-manager:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128

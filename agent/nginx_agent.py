@@ -4447,9 +4447,12 @@ class MetricsCollector:
             "network": lambda: self._network(now),
             "disk_io": lambda: self._disk_io(now),
             "filesystems": self._filesystems,
-            "nginx": self._nginx_processes,
-            "stub_status": lambda: self._stub_status(now),
         }
+        if self.settings.nginx_enabled():
+            collectors.update({
+                "nginx": self._nginx_processes,
+                "stub_status": lambda: self._stub_status(now),
+            })
         for key, collector in collectors.items():
             try:
                 result[key] = collector()

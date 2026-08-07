@@ -27,7 +27,13 @@ const items = computed(() => [
     count: store.certificates.length,
     alert: store.riskyCertificateCount > 0,
   },
-  { to: '/nodes', label: '节点 Agent', icon: ServerCog, count: store.nodes.length },
+  {
+    to: '/nodes',
+    label: '节点 Agent',
+    icon: ServerCog,
+    count: store.nodes.length,
+    pendingCount: store.enrollments.length,
+  },
   { to: '/logs', label: '实时日志', icon: FileTerminal },
   { to: '/monitoring', label: '运行监控', icon: Gauge, alert: store.unhealthyCount > 0 },
   { to: '/high-availability', label: '高可用', icon: Network },
@@ -64,9 +70,21 @@ const items = computed(() => [
         <span class="nav-icon" aria-hidden="true">
           <component :is="item.icon" :size="19" stroke-width="2" />
         </span>
-        <span>{{ item.label }}</span>
-        <span v-if="item.alert" class="nav-alert" aria-label="存在需处理项目">!</span>
-        <span v-else-if="item.count !== undefined" class="nav-count">{{ item.count }}</span>
+        <span class="nav-label">{{ item.label }}</span>
+        <span
+          class="nav-item-meta"
+          :aria-live="item.pendingCount !== undefined ? 'polite' : undefined"
+          :aria-atomic="item.pendingCount !== undefined ? 'true' : undefined"
+        >
+          <span v-if="item.alert" class="nav-alert" aria-label="存在需处理项目">!</span>
+          <span v-else-if="item.count !== undefined" class="nav-count">{{ item.count }}</span>
+          <span
+            v-if="item.pendingCount"
+            class="nav-pending"
+            :aria-label="`${item.pendingCount} 个待审批 Agent`"
+            :title="`${item.pendingCount} 个待审批 Agent`"
+          >待 {{ item.pendingCount }}</span>
+        </span>
       </RouterLink>
     </nav>
 

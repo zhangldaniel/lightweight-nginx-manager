@@ -104,6 +104,14 @@ try {
   await command('Runtime.enable')
   await wait(700)
 
+  const attachmentPolicy = await evaluate(`(() => {
+    const region = document.querySelector('.site-screenshots')
+    return region?.textContent.replace(/\\s+/g, ' ').trim() || ''
+  })()`)
+  assert(attachmentPolicy.includes('0 / 6 张'), '截图数量上限没有使用控制端策略')
+  assert(attachmentPolicy.includes('3.0 MB'), '截图大小上限没有使用控制端策略')
+  assert(attachmentPolicy.includes('上传后立即保存'), '截图的即时保存语义没有向用户说明')
+
   const searchCases = [
     { query: '443', expected: 'api.int.example.com', hint: '命中配置' },
     { query: 'listen   443', expected: 'api.int.example.com', hint: '命中配置' },
@@ -742,16 +750,17 @@ try {
       mobile: false,
     })
     await command('Page.reload', { ignoreCache: true })
-    await wait(700)
-    assert(
-      await evaluate(`(() => {
+    let createButtonAvailable = false
+    for (let attempt = 0; attempt < 30 && !createButtonAvailable; attempt += 1) {
+      createButtonAvailable = await evaluate(`(() => {
         const button = [...document.querySelectorAll('button')]
           .find((item) => item.textContent.includes('新增站点'))
         button?.click()
         return Boolean(button)
-      })()`),
-      `The create-site button was not available at ${width}px`,
-    )
+      })()`)
+      if (!createButtonAvailable) await wait(100)
+    }
+    assert(createButtonAvailable, `The create-site button was not available at ${width}px`)
     await wait(350)
     const layout = await evaluate(`(() => {
       const modal = document.querySelector('.site-editor-modal')

@@ -2086,17 +2086,47 @@ Conns/s Pkts/s Pkts/s Bytes/s Bytes/s
         self.assertEqual("action is not allowed", denied["error"])
 
         service = agent.AgentService(settings, threading.Event())
-        service.metrics_collector.collect = mock.Mock(return_value={"cpu": {"percent": 1.0}})
         helper = mock.Mock()
         helper.keepalived_observation.return_value = {"vip": "192.0.2.110", "role": "MASTER"}
         helper.ipvs_observation.return_value = {"available": True, "services": []}
-        with mock.patch.object(agent.subprocess, "run") as command:
+        with mock.patch.object(service.metrics_collector, "_cpu", return_value={"percent": 1.0}), \
+                mock.patch.object(service.metrics_collector, "_memory", return_value={"percent": 2.0}), \
+                mock.patch.object(service.metrics_collector, "_network", return_value={}), \
+                mock.patch.object(service.metrics_collector, "_disk_io", return_value={}), \
+                mock.patch.object(service.metrics_collector, "_filesystems", return_value=[]), \
+                mock.patch.object(service.metrics_collector, "_nginx_processes") as nginx_metrics, \
+                mock.patch.object(service.metrics_collector, "_stub_status") as stub_metrics, \
+                mock.patch.object(agent.platform, "release", return_value="test-kernel"), \
+                mock.patch.object(agent.subprocess, "run") as command:
             observation = service._local_observation(helper)
         command.assert_not_called()
+        nginx_metrics.assert_not_called()
+        stub_metrics.assert_not_called()
         self.assertEqual("MASTER", observation["facts"]["keepalived"]["role"])
         self.assertNotIn("nginx_root", observation["facts"])
         self.assertNotIn("nginx_version", observation)
         self.assertNotIn("config_hash", observation)
+        self.assertNotIn("nginx", observation["metrics"])
+        self.assertNotIn("stub_status", observation["metrics"])
+
+    def test_nginx_and_hybrid_profiles_keep_nginx_metrics(self):
+        hybrid_config = Path(self.temporary.name) / "hybrid-metrics-keepalived.conf"
+        profiles = (self.settings, self.keepalived_settings(hybrid_config))
+        profiles[1].node_profile = "hybrid"
+        for settings in profiles:
+            with self.subTest(profile=settings.node_profile):
+                collector = agent.MetricsCollector(settings)
+                with mock.patch.object(collector, "_cpu", return_value={"percent": 1.0}), \
+                        mock.patch.object(collector, "_memory", return_value={"percent": 2.0}), \
+                        mock.patch.object(collector, "_network", return_value={}), \
+                        mock.patch.object(collector, "_disk_io", return_value={}), \
+                        mock.patch.object(collector, "_filesystems", return_value=[]), \
+                        mock.patch.object(collector, "_nginx_processes", return_value={"running": True}), \
+                        mock.patch.object(collector, "_stub_status", return_value={"configured": False}), \
+                        mock.patch.object(agent.platform, "release", return_value="test-kernel"):
+                    metrics = collector.collect()
+                self.assertEqual({"running": True}, metrics["nginx"])
+                self.assertEqual({"configured": False}, metrics["stub_status"])
 
     def test_lvs_profile_requires_keepalived_and_ipvs_observer(self):
         common = {

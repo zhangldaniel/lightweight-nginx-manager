@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Iterator, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -1517,6 +1517,9 @@ class Settings:
     max_payload_bytes: int = 2 * 1024 * 1024
     max_ui_state_bytes: int = 16 * 1024 * 1024
     max_resource_bytes: int = 1024 * 1024
+    attachments_dir: Optional[str] = None
+    max_attachment_bytes: int = 5 * 1024 * 1024
+    max_site_attachments: int = 8
     session_ttl_seconds: int = 28800
     enrollment_pending_ttl_seconds: int = 86400
     password_iterations: int = 310000
@@ -1563,6 +1566,11 @@ class Settings:
             max_payload_bytes=int(os.environ.get("NGINX_MANAGER_MAX_PAYLOAD_BYTES", str(2 * 1024 * 1024))),
             max_ui_state_bytes=int(os.environ.get("NGINX_MANAGER_MAX_UI_STATE_BYTES", str(16 * 1024 * 1024))),
             max_resource_bytes=int(os.environ.get("NGINX_MANAGER_MAX_RESOURCE_BYTES", str(1024 * 1024))),
+            attachments_dir=os.environ.get("NGINX_MANAGER_ATTACHMENTS_DIR") or None,
+            max_attachment_bytes=int(
+                os.environ.get("NGINX_MANAGER_MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024))
+            ),
+            max_site_attachments=int(os.environ.get("NGINX_MANAGER_MAX_SITE_ATTACHMENTS", "8")),
             session_ttl_seconds=int(os.environ.get("NGINX_MANAGER_SESSION_TTL_SECONDS", "28800")),
             enrollment_pending_ttl_seconds=int(
                 os.environ.get("NGINX_MANAGER_ENROLLMENT_PENDING_TTL_SECONDS", "86400")
@@ -1610,6 +1618,12 @@ class Settings:
             raise ValueError("NGINX_MANAGER_LOG_SESSION_TTL_SECONDS is out of range")
         if not 64 * 1024 <= self.log_session_buffer_bytes <= 16 * 1024 * 1024:
             raise ValueError("NGINX_MANAGER_LOG_SESSION_BUFFER_BYTES is out of range")
+        if not 64 * 1024 <= self.max_attachment_bytes <= 20 * 1024 * 1024:
+            raise ValueError("NGINX_MANAGER_MAX_ATTACHMENT_BYTES must be between 64 KiB and 20 MiB")
+        if not 1 <= self.max_site_attachments <= 32:
+            raise ValueError("NGINX_MANAGER_MAX_SITE_ATTACHMENTS must be between 1 and 32")
+        if self.attachments_dir and not Path(self.attachments_dir).expanduser().is_absolute():
+            raise ValueError("NGINX_MANAGER_ATTACHMENTS_DIR must be an absolute path")
         if not self.ldap_enabled:
             return
         required = {
@@ -2315,6 +2329,23 @@ class Database:
                 CREATE INDEX IF NOT EXISTS resources_order_idx
                     ON resources(kind, position, id);
 
+                CREATE TABLE IF NOT EXISTS site_attachments (
+                    id TEXT PRIMARY KEY,
+                    resource_kind TEXT NOT NULL DEFAULT 'site' CHECK (resource_kind = 'site'),
+                    site_id TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    storage_name TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(resource_kind, site_id)
+                        REFERENCES resources(kind, id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS site_attachments_site_idx
+                    ON site_attachments(site_id, created_at, id);
+
                 CREATE TABLE IF NOT EXISTS admin_users (
                     id TEXT PRIMARY KEY,
                     username TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -2596,7 +2627,7 @@ def _metric_path(metrics: Dict[str, Any], *path: str) -> Optional[float]:
     return None
 
 
-def _metric_health(metrics: Dict[str, Any]) -> Dict[str, Any]:
+def _metric_health(metrics: Dict[str, Any], expects_nginx: bool) -> Dict[str, Any]:
     reasons: List[str] = []
     severity = "healthy"
 
@@ -2635,7 +2666,7 @@ def _metric_health(metrics: Dict[str, Any]) -> Dict[str, Any]:
         elif percent >= 85:
             mark("warning", "{} 使用率超过 85%".format(name))
     stub = metrics.get("stub_status") if isinstance(metrics.get("stub_status"), dict) else {}
-    if stub and not stub.get("available", False):
+    if expects_nginx and stub and not stub.get("available", False):
         mark("warning", "Stub Status 不可用")
     return {"status": severity, "reasons": reasons[:8]}
 
@@ -2720,6 +2751,72 @@ def _revision_public(row: sqlite3.Row, include_snapshot: bool = False) -> Dict[s
     if include_snapshot:
         result["snapshot"] = json.loads(row["snapshot_json"])
     return result
+
+
+def _attachment_public(row: sqlite3.Row) -> Dict[str, Any]:
+    attachment_id = str(row["id"])
+    site_id = str(row["site_id"])
+    return {
+        "id": attachment_id,
+        "site_id": site_id,
+        "file_name": row["file_name"],
+        "content_type": row["content_type"],
+        "size_bytes": int(row["size_bytes"]),
+        "sha256": row["sha256"],
+        "created_by": row["created_by"],
+        "created_at": _utc_iso(row["created_at"]),
+        "content_url": "/api/v1/admin/sites/{}/attachments/{}/content".format(
+            quote(site_id, safe=""), quote(attachment_id, safe="")
+        ),
+    }
+
+
+_ATTACHMENT_EXTENSIONS = {
+    "image/png": {".png"},
+    "image/jpeg": {".jpg", ".jpeg"},
+    "image/webp": {".webp"},
+}
+
+
+def _attachment_file_name(value: Optional[str], content_type: str) -> str:
+    if not value:
+        raise HTTPException(status_code=400, detail="X-Filename header is required")
+    try:
+        decoded = unquote(value, encoding="utf-8", errors="strict").strip()
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="attachment file name is invalid") from exc
+    if (
+        not decoded
+        or len(decoded) > 160
+        or decoded in {".", ".."}
+        or "/" in decoded
+        or "\\" in decoded
+        or any(ord(character) < 32 or ord(character) == 127 for character in decoded)
+    ):
+        raise HTTPException(status_code=400, detail="attachment file name is invalid")
+    suffix = Path(decoded).suffix.casefold()
+    if not suffix:
+        decoded += {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/webp": ".webp",
+        }[content_type]
+        suffix = Path(decoded).suffix.casefold()
+    if suffix not in _ATTACHMENT_EXTENSIONS[content_type]:
+        raise HTTPException(status_code=400, detail="attachment file extension does not match its media type")
+    return decoded
+
+
+def _attachment_media_type(path: Path) -> Optional[str]:
+    with path.open("rb") as handle:
+        prefix = handle.read(16)
+    if prefix.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if prefix.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def _expire_blocked_serial_jobs(
@@ -2830,6 +2927,115 @@ def _load_ui_state_document(connection: sqlite3.Connection) -> Dict[str, Any]:
             ).fetchall()
             state[state_key] = [json.loads(item["document_json"]) for item in resources]
     return {"revision": row["revision"], "state": state}
+
+
+class AttachmentStore:
+    """Private on-disk storage for authenticated site-note images."""
+
+    _managed_name = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:blob|upload|trash)$"
+    )
+
+    def __init__(self, root: Path):
+        self.root = Path(os.path.abspath(str(root.expanduser())))
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "AttachmentStore":
+        if settings.attachments_dir:
+            root = Path(settings.attachments_dir)
+        elif settings.db_path == ":memory:":
+            root = Path.cwd() / "data" / "attachments"
+        else:
+            root = Path(settings.db_path).expanduser().resolve().parent / "attachments"
+        return cls(root)
+
+    def initialize(self, database: Database) -> None:
+        if self.root.exists() and (self.root.is_symlink() or not self.root.is_dir()):
+            raise RuntimeError("attachment storage path must be a regular directory")
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(str(self.root), 0o700)
+        except OSError:
+            if os.name != "nt":
+                raise
+        with database.connection() as connection:
+            expected = {
+                str(row["storage_name"])
+                for row in connection.execute("SELECT storage_name FROM site_attachments").fetchall()
+            }
+        for candidate in self.root.iterdir():
+            if candidate.is_symlink() or not candidate.is_file() or not self._managed_name.fullmatch(candidate.name):
+                continue
+            if candidate.suffix == ".trash":
+                storage_name = candidate.with_suffix(".blob").name
+                if storage_name in expected:
+                    final_path = self.path(storage_name)
+                    if final_path.is_symlink() or (final_path.exists() and not final_path.is_file()):
+                        raise RuntimeError("attachment recovery target must be a regular file")
+                    if final_path.exists():
+                        candidate.unlink()
+                    else:
+                        os.replace(str(candidate), str(final_path))
+                    continue
+            if candidate.suffix == ".upload" or candidate.name not in expected:
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+
+    def path(self, storage_name: str) -> Path:
+        if re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.blob",
+            storage_name,
+        ) is None:
+            raise ValueError("invalid attachment storage name")
+        return self.root / storage_name
+
+    async def store_request_body(
+        self,
+        request: Request,
+        attachment_id: str,
+        max_bytes: int,
+    ) -> Tuple[str, int, str]:
+        storage_name = attachment_id + ".blob"
+        temporary = self.root / (attachment_id + ".upload")
+        final_path = self.path(storage_name)
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with temporary.open("xb") as handle:
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise HTTPException(status_code=413, detail="attachment is too large")
+                    digest.update(chunk)
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if size == 0:
+                raise HTTPException(status_code=400, detail="attachment is empty")
+            try:
+                os.chmod(str(temporary), 0o600)
+            except OSError:
+                if os.name != "nt":
+                    raise
+            os.replace(str(temporary), str(final_path))
+            return storage_name, size, digest.hexdigest()
+        except Exception:
+            for candidate in (temporary, final_path):
+                try:
+                    candidate.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+
+    def discard(self, storage_name: str) -> None:
+        try:
+            self.path(storage_name).unlink()
+        except (FileNotFoundError, OSError, ValueError):
+            pass
 
 
 class LogSessionManager:
@@ -2987,6 +3193,7 @@ def create_app(
         current_settings, username, None
     ))
     database = Database(settings.db_path)
+    attachment_store = AttachmentStore.from_settings(settings)
     log_sessions = LogSessionManager(
         settings.max_log_sessions,
         settings.max_log_sessions_per_user,
@@ -2997,6 +3204,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_api: FastAPI) -> AsyncIterator[None]:
         database.initialize()
+        attachment_store.initialize(database)
         with database.transaction() as connection:
             now = int(time.time())
             connection.execute("DELETE FROM admin_sessions WHERE expires_at <= ?", (now,))
@@ -3021,6 +3229,7 @@ def create_app(
     )
     api.state.settings = settings
     api.state.database = database
+    api.state.attachment_store = attachment_store
     api.state.log_sessions = log_sessions
     secure_session_cookie = "__Host-nginx_manager_session"
     http_session_cookie = "nginx_manager_session"
@@ -4214,7 +4423,11 @@ def create_app(
                         (row["id"],),
                     ).fetchone()
                 metrics = json.loads(metric_row["metrics_json"]) if metric_row else {}
-                health = _metric_health(metrics) if metrics else {"status": "no_data", "reasons": ["尚未收到监控数据"]}
+                health = (
+                    _metric_health(metrics, expects_nginx="nginx_test" in public["capabilities"])
+                    if metrics
+                    else {"status": "no_data", "reasons": ["尚未收到监控数据"]}
+                )
                 if public["status"] == "offline":
                     health = {"status": "offline", "reasons": ["Agent 心跳中断"]}
                 items.append({
@@ -4870,6 +5083,208 @@ def create_app(
             ).fetchall()
         return {"operation": _operation_public(operation), "jobs": [_job_public(row) for row in jobs]}
 
+    @api.get("/api/v1/admin/sites/{site_id}/attachments")
+    def list_site_attachments(
+        site_id: str,
+        admin: Dict[str, Any] = Depends(require_session),
+    ) -> Dict[str, Any]:
+        with database.connection() as connection:
+            site = connection.execute(
+                "SELECT 1 FROM resources WHERE kind = 'site' AND id = ?",
+                (site_id,),
+            ).fetchone()
+            if site is None:
+                raise HTTPException(status_code=404, detail="site not found")
+            rows = connection.execute(
+                "SELECT * FROM site_attachments WHERE site_id = ? ORDER BY created_at, id",
+                (site_id,),
+            ).fetchall()
+        return {
+            "items": [_attachment_public(row) for row in rows],
+            "max_items": settings.max_site_attachments,
+            "max_bytes": settings.max_attachment_bytes,
+            "remaining": max(0, settings.max_site_attachments - len(rows)),
+        }
+
+    @api.post("/api/v1/admin/sites/{site_id}/attachments", status_code=201)
+    async def upload_site_attachment(
+        site_id: str,
+        http_request: Request,
+        x_filename: Optional[str] = Header(None, alias="X-Filename"),
+        admin: Dict[str, Any] = Depends(require_operator),
+    ) -> Dict[str, Any]:
+        content_type = http_request.headers.get("content-type", "").split(";", 1)[0].strip().casefold()
+        if content_type not in _ATTACHMENT_EXTENSIONS:
+            raise HTTPException(status_code=415, detail="attachment must be a PNG, JPEG, or WebP image")
+        file_name = _attachment_file_name(x_filename, content_type)
+        content_length = http_request.headers.get("content-length")
+        if content_length:
+            try:
+                declared_size = int(content_length)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid Content-Length") from exc
+            if declared_size < 0:
+                raise HTTPException(status_code=400, detail="invalid Content-Length")
+            if declared_size > settings.max_attachment_bytes:
+                raise HTTPException(status_code=413, detail="attachment is too large")
+
+        with database.connection() as connection:
+            site = connection.execute(
+                "SELECT 1 FROM resources WHERE kind = 'site' AND id = ?",
+                (site_id,),
+            ).fetchone()
+            if site is None:
+                raise HTTPException(status_code=404, detail="site not found")
+            count = connection.execute(
+                "SELECT COUNT(*) FROM site_attachments WHERE site_id = ?", (site_id,)
+            ).fetchone()[0]
+            if count >= settings.max_site_attachments:
+                raise HTTPException(status_code=409, detail="site attachment limit reached")
+
+        attachment_id = str(uuid.uuid4())
+        storage_name, size_bytes, content_sha256 = await attachment_store.store_request_body(
+            http_request,
+            attachment_id,
+            settings.max_attachment_bytes,
+        )
+        stored_path = attachment_store.path(storage_name)
+        try:
+            if _attachment_media_type(stored_path) != content_type:
+                raise HTTPException(status_code=415, detail="attachment content does not match its media type")
+            now = int(time.time())
+            with database.transaction() as connection:
+                site = connection.execute(
+                    "SELECT 1 FROM resources WHERE kind = 'site' AND id = ?",
+                    (site_id,),
+                ).fetchone()
+                if site is None:
+                    raise HTTPException(status_code=404, detail="site not found")
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM site_attachments WHERE site_id = ?", (site_id,)
+                ).fetchone()[0]
+                if count >= settings.max_site_attachments:
+                    raise HTTPException(status_code=409, detail="site attachment limit reached")
+                connection.execute(
+                    """INSERT INTO site_attachments
+                       (id, resource_kind, site_id, file_name, content_type, storage_name,
+                        size_bytes, sha256, created_by, created_at)
+                       VALUES (?, 'site', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        attachment_id,
+                        site_id,
+                        file_name,
+                        content_type,
+                        storage_name,
+                        size_bytes,
+                        content_sha256,
+                        admin["username"],
+                        now,
+                    ),
+                )
+                Database.audit(
+                    connection,
+                    admin["auth_source"],
+                    admin["username"],
+                    "site_attachment_uploaded",
+                    "site_attachment",
+                    attachment_id,
+                    {
+                        "site_id": site_id,
+                        "file_name": file_name,
+                        "content_type": content_type,
+                        "size_bytes": size_bytes,
+                        "sha256": content_sha256,
+                    },
+                )
+                row = connection.execute(
+                    "SELECT * FROM site_attachments WHERE id = ?", (attachment_id,)
+                ).fetchone()
+        except Exception:
+            attachment_store.discard(storage_name)
+            raise
+        return {"attachment": _attachment_public(row)}
+
+    @api.get("/api/v1/admin/sites/{site_id}/attachments/{attachment_id}/content")
+    def get_site_attachment_content(
+        site_id: str,
+        attachment_id: str,
+        admin: Dict[str, Any] = Depends(require_session),
+    ) -> Any:
+        with database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM site_attachments WHERE site_id = ? AND id = ?",
+                (site_id, attachment_id),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="attachment not found")
+        try:
+            candidate = attachment_store.path(str(row["storage_name"]))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="attachment content is unavailable") from exc
+        if candidate.is_symlink() or not candidate.is_file():
+            raise HTTPException(status_code=404, detail="attachment content is unavailable")
+        fallback_name = re.sub(r"[^A-Za-z0-9._-]", "_", str(row["file_name"]))[:80] or "screenshot"
+        headers = {
+            "Content-Disposition": "inline; filename=\"{}\"; filename*=UTF-8''{}".format(
+                fallback_name.replace('"', "_"), quote(str(row["file_name"]), safe="")
+            ),
+            "ETag": '"{}"'.format(row["sha256"]),
+        }
+        return FileResponse(str(candidate), media_type=row["content_type"], headers=headers)
+
+    @api.delete("/api/v1/admin/sites/{site_id}/attachments/{attachment_id}")
+    def delete_site_attachment(
+        site_id: str,
+        attachment_id: str,
+        admin: Dict[str, Any] = Depends(require_operator),
+    ) -> Dict[str, Any]:
+        storage_name: Optional[str] = None
+        original_path: Optional[Path] = None
+        trash_path: Optional[Path] = None
+        moved_to_trash = False
+        try:
+            with database.transaction() as connection:
+                row = connection.execute(
+                    "SELECT * FROM site_attachments WHERE site_id = ? AND id = ?",
+                    (site_id, attachment_id),
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="attachment not found")
+                storage_name = str(row["storage_name"])
+                original_path = attachment_store.path(storage_name)
+                trash_path = attachment_store.root / (attachment_id + ".trash")
+                if original_path.is_file() and not original_path.is_symlink():
+                    os.replace(str(original_path), str(trash_path))
+                    moved_to_trash = True
+                connection.execute(
+                    "DELETE FROM site_attachments WHERE site_id = ? AND id = ?",
+                    (site_id, attachment_id),
+                )
+                Database.audit(
+                    connection,
+                    admin["auth_source"],
+                    admin["username"],
+                    "site_attachment_deleted",
+                    "site_attachment",
+                    attachment_id,
+                    {
+                        "site_id": site_id,
+                        "file_name": row["file_name"],
+                        "size_bytes": int(row["size_bytes"]),
+                        "sha256": row["sha256"],
+                    },
+                )
+        except Exception:
+            if moved_to_trash and trash_path is not None and original_path is not None and trash_path.exists():
+                os.replace(str(trash_path), str(original_path))
+            raise
+        if trash_path is not None:
+            try:
+                trash_path.unlink()
+            except OSError:
+                pass
+        return {"deleted": True, "id": attachment_id, "site_id": site_id}
+
     @api.get("/api/v1/admin/sites/{site_id}/revisions")
     def list_site_revisions(
         site_id: str,
@@ -5176,6 +5591,7 @@ def create_app(
         compact_state["_resources_split_v1"] = True
         state_json = _canonical_json(compact_state)
         now = int(time.time())
+        removed_attachment_storage_names: List[str] = []
         with database.transaction() as connection:
             current = connection.execute(
                 "SELECT revision, state_json FROM ui_state WHERE singleton_id = 1"
@@ -5293,6 +5709,21 @@ def create_app(
                 )
             for kind, documents in resources.items():
                 ids = [item[0] for item in documents]
+                if kind == "site":
+                    if ids:
+                        attachment_rows = connection.execute(
+                            "SELECT storage_name FROM site_attachments WHERE site_id NOT IN ("
+                            + ",".join("?" for _ in ids)
+                            + ")",
+                            ids,
+                        ).fetchall()
+                    else:
+                        attachment_rows = connection.execute(
+                            "SELECT storage_name FROM site_attachments"
+                        ).fetchall()
+                    removed_attachment_storage_names.extend(
+                        str(row["storage_name"]) for row in attachment_rows
+                    )
                 if ids:
                     connection.execute(
                         "DELETE FROM resources WHERE kind = ? AND id NOT IN ("
@@ -5352,6 +5783,8 @@ def create_app(
                     "reconciled_operation_ids": request.reconciled_operation_ids,
                 },
             )
+        for storage_name in removed_attachment_storage_names:
+            attachment_store.discard(storage_name)
         return {"revision": next_revision, "state": request.state, "reconciled_operation_ids": request.reconciled_operation_ids}
 
     return api

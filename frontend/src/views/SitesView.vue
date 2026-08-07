@@ -22,6 +22,7 @@ import {
   useDialog,
 } from 'naive-ui'
 import ReleaseChannel from '../components/ReleaseChannel.vue'
+import SiteScreenshotAttachments from '../components/SiteScreenshotAttachments.vue'
 import StatusTag from '../components/StatusTag.vue'
 import { useConsoleStore } from '../stores/console'
 import { api } from '../api'
@@ -75,13 +76,13 @@ const revisions = ref<SiteRevision[]>([])
 const editorBaseline = ref('')
 const editorCloseConfirming = ref(false)
 const templateConfirming = ref(false)
-const certificatePreviewConfirmed = ref(false)
 const detailScroll = ref<HTMLElement | null>(null)
 const detailPanel = ref<HTMLElement | null>(null)
 const detailCloseButton = ref<HTMLButtonElement | null>(null)
 const detailDrawerOpen = ref(false)
 const detailDrawerSiteId = ref('')
 const narrowDetail = ref(false)
+const attachmentRefreshToken = ref(0)
 let detailMediaQuery: MediaQueryList | undefined
 let detailReturnFocus: HTMLElement | null = null
 
@@ -218,6 +219,11 @@ const siteSearchHints = computed(() => {
 })
 
 const selected = computed(() => store.selectedSite)
+function refreshAttachmentsFor(siteId: string) {
+  const selectedMatches = selected.value?.id === siteId
+  const editorMatches = editorOpen.value && editorMode.value === 'edit' && form.id === siteId
+  if (selectedMatches || editorMatches) attachmentRefreshToken.value += 1
+}
 const siteBusyTitle = '当前配置有任务执行中，请等待任务完成'
 function isSiteBusy(site: SiteRecord | null | undefined) {
   return Boolean(site && store.isSiteOperationBusy(site.id))
@@ -494,7 +500,6 @@ const certificatePreviewRewrite = computed(() => {
 })
 const certificatePreviewInSync = computed(
   () =>
-    certificatePreviewConfirmed.value &&
     Boolean(selectedFormCertificate.value) &&
     certificateDirectivesComplete.value &&
     certificatePreviewRewrite.value?.content === form.config,
@@ -685,7 +690,6 @@ function openCreate() {
   originalOperational.value = ''
   templateManaged.value = true
   configManuallyEdited.value = false
-  certificatePreviewConfirmed.value = false
   editorBaseline.value = editorSnapshot()
   editorOpen.value = true
 }
@@ -713,7 +717,6 @@ function openEdit(site: SiteRecord) {
     config: site.config || '',
     nodeConfigEntryIds: { ...(site.nodeConfigEntryIds || {}) },
   })
-  certificatePreviewConfirmed.value = Boolean(site.certificateId)
   activeTemplate.value = inferTemplate(site)
   templateManaged.value = false
   configManuallyEdited.value = false
@@ -751,7 +754,6 @@ function applyTemplateNow(kind: SiteTemplateKey) {
   }
   if (!['https', 'balanced-https', 'websocket'].includes(kind)) {
     form.certificateId = ''
-    certificatePreviewConfirmed.value = false
   }
   form.config = renderSiteTemplate(kind, form.domain, form.target)
   applySelectedCertificateToPreview(false)
@@ -788,7 +790,6 @@ function applySelectedCertificateToPreview(notifyWhenMissing = true) {
   if (!certificate) return
   const node = certificatePreviewNode.value
   if (!node) {
-    certificatePreviewConfirmed.value = false
     if (notifyWhenMissing) {
       store.notify('证书路径尚不可用', 'warning', '所选节点没有上报这张证书的证书路径和私钥路径。')
     }
@@ -796,7 +797,6 @@ function applySelectedCertificateToPreview(notifyWhenMissing = true) {
   }
   const rewritten = rewriteConfigCertificatePaths(form.config, certificate, node)
   form.config = rewritten.content
-  certificatePreviewConfirmed.value = true
   if (!certificateDirectivesComplete.value && notifyWhenMissing) {
     store.notify(
       '证书已绑定，但 Conf 没有证书指令',
@@ -808,14 +808,12 @@ function applySelectedCertificateToPreview(notifyWhenMissing = true) {
 
 function selectCertificate(value: string | null) {
   form.certificateId = String(value || '')
-  certificatePreviewConfirmed.value = false
   if (form.certificateId) applySelectedCertificateToPreview()
 }
 
 function handleConfigInput() {
   templateManaged.value = false
   configManuallyEdited.value = true
-  certificatePreviewConfirmed.value = false
 }
 
 watch(
@@ -1593,6 +1591,14 @@ function deleteRecord() {
           </div>
         </div>
 
+        <SiteScreenshotAttachments
+          :site-id="selected.id"
+          :editable="store.canOperate && !selectedSiteBusy"
+          :refresh-token="attachmentRefreshToken"
+          compact
+          @changed="refreshAttachmentsFor"
+        />
+
         <div class="detail-section">
           <h3>部署节点</h3>
           <div class="deployment-list">
@@ -1864,6 +1870,12 @@ function deleteRecord() {
               placeholder="这个配置服务什么业务、负责人是谁"
             />
           </label>
+          <SiteScreenshotAttachments
+            :site-id="editorMode === 'edit' ? form.id : ''"
+            :editable="store.canOperate && editorMode === 'edit' && !editingSiteBusy"
+            :refresh-token="attachmentRefreshToken"
+            @changed="refreshAttachmentsFor"
+          />
           <label>
             <span>本次变更说明</span>
             <NInput
