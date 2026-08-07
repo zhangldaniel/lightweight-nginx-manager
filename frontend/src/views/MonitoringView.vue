@@ -28,10 +28,15 @@ const refreshingSummary = ref(false)
 const historyError = ref('')
 const summaryError = ref('')
 const history = ref<Array<{ sampled_at: string; metrics: Record<string, unknown> }>>([])
+const AUTO_REFRESH_MS = 5_000
+const refreshCountdownSeconds = ref(AUTO_REFRESH_MS / 1_000)
+const autoRefreshPaused = ref(false)
 let refreshTimer: number | undefined
+let countdownTimer: number | undefined
+let nextRefreshAt = 0
 let summaryRequest = 0
 let historyRequest = 0
-let autoRefreshInFlight = false
+let refreshCycleInFlight = false
 let monitoringActive = false
 
 const selectedSummary = computed(
@@ -82,8 +87,13 @@ const rangeLabel = computed(() => {
   return '最近 24 小时 · 分钟采样'
 })
 const monitoringDescription = computed(() => pureLvsNode.value
-  ? '宿主机资源与 IPVS；页面每 20 秒自动更新。'
-  : '宿主机资源与 Nginx Stub Status；页面每 20 秒自动更新。')
+  ? '宿主机资源与 IPVS；页面每 5 秒自动刷新。'
+  : '宿主机资源与 Nginx Stub Status；页面每 5 秒自动刷新。')
+const refreshStatusLabel = computed(() => {
+  if (autoRefreshPaused.value) return '页面隐藏，已暂停'
+  if (refreshingSummary.value || loadingHistory.value) return '正在刷新'
+  return `${refreshCountdownSeconds.value} 秒后刷新`
+})
 const healthSummary = computed(() => {
   const reasons = selectedSummary.value?.health.reasons || []
   if (reasons.length) return reasons.join('；')
@@ -223,26 +233,71 @@ async function loadHistory(quiet = false) {
   }
 }
 
-async function refreshNow() {
-  await refreshSummary()
-  await loadHistory()
+async function runRefreshCycle(quiet = false) {
+  if (!monitoringActive || refreshCycleInFlight) return
+  refreshCycleInFlight = true
+  try {
+    await refreshSummary(quiet)
+    if (monitoringActive) await loadHistory(quiet)
+  } finally {
+    refreshCycleInFlight = false
+  }
+}
+
+function clearRefreshTimers() {
+  if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+  if (countdownTimer !== undefined) window.clearInterval(countdownTimer)
+  refreshTimer = undefined
+  countdownTimer = undefined
+}
+
+function updateRefreshCountdown() {
+  refreshCountdownSeconds.value = Math.max(0, Math.ceil((nextRefreshAt - Date.now()) / 1_000))
 }
 
 function scheduleRefresh() {
-  if (!monitoringActive) return
-  if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+  clearRefreshTimers()
+  if (!monitoringActive || document.hidden) {
+    autoRefreshPaused.value = document.hidden
+    return
+  }
+
+  autoRefreshPaused.value = false
+  nextRefreshAt = Date.now() + AUTO_REFRESH_MS
+  updateRefreshCountdown()
+  countdownTimer = window.setInterval(updateRefreshCountdown, 1_000)
   refreshTimer = window.setTimeout(async () => {
-    if (monitoringActive && !document.hidden && !autoRefreshInFlight) {
-      autoRefreshInFlight = true
-      try {
-        await refreshSummary(true)
-        if (monitoringActive) await loadHistory(true)
-      } finally {
-        autoRefreshInFlight = false
-      }
+    clearRefreshTimers()
+    if (!monitoringActive || document.hidden) {
+      autoRefreshPaused.value = document.hidden
+      return
     }
-    if (monitoringActive) scheduleRefresh()
-  }, 20_000)
+    await runRefreshCycle(true)
+    if (monitoringActive && !document.hidden) scheduleRefresh()
+  }, AUTO_REFRESH_MS)
+}
+
+async function refreshNow() {
+  if (refreshCycleInFlight) return
+  clearRefreshTimers()
+  await runRefreshCycle()
+  if (monitoringActive && !document.hidden) scheduleRefresh()
+}
+
+function handleVisibilityChange() {
+  if (!monitoringActive) return
+  if (document.hidden) {
+    autoRefreshPaused.value = true
+    clearRefreshTimers()
+    return
+  }
+
+  autoRefreshPaused.value = false
+  clearRefreshTimers()
+  void (async () => {
+    await runRefreshCycle(true)
+    if (monitoringActive && !document.hidden) scheduleRefresh()
+  })()
 }
 
 watch([selectedNodeId, rangeSeconds], () => {
@@ -252,8 +307,9 @@ watch([selectedNodeId, rangeSeconds], () => {
 
 onMounted(async () => {
   monitoringActive = true
-  await refreshSummary()
-  await loadHistory()
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  autoRefreshPaused.value = document.hidden
+  if (!document.hidden) await runRefreshCycle()
   scheduleRefresh()
 })
 
@@ -261,7 +317,8 @@ onBeforeUnmount(() => {
   monitoringActive = false
   summaryRequest += 1
   historyRequest += 1
-  if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+  clearRefreshTimers()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>
 
@@ -269,6 +326,17 @@ onBeforeUnmount(() => {
   <section class="page page-monitoring">
     <PageHeader title="运行监控" :description="monitoringDescription">
       <div class="monitor-toolbar" aria-label="监控筛选">
+        <div
+          class="monitor-auto-refresh"
+          :data-paused="autoRefreshPaused ? 'true' : 'false'"
+          aria-live="polite"
+        >
+          <span class="monitor-auto-dot" aria-hidden="true"></span>
+          <span>
+            <strong>每 5 秒自动刷新</strong>
+            <small>{{ refreshStatusLabel }}</small>
+          </span>
+        </div>
         <label class="monitor-filter">
           <span>观察节点</span>
           <NSelect
@@ -337,7 +405,7 @@ onBeforeUnmount(() => {
           <div class="monitor-freshness">
             <span>最近采样</span>
             <strong>{{ relativeTime(selectedSummary.sampled_at) }}</strong>
-            <small>20 秒自动更新</small>
+            <small>{{ refreshStatusLabel }}</small>
           </div>
         </div>
       </section>
@@ -408,7 +476,7 @@ onBeforeUnmount(() => {
             <p>{{ rangeLabel }}</p>
           </div>
           <div class="monitor-trend-status" aria-live="polite">
-            <span>20 秒自动刷新</span>
+            <span>每 5 秒自动刷新 · {{ refreshStatusLabel }}</span>
             <StatusTag
               :label="loadingHistory ? '正在刷新' : historyError ? '刷新失败' : `${history.length} 个采样点`"
               :tone="historyError ? 'danger' : loadingHistory ? 'info' : 'neutral'"
@@ -507,7 +575,7 @@ onBeforeUnmount(() => {
               <span><Network :size="18" /></span>
               <div><strong>IPVS 观测</strong><small>内核运行表</small></div>
             </header>
-            <p class="data-card-note">
+            <p class="data-card-note data-card-note--neutral">
               运行表是观测事实，不代表成员健康。
             </p>
             <dl>

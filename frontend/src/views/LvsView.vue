@@ -153,13 +153,13 @@ function managedEntries(group: LvsVirtualServiceGroup | null) {
 function managementMeta(group: LvsVirtualServiceGroup) {
   const entries = managedEntries(group)
   if (!listenerForGroup(group)) return { label: '外部格式·只读', tone: 'neutral' as Tone, managed: false }
-  if (!entries.length) return { label: '外部配置·只读', tone: 'neutral' as Tone, managed: false }
+  if (!entries.length) return { label: '仅观测·只读', tone: 'info' as Tone, managed: false }
   if (entries.length !== group.snapshots.length) return { label: '部分接管', tone: 'warning' as Tone, managed: false }
   if (entries.some(({ service }) => !lvsServiceEditable(service))) {
     return { label: '含不支持指令·只读', tone: 'warning' as Tone, managed: false }
   }
   if (entries.some(({ service }) => service.origin !== 'managed')) {
-    return { label: '现有配置·待接管', tone: 'warning' as Tone, managed: false }
+    return { label: '外部配置', tone: 'info' as Tone, managed: false }
   }
   const hashes = new Set(entries.map(({ service }) => JSON.stringify(service)))
   if (hashes.size > 1) return { label: '托管配置漂移', tone: 'danger' as Tone, managed: false }
@@ -325,8 +325,8 @@ const detailMembers = computed(() => selectedGroup.value
 function stateMeta(state: string): { label: string; tone: Tone } {
   if (state === 'drift') return { label: '配置漂移', tone: 'danger' }
   if (state === 'disabled') return { label: '已停用', tone: 'warning' }
-  if (state === 'partial') return { label: '部分数据', tone: 'warning' }
-  return { label: '已观测', tone: 'success' }
+  if (state === 'partial') return { label: '观测不完整', tone: 'info' }
+  return { label: '已观测', tone: 'info' }
 }
 
 function forwardingLabel(value: string) {
@@ -1371,8 +1371,8 @@ async function refresh() {
 .lvs-detail-header h2 { margin-top:3px; overflow-wrap:anywhere; font-size:22px; }
 .lvs-detail-header p { color:var(--text-3); font-size:12px; }
 .detail-statuses { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:5px; }
-.takeover-banner { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--line); background:var(--amber-soft); }
-.takeover-banner > svg { color:var(--amber); }
+.takeover-banner { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid var(--line); background:var(--surface-soft); }
+.takeover-banner > svg { color:var(--text-3); }
 .takeover-banner div { display:grid; gap:2px; }
 .takeover-banner span { color:var(--text-2); font-size:10px; line-height:1.4; }
 .lvs-actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:12px 16px; border-bottom:1px solid var(--line); }

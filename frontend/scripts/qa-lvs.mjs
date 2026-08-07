@@ -69,7 +69,7 @@ try {
     'Pool Members',
     '新增 Virtual Service',
     '接管暂不可用',
-    '现有配置·待接管',
+    '外部配置',
     '接管会先展示权威差异',
     '管理 / 运行',
     '192.0.2.110:443',
@@ -82,11 +82,43 @@ try {
   for (const text of required) {
     if (!visibleHtml.includes(text)) throw new Error(`LVS page is missing: ${text}`)
   }
+
+  const renderedStatusTags = [...visibleHtml.matchAll(/<span\b([^>]*)>([\s\S]*?)<\/span>/gi)]
+    .filter(([, attributes]) => /\bstatus-tag\b/.test(attributes))
+    .map(([, attributes, body]) => ({
+      label: body.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim(),
+      tone: attributes.match(/\bdata-tone="([^"]+)"/)?.[1] || '',
+    }))
+  const tonesFor = (label) => renderedStatusTags
+    .filter((tag) => tag.label === label)
+    .map((tag) => tag.tone)
+  const assertInformationalTone = (label) => {
+    const tones = tonesFor(label)
+    if (!tones.length) throw new Error(`LVS status semantic fixture is missing: ${label}`)
+    if (tones.some((tone) => !['neutral', 'info'].includes(tone))) {
+      throw new Error(`${label} is informational, but rendered with attention tone(s): ${tones.join(', ')}`)
+    }
+  }
+  assertInformationalTone('外部配置')
+  assertInformationalTone('已观测')
+
   const [apiSource, viewSource, utilitySource] = await Promise.all([
     readFile(resolve(projectRoot, 'src/api.ts'), 'utf8'),
     readFile(resolve(projectRoot, 'src/views/LvsView.vue'), 'utf8'),
     readFile(resolve(projectRoot, 'src/utils/ipvs.ts'), 'utf8'),
   ])
+  const informationalStateContract = [
+    "if (state === 'partial') return { label: '观测不完整', tone: 'info' }",
+    "return { label: '已观测', tone: 'info' }",
+  ]
+  for (const token of informationalStateContract) {
+    if (!viewSource.includes(token)) throw new Error(`LVS UI is missing informational observation state: ${token}`)
+  }
+  for (const obsoleteLabel of ['现有配置·待接管', '部分数据']) {
+    if (viewSource.includes(obsoleteLabel) || visibleHtml.includes(obsoleteLabel)) {
+      throw new Error(`LVS UI still exposes ambiguous warning copy: ${obsoleteLabel}`)
+    }
+  }
   const safePlanContract = [
     '/api/v1/admin/lvs/plans',
     'jsonBody({ node_ids: nodeIds, intent, adopt_existing: adoptExisting })',
@@ -128,6 +160,9 @@ try {
   ]
   for (const token of safeInteractionContract) {
     if (!viewSource.includes(token)) throw new Error(`LVS UI is missing safe workflow token: ${token}`)
+  }
+  if (!/state === 'partial'[\s\S]{0,100}tone:\s*'(?:neutral|info)'/.test(viewSource)) {
+    throw new Error('Partial LVS observation must remain visible without using the warning attention tone')
   }
   for (const token of ['buildLvsSemanticDiff', 'lvsPlanSemanticDiff', 'lvsServiceEditable']) {
     if (!utilitySource.includes(token)) throw new Error(`LVS safety utility is missing: ${token}`)

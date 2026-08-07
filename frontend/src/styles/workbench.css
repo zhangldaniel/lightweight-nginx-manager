@@ -2603,6 +2603,48 @@ body:has(.site-editor-modal) .toast-host {
   align-items: flex-end;
 }
 
+.page-monitoring .monitor-auto-refresh {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border: 1px solid #dbe5e1;
+  border-radius: 4px;
+  background: #f8fbfa;
+  color: var(--text);
+}
+
+.page-monitoring .monitor-auto-refresh > span:last-child {
+  display: grid;
+  gap: 1px;
+  white-space: nowrap;
+}
+
+.page-monitoring .monitor-auto-refresh strong {
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.page-monitoring .monitor-auto-refresh small {
+  color: var(--monitor-muted);
+  font-size: 9px;
+}
+
+.page-monitoring .monitor-auto-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 12%, white);
+}
+
+.page-monitoring .monitor-auto-refresh[data-paused='true'] .monitor-auto-dot {
+  background: #8a9792;
+  box-shadow: none;
+}
+
 .page-monitoring .monitor-filter {
   display: grid;
   gap: 4px;
@@ -3034,6 +3076,12 @@ body:has(.site-editor-modal) .toast-host {
   font-size: 9px;
 }
 
+.page-monitoring .data-card-note--neutral {
+  border-left-color: #9eaaa5;
+  background: #f4f7f6;
+  color: var(--monitor-muted);
+}
+
 .page-monitoring .filesystem-card {
   border-top: 1px solid var(--line);
   border-right: 0;
@@ -3167,6 +3215,7 @@ body:has(.site-editor-modal) .toast-host {
 
 @media (max-width: 760px) {
   .page-monitoring .monitor-toolbar,
+  .page-monitoring .monitor-auto-refresh,
   .page-monitoring .monitor-filter,
   .page-monitoring .monitor-node-select,
   .page-monitoring .range-select,
