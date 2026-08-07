@@ -1,57 +1,80 @@
+<div align="center">
+
 # Nginx Steward
 
-一个自己部署的多节点 Nginx 管理台。你可以在 Web 页面管理 HTTP/Stream 配置、TLS 证书、实时日志和运行状态。
+**轻量、自托管的 Nginx / Keepalived / LVS 管理台**
 
-每台 Nginx 主机安装一个主动连接 Server 的 Agent。Agent 只执行内置运维动作，不提供任意 Shell 入口。
+从一个 Web 页面管理多台 Linux 节点的配置、证书、日志与运行状态。
 
-界面统一使用 [IBM Plex Sans SC](frontend/public/ui-assets/IBMPlexSansSC-LICENSE.txt)，配置与日志使用 JetBrains Mono。字体随 Server 同源提供，内网环境也能正常显示。
+[![Self Hosted](https://img.shields.io/badge/部署方式-自托管-0f766e)](#-快速开始)
+[![Linux Agent](https://img.shields.io/badge/Agent-Linux-111827)](agent/README.md)
+[![No Shell](https://img.shields.io/badge/远程执行-固定动作-059669)](#安全边界)
+[![中文文档](https://img.shields.io/badge/文档-中文-2563eb)](#-文档)
 
-## 界面
+[功能](#-主要功能) · [快速开始](#-快速开始) · [节点类型](#-选择节点类型) · [升级与迁移](#-升级备份与迁移) · [文档](#-文档)
 
-![站点与配置](docs/images/console-overview.png?v=20260803-fonts)
+</div>
+
+![站点与配置](docs/images/console-overview.png)
+
+Nginx Steward 由一个控制端和多个 Agent 组成。Agent 从节点主动连接控制端，不需要开放入站端口，也不提供任意 Shell。每次发布都会在目标节点执行真实的配置校验；校验或 reload 失败时，Agent 会恢复原文件。
+
+## ✨ 主要功能
+
+### 配置与证书
+
+- 统一管理多节点 HTTP、Stream、主配置和多个配置目录
+- 导入已有配置，复制到其他节点，迁移目录，查看版本并回滚
+- 扫描节点证书，按原路径替换；扫描过程不会读取或上传私钥
+- 为配置补充备注和截图，截图随控制端数据一起备份
+
+### 安全发布
+
+- 发布前逐节点执行 `nginx -t`
+- 使用期望 Hash 防止覆盖节点上的新改动
+- 原子写入、reload、可选健康检查，失败自动恢复
+- Agent 只接受安装时登记的目录和固定动作
+
+### 日志与监控
+
+- 按需查看 Nginx 实时日志，日志只在内存中转发，不长期存入控制端
+- 查看 CPU、内存、网络、磁盘和 Nginx 进程状态
+- 可选接入 Nginx Stub Status；纯 LVS 节点显示宿主机与 IPVS 数据
+- 保留操作记录、任务结果和配置版本
+
+### 高可用与四层转发
+
+- 查看 Keepalived 主备角色、VIP 归属和双机拓扑
+- 观察 IPVS Virtual Service、后端节点和实时连接
+- 可选启用 LVS 管理，调整调度算法、转发模式、权重和 TCP 健康检查
+- 支持本地账号与 LDAP / AD，区分管理员、操作员和审计员
 
 | 运行监控 | 实时日志 |
 | --- | --- |
-| ![运行监控](docs/images/runtime-monitoring.png?v=20260803-fonts) | ![实时日志](docs/images/runtime-logs.png?v=20260803-fonts) |
+| ![运行监控](docs/images/runtime-monitoring.png) | ![实时日志](docs/images/runtime-logs.png) |
 
-## 功能
+## 🚀 快速开始
 
-- 管理多节点 HTTP、Stream 配置和多个配置目录
-- 配置备注可附带截图，随控制端数据一起备份和迁移
-- 导入现有配置，替换节点原路径中的证书
-- 查看实时日志、宿主机状态和 Nginx Stub Status
-- 查看 Keepalived 主备角色、VIP 归属和双机架构
-- 像轻量 F5 一样管理 LVS Virtual Service、后端池、权重和健康检查
-- 发布前执行真实 `nginx -t`，失败时恢复原文件
-- 支持本地账号、LDAP/AD、操作记录和版本回滚
+下面用 `192.0.2.20` 作为示例控制端地址。请换成你的服务器 IP 或域名。
 
-## 安装 Server
-
-下面的 HTTP 方式只适合隔离的可信内网：
+### 1. 安装控制端
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-server.sh | \
-sudo bash -s -- \
-  --host 192.0.2.20 \
-  --port 8443 \
-  --open-firewall
+sudo bash -s -- --host 192.0.2.20 --port 8443 --open-firewall
 ```
 
-打开 `http://192.0.2.20:8443`，使用 `admin` 登录。安装脚本会随机生成密码：
+打开 `http://192.0.2.20:8443`。账号是 `admin`，首次安装生成的随机密码保存在：
 
 ```bash
 sudo cat /root/nginx-manager-credentials.txt
 ```
 
-公网或跨不可信网络使用时，请在 Server 前配置 HTTPS 反向代理。LDAP 参数和其他选项可运行：
+> 上面的 HTTP 方式只适合隔离的可信管理网。跨网或生产环境请使用 HTTPS，并把 `main` 换成测试过的 40 位 commit。
 
-```bash
-sudo ./deploy/install-server.sh --help
-```
+### 2. 在 Nginx 节点安装 Agent
 
-## 安装 Agent
-
-系统路径中的 Nginx：
+系统路径中的 Nginx 通常只需：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
@@ -60,11 +83,7 @@ sudo bash -s -- \
   --node-name edge-a-01
 ```
 
-安装后去 Web 的“节点 Agent”批准接入，再导入配置和扫描证书。
-
-### `/apps/nginx`：常用短命令
-
-`--nginx-prefix /apps/nginx` 会自动带上常见的二进制、主配置、证书、日志和 `conf.d` 路径。证书目录优先使用已有的 `cert`，其次是 `certs`，都没有时创建 `cert`。`--manage-stream` 表示同一个 `conf.d` 目录内的 `*.stream` 也由平台管理。
+源码安装在 `/apps/nginx` 时：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
@@ -72,199 +91,50 @@ sudo bash -s -- \
   --server http://192.0.2.20:8443 \
   --node-name edge-a-01 \
   --nginx-prefix /apps/nginx \
-  --manage-stream \
-  --allow-plaintext-log-stream \
-  --allow-main-config-edit
+  --manage-stream
 ```
 
-`--allow-main-config-edit` 允许平台编辑 `nginx.conf`；不需要时删掉即可。HTTP 控制端的实时日志需要显式保留 `--allow-plaintext-log-stream`，HTTPS 控制端不受它影响。
+安装器会用 `nginx -T` 确认实际加载路径，不符合条件时会停止，不会直接接管目录。
 
-短命令适用于现有 `nginx.conf` 已加载 `conf/conf.d/*.conf` 的机器；安装器会用 `nginx -T` 实测，不满足时会停止且不接管目录。
+### 3. 批准节点
 
-### Stub Status（可选）
+登录 Web，打开 **节点 Agent**，批准待接入节点。随后即可导入现有配置、扫描证书并开始管理。
 
-先在节点上确认 URL 返回 `Active connections`，再把同一个 URL 加到安装命令中。URL 必须和 Nginx 的真实 `location` 完全一致；例如 Nginx-UI 常见配置是 `51820 + /stub_status`：
+## 🧭 选择节点类型
 
-```bash
-curl -fsS http://localhost:51820/stub_status
-# 输出中应包含：Active connections
-```
+| 你的机器 | Agent 方式 | 说明 |
+| --- | --- | --- |
+| 普通 Nginx | 默认 `nginx` | 配置、证书、日志和监控 |
+| Nginx + Keepalived | 默认 `nginx`，增加本机 IP 与 VIP | Keepalived 页面只读观察，不主动漂移 VIP |
+| Nginx + LVS | `--profile hybrid` | 同时保留 Nginx 与 IPVS 能力 |
+| 纯 LVS 主备 | `--profile lvs --lvs-topology vrrp` | 使用共同 VIP 的两台 Director |
+| 单机 LVS | `--profile lvs --lvs-topology standalone` | 没有 VRRP VIP，只管理本机 Virtual Service |
 
-```bash
---stub-status-url http://localhost:51820/stub_status
-```
+完整目录、Stub Status、Keepalived 和 LVS 参数见 [Agent 技术说明](agent/README.md)。运行安装器时加 `--help` 也可以查看全部选项。
 
-### 两台 Keepalived 高可用节点
+> LVS 管理覆盖常用四层转发，不是 F5 的完整替代品。它不管理 SSL 卸载、iRule、DNS / GTM 或任意 Keepalived 文本。
 
-只有高可用对中的两台机器才加这一段；普通独立节点不要加。下面用脱敏地址示例：`.108` 和 `.111` 是两台 Nginx，VIP 是 `.110`；`.198` 是独立节点，不带 Keepalived 参数。`--node-ip` 是 `--labels ha_ip=...` 的短写法。
+## ⬆️ 升级、备份与迁移
 
-```bash
-  --node-ip 192.0.2.108 \
-  --keepalived-vip 192.0.2.110
-```
-
-另一台只需换成本机 IP：
-
-```bash
-  --node-ip 192.0.2.111 \
-  --keepalived-vip 192.0.2.110
-```
-
-只给 `--keepalived-vip` 时，安装器默认读取 `/etc/keepalived/keepalived.conf`，默认服务为 `keepalived.service`。如果 Keepalived 放在自定义位置，再追加：
-
-```bash
---keepalived-binary /apps/keepalived/sbin/keepalived
-```
-
-高可用页面只读取真实 VIP 归属、Keepalived 状态和脱敏的 VRRP 摘要，不会修改配置、启停 Keepalived 或主动漂移 VIP。
-
-配置里用了 `vrrp_script` 时，先确认检查脚本及其父目录不能被非 root 用户写入，再在 `global_defs` 中显式加入 `script_user root` 和 `enable_script_security`。否则 Keepalived 服务可能仍在运行，但“校验配置”会按安全问题报错；平台不会替你忽略或自动改写这项策略。
-
-### 纯 LVS 调度节点
-
-只有 Keepalived/IPVS、没有 Nginx 的 Director 使用 `lvs` 模式。下面是有 VRRP VIP 的主备组：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
-sudo bash -s -- \
-  --profile lvs \
-  --lvs-topology vrrp \
-  --server http://192.0.2.20:8443 \
-  --node-name lvs-a-01 \
-  --node-ip 192.0.2.41 \
-  --keepalived-vip 192.0.2.40 \
-  --keepalived-config /etc/keepalived/keepalived.conf \
-  --keepalived-service keepalived.service \
-  --keepalived-binary /apps/keepalived/sbin/keepalived \
-  --enable-lvs-management
-```
-
-Keepalived 在系统路径时可以删掉 `--keepalived-binary`。`lvs` 模式会自动开启 IPVS 观测，不需要再写 `--enable-lvs-observer`。
-
-没有 VRRP VIP、只有一台 Director 时，使用明确的单机拓扑：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
-sudo bash -s -- \
-  --profile lvs \
-  --lvs-topology standalone \
-  --server http://192.0.2.20:8443 \
-  --node-name lvs-standalone-01 \
-  --node-ip 192.0.2.41 \
-  --keepalived-config /etc/keepalived/keepalived.conf \
-  --keepalived-service keepalived.service \
-  --enable-lvs-management
-```
-
-Standalone 不需要也不允许填写 `--keepalived-vip`。Web 中 Virtual Service 的地址必须已经是这台 Director 的本机地址，例如 `192.0.2.41:443`；平台不会伪造 VIP。这个模式没有主备漂移能力，而且首版要求 Keepalived 配置中不存在 `vrrp_instance`。如果以后增加第二台并使用 VIP，请重新按 `vrrp` 拓扑安装两台 Agent。
-
-启用管理后，Web 可以新增、修改和删除 Virtual Service，调整调度算法、DR/NAT/TUN、会话保持、Pool Member、权重、启停状态和 TCP 健康检查。默认托管文件是 Keepalived 配置目录下的 `nginx-manager.d/50-lvs-managed.conf`，安装器会自动接入并先做配置校验。
-
-这是面向常用四层流量调度的“轻量 F5”工作台，不是 F5 全功能替代品。现阶段不管理 SSL 卸载、iRule、DNS/GTM 或任意 Keepalived 指令；接管已有服务和删除服务仅管理员可以操作。
-
-同一个 VRRP 组里的 Director 都要安装 Agent，并分别填写本机 `--node-ip` 和共同的 `--keepalived-vip`。控制端会核对 VIP、VRID、MASTER/BACKUP 角色、已登记成员和 unicast peer；漏选一台、角色异常或摘要不完整时不会生成发布计划。
-
-每次发布都先生成可确认的逐节点差异，再按 BACKUP 到 MASTER 串行执行；Agent 会校验 Keepalived、reload、核对 `/proc/net/ip_vs`，失败则恢复本机原文件。Web 不会下发 Shell、`ipvsadm` 命令、任意文件路径或原始 Keepalived 文本。
-
-跨 Director 发布不是分布式事务。如果前一台成功、后一台失败，页面会保留失败阶段和回滚状态；下一次计划允许只修复未收敛的目标 Virtual Service，但其他配置存在漂移时仍会拒绝发布。
-
-已有 `virtual_server` 只有在指令都受支持时才能接管；不认识的高级指令会让该服务保持只读。接管会把目标块从原文件迁入平台托管文件，并规范化块内格式；块内注释可能变化，但 VRRP、认证和其他配置块不会被改写。正式接管前先核对 Web 给出的逐节点差异。
-
-只想观察、不允许 Web 修改时，不写 `--enable-lvs-management`，改用：
-
-```bash
---enable-lvs-observer
-```
-
-如果 `/proc/net/ip_vs` 不存在，页面会显示“IPVS 未加载”；安装器不会替你加载内核模块。
-
-### 已装 Agent：只升级程序
-
-日常升级不必重打一长串参数，单独执行 `--upgrade` 会保留原来的配置、身份和 systemd 服务：
+| 操作 | 做法 |
+| --- | --- |
+| 更新 Server | 重新运行原来的 Server 安装命令 |
+| 更新 Agent | 运行下面的 `--upgrade` 命令 |
+| 备份控制端 | 运行下面的一键备份命令 |
+| 迁移到容器 | 运行 `migrate-server-to-container.sh`，详见[容器迁移](docs/container-migration.md) |
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/install-agent.sh | \
 sudo bash -s -- --upgrade
 ```
 
-它只更新程序文件。要改节点模式、节点名、目录、日志、Stub Status、Keepalived、LVS 管理或 systemd 权限，仍需重新运行完整安装命令。
-
-首次安装成功时，末尾一定会显示“部署完成”和“去 Web 批准接入”。只看到依赖安装或 HTTP 警告不算完成，可先运行下面两条确认服务是否已经生成：
+`--upgrade` 只更新 Agent 程序，并保留身份、路径和 systemd 配置。需要修改节点名、目录、Stub Status 或 LVS 能力时，请重新运行完整安装命令。
 
 ```bash
-systemctl status nginx-manager-agent nginx-manager-agent-helper
-journalctl -u nginx-manager-agent -n 100 --no-pager
+curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/deploy/backup-server.sh | sudo bash
 ```
 
-### 已有身份、改名与重复节点
-
-已经装过 Agent 的机器会保留本机身份；单纯改 `--node-name` **不会**自动新增或改名。需要纠正重名、重新命名或重新接入时，在完整安装命令末尾加 `--force-enroll`，然后去 Web 批准新的接入申请。
-
-`--node-name` 在同一个 Server 中必须唯一。不要让两台机器复用同名，否则后接入的机器可能替换原节点身份。已经错绑时，先让占错名字的机器用自己的正确名称 `--force-enroll` 并批准，再让原机器用原名称 `--force-enroll` 并批准；一次处理一台。
-
-### 写多行命令时的一个坑
-
-反斜杠 `\` 必须是每一行的最后一个字符，后面不能有空格、字母或其他参数；否则下一行不会被当成同一条命令。
-
-### 高级：自定义目录
-
-默认没有覆盖到你的目录时再用这些参数。目录参数可重复写多次：
-
-```bash
---nginx-binary /绝对路径/nginx \
---nginx-root /绝对路径 \
---nginx-config /绝对路径/nginx.conf \
---managed-config-dir /绝对路径/conf.d \
---managed-stream-dir /绝对路径/stream.d \
---managed-cert-dir /绝对路径/cert \
---nginx-log-dir /绝对路径/logs
-```
-
-## 配置目录
-
-`--managed-config-dir` 和 `--managed-stream-dir` 都能重复填写。HTTP 文件使用 `*.conf`，Stream 文件使用 `*.stream`。
-
-Agent 会通过 `nginx -T` 确认 Nginx 已加载这些目录。平台只管理登记目录最外层的文件，也不会接管符号链接目录。
-
-主配置 `nginx.conf` 默认只读。需要从平台编辑时，重新安装 Agent 并添加：
-
-```bash
---allow-main-config-edit
-```
-
-主配置仍不能删除。所有发布都会执行 `nginx -t`，校验或 reload 失败时恢复原文件。
-
-## 迁移到容器（可选）
-
-控制端以后想从 systemd 切到 Docker Compose，安装好 Docker 后运行：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/migrate-server-to-container.sh | sudo bash
-```
-
-脚本会保留账号、站点、截图和 Agent 身份；容器未通过健康检查时会自动恢复原服务。跨机器迁移和手动回滚见[容器迁移说明](docs/container-migration.md)。
-
-## 升级与检查
-
-先升级 Server，再执行 Agent 的 `--upgrade`，最后在浏览器按 `Ctrl+F5`。
-
-```bash
-# Server
-systemctl status nginx-manager
-journalctl -u nginx-manager -f
-
-# Agent
-systemctl status nginx-manager-agent nginx-manager-agent-helper
-journalctl -u nginx-manager-agent -f
-```
-
-生产环境建议固定测试过的 commit，并在升级前备份：
-
-```bash
-sudo ./deploy/backup-server.sh
-```
-
-## 卸载
+## 🗑️ 卸载
 
 ```bash
 # Server
@@ -274,6 +144,19 @@ curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-mana
 curl -fsSL https://raw.githubusercontent.com/zhangldaniel/lightweight-nginx-manager/main/uninstall-agent.sh | sudo bash
 ```
 
-卸载默认保留数据和 Agent 身份。确认不再使用时，为卸载脚本添加 `--purge`。
+卸载默认保留控制端数据和 Agent 身份。确认不再使用时再添加 `--purge`。卸载 Agent 不会删除已经发布的 Nginx 配置和证书。
 
-> HTTP 会明文传输登录会话、Agent 身份和任务内容，只能用于隔离的可信网络。
+## 📚 文档
+
+| 文档 | 适合什么时候看 |
+| --- | --- |
+| [Agent 技术说明](agent/README.md) | 自定义目录、日志、Stub Status、Keepalived、LVS 与身份模型 |
+| [控制端技术说明](server/README.md) | 登录、LDAP / AD、权限、API 与运行参数 |
+| [容器迁移](docs/container-migration.md) | 从 systemd 迁到 Docker Compose，或迁到另一台机器 |
+
+## 安全边界
+
+- Agent 主动连接控制端，不监听公网端口，也不接受任意命令。
+- 实时日志仅允许读取安装时登记的 `*.log`，内容不写入控制端数据库。
+- 证书扫描只回传元数据、路径和 Hash。替换时私钥只存在于短生命周期任务中，任务完成或过期后会从记录中清除。
+- HTTP 会明文传输登录会话、Agent 身份和任务内容，只能用于可信内网；其他环境请使用 HTTPS。
