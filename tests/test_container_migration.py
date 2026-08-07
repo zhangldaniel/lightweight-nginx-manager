@@ -50,6 +50,14 @@ class ContainerMigrationContractTests(unittest.TestCase):
         self.assertIn("trap 'exit 129' HUP", restore)
         self.assertIn("SWAP_STARTED=1", restore)
         self.assertIn("RESTORE_COMMITTED=1", restore)
+        self.assertIn(
+            'DATA_INSTALLED=1\nif ! mv -- "${STAGED_DATA}" "${DATA_DIR}"',
+            restore,
+        )
+        self.assertIn(
+            'ETC_INSTALLED=1\nif ! mv -- "${STAGED_ETC}" "${ETC_DIR}"',
+            restore,
+        )
         self.assertIn('rollback_path "${ETC_DIR}"', restore)
         self.assertIn('rollback_path "${DATA_DIR}"', restore)
         self.assertIn('python3 - "${db_path}"', migration)

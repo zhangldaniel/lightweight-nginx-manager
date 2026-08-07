@@ -205,17 +205,20 @@ PREVIOUS_ETC="/etc/.${APP_NAME}.previous.${timestamp}"
 
 SWAP_STARTED=1
 [[ ! -e "${DATA_DIR}" ]] || mv -- "${DATA_DIR}" "${PREVIOUS_DATA}"
+# Set the rollback state before the rename so an interrupt between the rename
+# and the next shell statement still removes the staged replacement.
+DATA_INSTALLED=1
 if ! mv -- "${STAGED_DATA}" "${DATA_DIR}"; then
   die "无法替换 ${DATA_DIR}"
 fi
-DATA_INSTALLED=1
 STAGED_DATA=""
 
 [[ ! -e "${ETC_DIR}" ]] || mv -- "${ETC_DIR}" "${PREVIOUS_ETC}"
+# Same ordering is required for /etc: signal traps can run between commands.
+ETC_INSTALLED=1
 if ! mv -- "${STAGED_ETC}" "${ETC_DIR}"; then
   die "无法替换 ${ETC_DIR}"
 fi
-ETC_INSTALLED=1
 STAGED_ETC=""
 RESTORE_COMMITTED=1
 
